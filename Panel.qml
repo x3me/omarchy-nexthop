@@ -49,11 +49,21 @@ Panel {
   property var live: null
   property var recent: null
 
+  // Every state file has a known small size; a file past its bound is not
+  // ours and is never parsed. live ~1 KB, apps ~8 KB, recent ~30 KB.
+  function parseBounded(raw, cap) {
+    if (!raw || raw.length > cap) return null
+    try { return JSON.parse(raw) } catch (e) { return null }
+  }
+
   FileView {
     path: root.stateDir + "/live.json"
     watchChanges: true
     printErrors: false
-    onLoaded: { try { root.live = JSON.parse(text()) } catch (e) {} }
+    onLoaded: {
+      var v = root.parseBounded(text(), 262144)
+      if (v !== null) root.live = v
+    }
     onFileChanged: reload()
   }
 
@@ -63,7 +73,10 @@ Panel {
     path: root.stateDir + "/apps.json"
     watchChanges: true
     printErrors: false
-    onLoaded: { try { root.appsData = JSON.parse(text()) } catch (e) {} }
+    onLoaded: {
+      var v = root.parseBounded(text(), 1048576)
+      if (v !== null) root.appsData = v
+    }
     onFileChanged: reload()
   }
 
@@ -71,7 +84,10 @@ Panel {
     path: root.stateDir + "/recent.json"
     watchChanges: true
     printErrors: false
-    onLoaded: { try { root.recent = JSON.parse(text()) } catch (e) {} }
+    onLoaded: {
+      var v = root.parseBounded(text(), 1048576)
+      if (v !== null) root.recent = v
+    }
     onFileChanged: reload()
   }
 

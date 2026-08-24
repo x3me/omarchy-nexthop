@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nexthopd import net, score  # noqa: E402
-from nexthopd.daemon import LinkWatch  # noqa: E402
+from nexthopd.daemon import Config, LinkWatch  # noqa: E402
 from nexthopd.apps import AppTraffic, parse_ss  # noqa: E402
 from nexthopd.probes import Series, PingProbe, RE_REPLY, RE_PENDING, RE_UNREACH  # noqa: E402
 from nexthopd.store import Store  # noqa: E402
@@ -313,6 +313,45 @@ class LinkEvents(unittest.TestCase):
         self.assertNotIn("roam", self.kinds())
 
 
+class ConfigValidation(unittest.TestCase):
+    def make(self, payload):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        cfg = Config(Path(d.name))
+        cfg.path.write_text(payload)
+        cfg.refresh()
+        return cfg
+
+    def test_out_of_range_values_fall_back_to_defaults(self):
+        cfg = self.make('{"throughputWindowS": 999999999, "probeIntervalMs": 1,'
+                        ' "historyDays": -5}')
+        self.assertEqual(cfg["throughputWindowS"], 3)
+        self.assertEqual(cfg["probeIntervalMs"], 500)
+        self.assertEqual(cfg["historyDays"], 7)
+
+    def test_wrong_types_rejected(self):
+        cfg = self.make('{"probeIntervalMs": "500", "contentSpeed": "yes",'
+                        ' "peakEngine": "evil"}')
+        self.assertEqual(cfg["probeIntervalMs"], 500)
+        self.assertEqual(cfg["contentSpeed"], True)
+        self.assertEqual(cfg["peakEngine"], "Auto")
+
+    def test_anchor_charset_enforced(self):
+        cfg = self.make('{"internetAnchor": "1.1.1.1; rm -rf /"}')
+        self.assertEqual(cfg["internetAnchor"], "1.1.1.1")
+        cfg2 = self.make('{"internetAnchor": "ping.example-host.net"}')
+        self.assertEqual(cfg2["internetAnchor"], "ping.example-host.net")
+
+    def test_oversized_file_ignored(self):
+        cfg = self.make('{"historyDays": 30, "pad": "' + 'x' * (70 * 1024) + '"}')
+        self.assertEqual(cfg["historyDays"], 7)
+
+    def test_valid_values_accepted(self):
+        cfg = self.make('{"throughputWindowS": 10, "planDownMbps": 450}')
+        self.assertEqual(cfg["throughputWindowS"], 10)
+        self.assertEqual(cfg["planDownMbps"], 450)
+
+
 class AppAttribution(unittest.TestCase):
     def fixture(self):
         return (FIXTURES / "ss-tinp.txt").read_text()
@@ -338,6 +377,17 @@ class AppAttribution(unittest.TestCase):
         self.assertAlmostEqual(by_name["chrome"]["rx_bps"], 2 * 3000 / 3, delta=1)
         self.assertEqual(by_name["chrome"]["conns"], 2)
         self.assertEqual(by_name["slack"]["rx_total"], 3000)
+
+    def test_socket_cap_bounds_parsing(self):
+        # Thousands of distinct sockets parse to at most the cap.
+        lines = []
+        for i in range(3000):
+            lines.append(
+                'ESTAB 0 0 192.0.2.10:%d 198.51.100.7:443 '
+                'users:(("app%d",pid=%d,fd=4))' % (10000 + i, i % 7, 100 + i))
+            lines.append('\t cubic bytes_sent:100 bytes_received:200')
+        socks = parse_ss("\n".join(lines), max_sockets=50)
+        self.assertEqual(len(socks), 50)
 
     def test_new_socket_counts_whole_life(self):
         t = AppTraffic()

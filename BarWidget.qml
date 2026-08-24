@@ -30,6 +30,8 @@ BarWidget {
   }
 
   function applyLive(raw) {
+    // live.json is ~1 KB; a larger file is not the daemon's and is ignored.
+    if (!raw || raw.length > 262144) return
     try { root.live = JSON.parse(raw) } catch (e) { /* mid-rotation; keep last */ }
   }
 

@@ -44,7 +44,9 @@ Item {
     path: root.pluginDir + "/manifest.json"
     printErrors: false
     onLoaded: {
-      try { root.manifestVersion = JSON.parse(text()).version || "" } catch (e) {}
+      var raw = text()
+      if (!raw || raw.length > 262144) return
+      try { root.manifestVersion = String(JSON.parse(raw).version || "") } catch (e) {}
     }
   }
 
@@ -58,21 +60,37 @@ Item {
 
   function checkDaemonVersion(raw) {
     if (manifestVersion === "") return
+    // live.json is a ~1 KB file the daemon rewrites atomically; anything
+    // larger is not ours and is not parsed.
+    if (!raw || raw.length > 262144) return
     var live
     try { live = JSON.parse(raw) } catch (e) { return }
-    var pid = Number(live.pid)
+    var pid = Math.floor(Number(live.pid))
     if (!isFinite(pid) || pid <= 0) return
-    var daemonVersion = live.daemon_version || ""
+    var startTicks = Math.floor(Number(live.pid_start))
+    if (!isFinite(startTicks) || startTicks <= 0) startTicks = 0
+    var daemonVersion = String(live.daemon_version || "")
     if (daemonVersion === manifestVersion) return
     // Retire each stale pid once — if the respawn comes back stale too,
     // something else is wrong and looping SIGTERMs will not fix it.
     if (pid === lastRetiredPid) return
     lastRetiredPid = pid
-    // Only signal a process that really is nexthopd: pids get reused, and
-    // a stale live.json must never become a kill of an innocent process.
+    // Authorize the signal on the process's full identity, not a name
+    // fragment: it must belong to this user (-O), its cmdline must be
+    // exactly a python interpreter running `-m nexthopd`, and its start
+    // time must match the one the daemon published — a recycled pid can
+    // share a number, never a start time.
     retireProc.command = ["sh", "-c",
-      "grep -qa nexthopd /proc/" + pid + "/cmdline 2>/dev/null && kill " + pid
-      + " || true"]
+      'pid="$1"; want_start="$2"; ' +
+      '[ -O "/proc/$pid" ] || exit 0; ' +
+      'cmd=$(tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null); ' +
+      'case "$cmd" in *python*" -m nexthopd "*|*python*" -m nexthopd") ;; *) exit 0;; esac; ' +
+      'if [ "$want_start" != "0" ]; then ' +
+      'start=$(awk "{print \$(NF-30)}" /dev/null 2>/dev/null; ' +
+      'start=$(sed -e "s/^.*) //" "/proc/$pid/stat" 2>/dev/null | awk "{print \$20}"); ' +
+      '[ "$start" = "$want_start" ] || exit 0; fi; ' +
+      'kill "$pid" 2>/dev/null || true',
+      "sh", String(pid), String(startTicks)]
     retireProc.running = true
     respawnTimer.restart()
   }

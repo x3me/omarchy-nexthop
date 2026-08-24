@@ -14,8 +14,18 @@ def state_dir() -> Path:
 
 
 def ensure_state_dir() -> Path:
+    """Create the state dir, private to the user (0700).
+
+    The files inside carry the daemon's pid and the version string the
+    shell service uses to authorize a SIGTERM — nothing another account
+    has any business reading, let alone writing.
+    """
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
     return d
 
 

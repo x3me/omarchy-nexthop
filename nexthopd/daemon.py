@@ -9,6 +9,7 @@ either side can restart without the other noticing.
 import fcntl
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -25,6 +26,24 @@ from .store import Store
 # eight of them is four seconds — long enough to skip a Wi-Fi roam, short
 # enough that the notification still feels immediate.
 OUTAGE_AFTER_LOSSES = 8
+
+
+def proc_start_ticks(pid):
+    """The process start time in clock ticks, from /proc/<pid>/stat.
+
+    Together with the pid it forms a start identity: pids are recycled,
+    but a recycled pid never reproduces the same start time. The shell
+    service checks this before it will signal anything.
+    """
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            data = f.read(4096)
+        # Field 22, counted after the parenthesised comm (which may itself
+        # contain spaces and parentheses).
+        rest = data[data.rindex(b")") + 2:].split()
+        return int(rest[19])
+    except (OSError, ValueError, IndexError):
+        return None
 # A disruption that self-heals in under this is recorded but not notified.
 NOTIFY_AFTER_S = 5.0
 
@@ -32,22 +51,47 @@ NOTIFY_AFTER_S = 5.0
 class Config:
     """Settings, read from the file the QML side writes.
 
-    The plugin writes its settings dict here on change; the daemon re-reads
-    it once a loop. Defaults match manifest.json.
+    Every value is validated against the same ranges the manifest schema
+    promises, and the file itself has a size cap — a config the daemon
+    cannot trust in full is a config it ignores in full. Nothing read
+    here can grow retained state beyond its documented bounds.
     """
 
-    DEFAULTS = {
-        "internetAnchor": "1.1.1.1",
-        "probeIntervalMs": 500,
-        "contentSpeed": True,
-        "contentSpeedIntervalMin": 60,
-        "peakEngine": "Auto",
-        "planDownMbps": 0,
-        "planUpMbps": 0,
-        "notifyOutage": True,
-        "historyDays": 7,
-        "throughputWindowS": 3,
+    MAX_BYTES = 64 * 1024
+    # key -> (default, validator). Ranges mirror manifest.json's schema.
+    ANCHOR_RE = re.compile(r"^[A-Za-z0-9.:\-]{1,253}$")
+
+    @staticmethod
+    def _int(lo, hi):
+        def check(v):
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return None
+            n = int(v)
+            return n if lo <= n <= hi else None
+        return check
+
+    @staticmethod
+    def _bool(v):
+        return v if isinstance(v, bool) else None
+
+    SCHEMA = {
+        "internetAnchor": ("1.1.1.1",
+                           lambda v: v if isinstance(v, str)
+                           and Config.ANCHOR_RE.match(v) else None),
+        "probeIntervalMs": (500, None),          # filled below
+        "contentSpeed": (True, None),
+        "contentSpeedIntervalMin": (60, None),
+        "peakEngine": ("Auto",
+                       lambda v: v if v in ("Auto", "Ookla", "Cloudflare",
+                                            "fast.com") else None),
+        "planDownMbps": (0, None),
+        "planUpMbps": (0, None),
+        "notifyOutage": (True, None),
+        "historyDays": (7, None),
+        "throughputWindowS": (3, None),
     }
+
+    DEFAULTS = {k: v[0] for k, v in SCHEMA.items()}
 
     def __init__(self, state_dir):
         self.path = state_dir / "config.json"
@@ -56,25 +100,44 @@ class Config:
 
     def refresh(self):
         try:
-            mtime = self.path.stat().st_mtime
+            st = self.path.stat()
         except OSError:
             return
-        if mtime == self._mtime:
+        if st.st_mtime == self._mtime:
             return
-        self._mtime = mtime
+        self._mtime = st.st_mtime
+        if st.st_size > self.MAX_BYTES:
+            return
         try:
             with open(self.path) as f:
                 loaded = json.load(f)
         except (OSError, ValueError):
             return
+        if not isinstance(loaded, dict):
+            return
         merged = dict(self.DEFAULTS)
-        for k in merged:
-            if k in loaded and loaded[k] is not None:
-                merged[k] = loaded[k]
+        for key, (default, validate) in self.SCHEMA.items():
+            if key not in loaded or loaded[key] is None:
+                continue
+            checked = validate(loaded[key]) if validate else None
+            if checked is not None:
+                merged[key] = checked
         self.values = merged
 
     def __getitem__(self, key):
         return self.values[key]
+
+
+# Range validators mirror the manifest schema exactly; a value outside its
+# documented range is discarded, never clamped — silence over surprise.
+Config.SCHEMA["probeIntervalMs"] = (500, Config._int(250, 5000))
+Config.SCHEMA["contentSpeed"] = (True, Config._bool)
+Config.SCHEMA["contentSpeedIntervalMin"] = (60, Config._int(15, 1440))
+Config.SCHEMA["planDownMbps"] = (0, Config._int(0, 10000))
+Config.SCHEMA["planUpMbps"] = (0, Config._int(0, 10000))
+Config.SCHEMA["notifyOutage"] = (True, Config._bool)
+Config.SCHEMA["historyDays"] = (7, Config._int(1, 90))
+Config.SCHEMA["throughputWindowS"] = (3, Config._int(1, 30))
 
 
 class LinkWatch:
@@ -310,11 +373,15 @@ class Daemon:
             self.counter_samples = []
             self.rates = (None, None)
             return
-        window = max(1, int(self.config["throughputWindowS"]))
+        window = max(1, min(30, int(self.config["throughputWindowS"])))
         self.counter_samples.append((now, c[0], c[1]))
         cutoff = now - window - 0.25
         while len(self.counter_samples) > 2 and self.counter_samples[0][0] < cutoff:
             self.counter_samples.pop(0)
+        # Hard cap independent of config: the window can never retain more
+        # than a minute of half-second samples, whatever the file says.
+        if len(self.counter_samples) > 128:
+            del self.counter_samples[:len(self.counter_samples) - 128]
         if len(self.counter_samples) >= 2:
             t0, rx0, tx0 = self.counter_samples[0]
             t1, rx1, tx1 = self.counter_samples[-1]
@@ -526,6 +593,7 @@ class Daemon:
             "down_since": self.watch_local.down_since or self.watch_wan.down_since,
             "peak_running": self.peak_running,
             "pid": os.getpid(),
+            "pid_start": proc_start_ticks(os.getpid()),
             "daemon_version": __version__,
         }
 

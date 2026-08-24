@@ -24,12 +24,13 @@ RE_SENT = re.compile(r"bytes_sent:(\d+)")
 RE_RECV = re.compile(r"bytes_received:(\d+)")
 
 
-def parse_ss(raw: str) -> dict:
+def parse_ss(raw: str, max_sockets: int = 10_000) -> dict:
     """{socket_key: (app, pid, sent, received)} from `ss -tinpH` output.
 
     Sockets are keyed by local/peer address pair plus pid, which survives
     across samples for the life of the connection. Sockets without process
-    attribution (other users' processes) are skipped.
+    attribution (other users' processes) are skipped, and parsing stops at
+    max_sockets so a pathological table cannot expand retained state.
     """
     out = {}
     addr = None
@@ -52,6 +53,8 @@ def parse_ss(raw: str) -> dict:
         sent = RE_SENT.search(line)
         recv = RE_RECV.search(line)
         if sent or recv:
+            if len(out) >= max_sockets:
+                break
             out[addr + "#" + str(pid)] = (
                 app, pid,
                 int(sent.group(1)) if sent else 0,
@@ -76,18 +79,33 @@ class AppTraffic:
         self.rates = []      # last interval's list, ready for apps.json
         self.history = {}    # app -> deque of [rx_bps, tx_bps]
 
+    # Enumeration bounds: a machine with an enormous socket table must not
+    # make the daemon allocate without limit every three seconds. 4 MB of
+    # `ss` output is roughly 8000 sockets — far past any laptop, and the
+    # cap degrades to "top apps among the first N sockets", not a crash.
+    MAX_SS_BYTES = 4 * 1024 * 1024
+    MAX_SOCKETS = 10_000
+
     def poll(self) -> bool:
         if not shutil.which("ss"):
             return False
         try:
-            r = subprocess.run(["ss", "-tinpH"], capture_output=True,
-                              text=True, timeout=5, check=False)
-        except (subprocess.TimeoutExpired, OSError):
+            proc = subprocess.Popen(["ss", "-tinpH"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True)
+        except OSError:
             return False
-        if r.returncode != 0:
+        try:
+            raw = proc.stdout.read(self.MAX_SS_BYTES)
+            if proc.stdout.read(1):
+                # More than the cap: stop reading and reap the process —
+                # the sample stays bounded and simply under-counts.
+                proc.terminate()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
             return False
         now = time.time()
-        cur = parse_ss(r.stdout)
+        cur = parse_ss(raw, max_sockets=self.MAX_SOCKETS)
         self._fold(cur, now)
         return True
 
