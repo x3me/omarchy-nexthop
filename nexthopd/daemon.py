@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import apps, net, score, speedtest
+from . import __version__, apps, net, score, speedtest
 from .paths import (ensure_state_dir, live_path, recent_path, db_path,
                     lock_path, state_dir)
 from .probes import Series, PingProbe
@@ -491,6 +491,7 @@ class Daemon:
             "down_since": self.watch_local.down_since or self.watch_wan.down_since,
             "peak_running": self.peak_running,
             "pid": os.getpid(),
+            "daemon_version": __version__,
         }
 
     def flush_recent(self, now: float):

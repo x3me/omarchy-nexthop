@@ -21,6 +21,75 @@ Item {
 
   property int failures: 0
 
+  // ---- update handover -----------------------------------------------------
+  //
+  // `omarchy plugin update` fast-forwards the checkout and the shell
+  // hot-reloads the QML, but a running daemon holds the flock and keeps
+  // executing the old code until something restarts it. So the daemon
+  // publishes its version in live.json, and this service compares it with
+  // the manifest on disk: mismatch means the code under our feet changed —
+  // retire the old daemon and let supervision (ours or systemd's) respawn
+  // it fresh. A daemon too old to publish a version is treated as stale,
+  // which is exactly right for the first update that ships this check.
+  property string manifestVersion: ""
+  property int lastRetiredPid: 0
+
+  readonly property string statePath: {
+    var base = Quickshell.env("XDG_STATE_HOME")
+    if (!base || base.length === 0) base = Quickshell.env("HOME") + "/.local/state"
+    return base + "/nexthop"
+  }
+
+  FileView {
+    path: root.pluginDir + "/manifest.json"
+    printErrors: false
+    onLoaded: {
+      try { root.manifestVersion = JSON.parse(text()).version || "" } catch (e) {}
+    }
+  }
+
+  FileView {
+    path: root.statePath + "/live.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.checkDaemonVersion(text())
+    onFileChanged: reload()
+  }
+
+  function checkDaemonVersion(raw) {
+    if (manifestVersion === "") return
+    var live
+    try { live = JSON.parse(raw) } catch (e) { return }
+    var pid = Number(live.pid)
+    if (!isFinite(pid) || pid <= 0) return
+    var daemonVersion = live.daemon_version || ""
+    if (daemonVersion === manifestVersion) return
+    // Retire each stale pid once — if the respawn comes back stale too,
+    // something else is wrong and looping SIGTERMs will not fix it.
+    if (pid === lastRetiredPid) return
+    lastRetiredPid = pid
+    // Only signal a process that really is nexthopd: pids get reused, and
+    // a stale live.json must never become a kill of an innocent process.
+    retireProc.command = ["sh", "-c",
+      "grep -qa nexthopd /proc/" + pid + "/cmdline 2>/dev/null && kill " + pid
+      + " || true"]
+    retireProc.running = true
+    respawnTimer.restart()
+  }
+
+  Process { id: retireProc }
+
+  // If the retired daemon was our child, onExited respawns it with backoff.
+  // If it belonged to a systemd unit or an earlier shell, nothing of ours
+  // exits — so also respawn on a timer; whoever loses the flock race exits
+  // cleanly, and either way exactly one fresh daemon survives.
+  Timer {
+    id: respawnTimer
+    interval: 2500
+    repeat: false
+    onTriggered: daemon.running = true
+  }
+
   Process {
     id: daemon
     command: ["sh", "-c",
