@@ -1,0 +1,183 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; background: #0e0e14; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7aa2f7; } a:hover { color: #b4bee6; }
+    .cap { font-size: 10px; letter-spacing: 0.12em; color: #565f89; }
+    .tab { flex-grow: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #a9b1d6; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4); }
+    .tabon { flex-grow: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #c0caf5; background: rgba(169,177,214,0.18); border: 1px solid transparent; }
+    .sep { height: 1px; background: rgba(169,177,214,0.12); }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; width: 560px; background: #1a1b26; border: 2px solid #7aa2f7; box-sizing: border-box; padding: 18px; color: #a9b1d6;">
+
+  <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;">
+    <div style="display: flex; align-items: flex-start; gap: 10px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9ece6a" stroke-width="1.6" stroke-linecap="round" style="margin-top: 2px;">
+        <path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5 12.2a10.5 10.5 0 0 1 14 0"></path><path d="M8.2 15.9a6 6 0 0 1 7.6 0"></path><circle cx="12" cy="19.3" r="1.1" fill="#9ece6a" stroke="none"></circle>
+      </svg>
+      <div style="display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 16px; font-weight: 700; color: #c0caf5;">Excitel</div>
+        <div class="cap" style="letter-spacing: 0.1em;">EXCELLENT &middot; ONLINE 4H 12M</div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1px;">
+      <div style="font-size: 30px; font-weight: 700; line-height: 1; color: #9ece6a;">94</div>
+      <div class="cap">EXPERIENCE</div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 6px; margin-top: 16px;">
+    <div class="tab">Overview</div><div class="tab">Latency</div><div class="tabon">Speed</div><div class="tab">Wi-Fi</div><div class="tab">Events</div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 14px 0;"></div>
+
+  <div class="cap" style="margin-bottom: 9px;">LIVE THROUGHPUT &middot; LAST 3 MIN</div>
+
+  <svg width="524" height="118" viewBox="0 0 524 118" style="display: block;">
+    <path d="{{c.rxArea}}" fill="rgba(122,162,247,0.20)"></path>
+    <path d="{{c.rxLine}}" fill="none" stroke="#7aa2f7" stroke-width="1.4" stroke-linejoin="round"></path>
+    <path d="{{c.txArea}}" fill="rgba(247,207,122,0.18)"></path>
+    <path d="{{c.txLine}}" fill="none" stroke="#f7cf7a" stroke-width="1.4" stroke-linejoin="round"></path>
+    <line x1="0" y1="59" x2="524" y2="59" stroke="rgba(169,177,214,0.22)" stroke-width="1"></line>
+  </svg>
+
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; margin-top: 14px;">
+    <div class="cap">RECEIVING</div>
+    <div class="cap">SENDING</div>
+    <div class="cap">DOWNLOADED</div>
+    <div class="cap">UPLOADED</div>
+    <div style="font-size: 15px; color: #7aa2f7; font-weight: 500;">4.0 <span style="font-size: 10px; color: #565f89;">MB/s</span></div>
+    <div style="font-size: 15px; color: #f7cf7a; font-weight: 500;">2.2 <span style="font-size: 10px; color: #565f89;">MB/s</span></div>
+    <div style="font-size: 15px; color: #c0caf5; font-weight: 500;">1.05 <span style="font-size: 10px; color: #565f89;">GB</span></div>
+    <div style="font-size: 15px; color: #c0caf5; font-weight: 500;">416 <span style="font-size: 10px; color: #565f89;">MB</span></div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 12px 0;"></div>
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px;">
+    <div class="cap">CONTENT SPEED &middot; FEEDS YOUR SCORE</div>
+    <div style="font-size: 10px; color: #565f89;">hourly &middot; ~15 MB per check</div>
+  </div>
+
+  <svg width="524" height="86" viewBox="0 0 524 86" style="display: block;">
+    <line x1="0" y1="21.5" x2="524" y2="21.5" stroke="rgba(169,177,214,0.07)"></line>
+    <line x1="0" y1="47.5" x2="524" y2="47.5" stroke="rgba(169,177,214,0.07)"></line>
+    <line x1="0" y1="73.5" x2="524" y2="73.5" stroke="rgba(169,177,214,0.16)"></line>
+    <sc-for list="{{c.tests}}" as="t" hint-placeholder-count="12">
+      <rect x="{{t.dx}}" y="{{t.dy}}" width="14" height="{{t.dh}}" fill="#7aa2f7"></rect>
+      <rect x="{{t.ux}}" y="{{t.uy}}" width="8" height="{{t.uh}}" fill="#f7cf7a"></rect>
+    </sc-for>
+  </svg>
+
+  <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px;">
+    <div style="display: flex; align-items: center; gap: 14px;">
+      <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 9px; height: 9px; background: #7aa2f7;"></div><div style="font-size: 10px; color: #565f89;">download</div></div>
+      <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 9px; height: 9px; background: #f7cf7a;"></div><div style="font-size: 10px; color: #565f89;">upload</div></div>
+    </div>
+    <div style="font-size: 10px; color: #565f89;">plan 450 / 50 Mbps</div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 12px 0;"></div>
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px;">
+    <div class="cap">PEAK SPEED &middot; LAST RUN 24 AUG 12:04</div>
+    <div style="font-size: 10px; color: #565f89;">informational, not scored</div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 24px;">
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Download</span><span style="font-size: 11px; color: #c0caf5;">412.3 Mbps</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Upload</span><span style="font-size: 11px; color: #c0caf5;">48.1 Mbps</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Idle ping</span><span style="font-size: 11px; color: #c0caf5;">9 ms</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Loaded ping</span><span style="font-size: 11px; color: #e0af68;">34 ms</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Jitter</span><span style="font-size: 11px; color: #c0caf5;">1.8 ms</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Data used</span><span style="font-size: 11px; color: #c0caf5;">287 MB</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Server</span><span style="font-size: 11px; color: #c0caf5;">Delhi &middot; 18 km</span></div>
+    <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 11px; color: #565f89;">Engine</span><span style="font-size: 11px; color: #c0caf5;">Ookla</span></div>
+  </div>
+
+  <div class="sep" style="margin: 14px 0 12px 0;"></div>
+
+  <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+    <div style="display: flex; flex-direction: column; gap: 5px;">
+      <div class="cap">PEAK TEST ENGINE</div>
+      <div style="display: flex; gap: 5px;">
+        <div style="height: 22px; padding: 0 10px; display: flex; align-items: center; font-size: 10px; color: #c0caf5; background: rgba(169,177,214,0.18);">Ookla</div>
+        <div style="height: 22px; padding: 0 10px; display: flex; align-items: center; font-size: 10px; color: #a9b1d6; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4);">Cloudflare</div>
+        <div style="height: 22px; padding: 0 10px; display: flex; align-items: center; font-size: 10px; color: #a9b1d6; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4);">fast.com</div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4); color: #c0caf5; font-size: 11px;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#c0caf5" stroke-width="1.6" stroke-linecap="round"><path d="M4 18a9 9 0 1 1 16 0"></path><path d="M12 14.5 16.5 9"></path></svg>
+      Run test
+    </div>
+  </div>
+
+  <div style="font-size: 10px; color: #565f89; margin-top: 11px; line-height: 1.6;">A peak test saturates the line and moves 200&ndash;400 MB, so it only ever runs when you ask for it. The hourly content check above is what keeps the score honest, at a thousandth of the data.</div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":560,"height":800}}'>
+class Component extends DCLogic {
+  rng(seed) { let s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296 } }
+
+  renderVals() {
+    var N = 90, rand = this.rng(4242)
+    var W = 524, mid = 59, up = 55, down = 55
+    var rx = [], tx = []
+    for (var i = 0; i < N; i++) {
+      var r = 0.25 + rand() * 0.3
+      if (i > 20 && i < 46) r = 0.55 + rand() * 0.42
+      if (i === 33 || i === 34) r = 1
+      rx.push(r)
+      tx.push(0.12 + rand() * 0.22 + (i > 58 && i < 70 ? 0.45 : 0))
+    }
+    var xAt = function (i) { return (i * (W - 1) / (N - 1)).toFixed(1) }
+    var rxPts = [], txPts = [], rxLine = '', txLine = ''
+    for (var j = 0; j < N; j++) {
+      var a = xAt(j) + ',' + (mid - up * rx[j]).toFixed(1)
+      var b = xAt(j) + ',' + (mid + down * tx[j]).toFixed(1)
+      rxPts.push(a); txPts.push(b)
+      rxLine += (j === 0 ? 'M' : 'L') + a
+      txLine += (j === 0 ? 'M' : 'L') + b
+    }
+
+    var vals = [
+      [412, 48], [404, 47], [388, 46], [412, 48], [318, 41], [396, 47],
+      [421, 49], [402, 48], [255, 38], [408, 47], [415, 49], [412, 48]
+    ]
+    var maxV = 450, base = 73, plot = 66, slot = W / vals.length
+    var tests = vals.map(function (v, i) {
+      var dh = Math.max(2, Math.round(plot * v[0] / maxV))
+      var uh = Math.max(2, Math.round(plot * v[1] / maxV * 3.2))
+      var left = i * slot + (slot - 26) / 2
+      return {
+        dx: left.toFixed(1), dy: (base - dh).toFixed(1), dh: dh,
+        ux: (left + 17).toFixed(1), uy: (base - uh).toFixed(1), uh: uh
+      }
+    })
+
+    return {
+      c: {
+        rxLine: rxLine, txLine: txLine,
+        rxArea: 'M0,' + mid + 'L' + rxPts.join('L') + 'L' + W + ',' + mid + 'Z',
+        txArea: 'M0,' + mid + 'L' + txPts.join('L') + 'L' + W + ',' + mid + 'Z',
+        tests: tests
+      }
+    }
+  }
+}
+</script>
+</body>
+</html>

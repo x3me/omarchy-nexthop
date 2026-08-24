@@ -1,0 +1,215 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; background: #0e0e14; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7aa2f7; } a:hover { color: #b4bee6; }
+    .cap { font-size: 10px; letter-spacing: 0.12em; color: #565f89; }
+    .tab { flex-grow: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #a9b1d6; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4); }
+    .tabon { flex-grow: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #c0caf5; background: rgba(169,177,214,0.18); border: 1px solid transparent; }
+    .pill { height: 22px; padding: 0 11px; display: flex; align-items: center; font-size: 10px; letter-spacing: 0.06em; color: #a9b1d6; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4); }
+    .pillon { height: 22px; padding: 0 11px; display: flex; align-items: center; font-size: 10px; letter-spacing: 0.06em; color: #c0caf5; background: rgba(169,177,214,0.18); border: 1px solid transparent; }
+    .sep { height: 1px; background: rgba(169,177,214,0.12); }
+    .num { font-size: 11px; color: #c0caf5; text-align: right; }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; width: 560px; background: #1a1b26; border: 2px solid #7aa2f7; box-sizing: border-box; padding: 18px; color: #a9b1d6;">
+
+  <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;">
+    <div style="display: flex; align-items: flex-start; gap: 10px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9ece6a" stroke-width="1.6" stroke-linecap="round" style="margin-top: 2px;">
+        <path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5 12.2a10.5 10.5 0 0 1 14 0"></path><path d="M8.2 15.9a6 6 0 0 1 7.6 0"></path><circle cx="12" cy="19.3" r="1.1" fill="#9ece6a" stroke="none"></circle>
+      </svg>
+      <div style="display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 16px; font-weight: 700; color: #c0caf5;">Excitel</div>
+        <div class="cap" style="letter-spacing: 0.1em;">EXCELLENT &middot; ONLINE 4H 12M</div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1px;">
+      <div style="font-size: 30px; font-weight: 700; line-height: 1; color: #9ece6a;">94</div>
+      <div class="cap">EXPERIENCE</div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 6px; margin-top: 16px;">
+    <div class="tab">Overview</div><div class="tabon">Latency</div><div class="tab">Speed</div><div class="tab">Wi-Fi</div><div class="tab">Events</div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 14px 0;"></div>
+
+  <div style="display: flex; align-items: center; justify-content: space-between;">
+    <div style="display: flex; gap: 5px;">
+      <div class="pill">5M</div><div class="pillon">30M</div><div class="pill">6H</div><div class="pill">24H</div><div class="pill">7D</div>
+    </div>
+    <div class="cap">1 SAMPLE / SEC</div>
+  </div>
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; margin: 16px 0 6px 0;">
+    <div class="cap">ROUND-TRIP LATENCY, BY LEG</div>
+    <div style="font-size: 10px; color: #565f89;">peak 41 ms</div>
+  </div>
+
+  <div style="display: flex; gap: 8px;">
+    <div style="display: flex; flex-direction: column; justify-content: space-between; height: 140px; padding-bottom: 2px;">
+      <div style="font-size: 9px; color: #414868;">45</div>
+      <div style="font-size: 9px; color: #414868;">30</div>
+      <div style="font-size: 9px; color: #414868;">15</div>
+      <div style="font-size: 9px; color: #414868;">0</div>
+    </div>
+    <svg width="496" height="140" viewBox="0 0 496 140" style="display: block;">
+      <line x1="0" y1="0.5" x2="496" y2="0.5" stroke="rgba(169,177,214,0.07)"></line>
+      <line x1="0" y1="45.5" x2="496" y2="45.5" stroke="rgba(169,177,214,0.07)"></line>
+      <line x1="0" y1="90.5" x2="496" y2="90.5" stroke="rgba(169,177,214,0.07)"></line>
+      <line x1="0" y1="135.5" x2="496" y2="135.5" stroke="rgba(169,177,214,0.16)"></line>
+      <path d="{{c.wanArea}}" fill="rgba(122,162,247,0.20)"></path>
+      <path d="{{c.wanLine}}" fill="none" stroke="#7aa2f7" stroke-width="1.5" stroke-linejoin="round"></path>
+      <path d="{{c.localArea}}" fill="rgba(86,95,137,0.6)"></path>
+      <path d="{{c.localLine}}" fill="none" stroke="#565f89" stroke-width="1" stroke-linejoin="round"></path>
+    </svg>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 16px; margin-top: 7px; padding-left: 26px;">
+    <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 10px; height: 2px; background: #7aa2f7;"></div><div style="font-size: 10px; color: #565f89;">wan leg (router &rarr; 1.1.1.1)</div></div>
+    <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 10px; height: 2px; background: #565f89;"></div><div style="font-size: 10px; color: #565f89;">local leg (laptop &rarr; router)</div></div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 12px 0;"></div>
+
+  <div class="cap" style="margin-bottom: 7px;">JITTER</div>
+  <svg width="524" height="40" viewBox="0 0 524 40" style="display: block;">
+    <line x1="0" y1="39.5" x2="524" y2="39.5" stroke="rgba(169,177,214,0.16)"></line>
+    <path d="{{c.jitterArea}}" fill="rgba(187,154,247,0.22)"></path>
+    <path d="{{c.jitterLine}}" fill="none" stroke="#bb9af7" stroke-width="1.2" stroke-linejoin="round"></path>
+  </svg>
+
+  <div style="display: flex; justify-content: space-between; margin-top: 5px;">
+    <div style="font-size: 10px; color: #565f89;">mean 1.8 ms</div>
+    <div style="font-size: 10px; color: #565f89;">peak 9.4 ms</div>
+  </div>
+
+  <div class="sep" style="margin: 14px 0 12px 0;"></div>
+
+  <div class="cap" style="margin-bottom: 7px;">PACKET LOSS</div>
+  <svg width="524" height="26" viewBox="0 0 524 26" style="display: block;">
+    <line x1="0" y1="25.5" x2="524" y2="25.5" stroke="rgba(169,177,214,0.16)"></line>
+    <sc-for list="{{c.lossBars}}" as="b" hint-placeholder-count="3">
+      <rect x="{{b.x}}" y="{{b.y}}" width="3" height="{{b.h}}" fill="#f7768e"></rect>
+    </sc-for>
+  </svg>
+  <div style="font-size: 10px; color: #565f89; margin-top: 5px;">2 lost of 1800 probes &middot; 0.11% &middot; all on the wan leg</div>
+
+  <div class="sep" style="margin: 14px 0 12px 0;"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px 14px;">
+    <div class="cap"></div>
+    <div class="cap" style="text-align: right;">LOCAL LEG</div>
+    <div class="cap" style="text-align: right;">WAN LEG</div>
+
+    <div style="font-size: 11px; color: #565f89;">median</div><div class="num">1.2 ms</div><div class="num">8.4 ms</div>
+    <div style="font-size: 11px; color: #565f89;">p95</div><div class="num">2.1 ms</div><div class="num">14.0 ms</div>
+    <div style="font-size: 11px; color: #565f89;">p99</div><div class="num">3.4 ms</div><div class="num">27.0 ms</div>
+    <div style="font-size: 11px; color: #565f89;">worst</div><div class="num">6.8 ms</div><div class="num">41.0 ms</div>
+    <div style="font-size: 11px; color: #565f89;">jitter</div><div class="num">0.4 ms</div><div class="num">1.8 ms</div>
+    <div style="font-size: 11px; color: #565f89;">loss</div><div class="num">0.00 %</div><div class="num" style="color: #e0af68;">0.11 %</div>
+  </div>
+
+  <div class="sep" style="margin: 14px 0 12px 0;"></div>
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px;">
+    <div class="cap">LATENCY UNDER LOAD</div>
+    <div style="font-size: 10px; color: #565f89;">measured during the last speed test</div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 12px;">
+    <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 6px;">
+      <div style="display: flex; align-items: center; gap: 9px;">
+        <div style="width: 46px; font-size: 10px; color: #565f89;">idle</div>
+        <div style="flex-grow: 1; height: 8px; background: rgba(169,177,214,0.10);"><div style="height: 8px; width: 12%; background: #9ece6a;"></div></div>
+        <div style="width: 52px; font-size: 11px; color: #c0caf5; text-align: right;">9 ms</div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 9px;">
+        <div style="width: 46px; font-size: 10px; color: #565f89;">loaded</div>
+        <div style="flex-grow: 1; height: 8px; background: rgba(169,177,214,0.10);"><div style="height: 8px; width: 45%; background: #e0af68;"></div></div>
+        <div style="width: 52px; font-size: 11px; color: #c0caf5; text-align: right;">34 ms</div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 2px; width: 78px; padding-left: 12px; border-left: 1px solid rgba(169,177,214,0.12);">
+      <div style="font-size: 20px; font-weight: 700; line-height: 1.1; color: #9ece6a;">A&minus;</div>
+      <div class="cap" style="letter-spacing: 0.08em;">BUFFERBLOAT</div>
+    </div>
+  </div>
+
+  <div style="font-size: 10px; color: #565f89; margin-top: 9px; line-height: 1.6;">+25 ms added under full load. Below 30 ms a video call stays clean while someone else is downloading.</div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":560,"height":880}}'>
+class Component extends DCLogic {
+  rng(seed) { let s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296 } }
+
+  renderVals() {
+    var N = 110, rand = this.rng(77003)
+    var local = [], wan = [], jit = []
+    for (var i = 0; i < N; i++) {
+      var l = 1.2 + rand() * 0.9
+      var w = 8.4 * (0.8 + rand() * 0.4)
+      if (i === 38 || i === 39) w = 33
+      if (i === 71) w = 24
+      if (i === 90 || i === 91 || i === 92) w = 30 + rand() * 8
+      local.push(l); wan.push(w)
+      jit.push(0.7 + rand() * 2.4 + (i > 88 && i < 94 ? 6 : 0))
+    }
+
+    var W = 496, H = 140, peak = 45
+    var xAt = function (i) { return (i * (W - 1) / (N - 1)).toFixed(1) }
+    var yAt = function (v) { return (H - (H - 4) * v / peak).toFixed(1) }
+    var lp = [], tp = [], localLine = '', wanLine = ''
+    for (var j = 0; j < N; j++) {
+      var a = xAt(j) + ',' + yAt(local[j])
+      var b = xAt(j) + ',' + yAt(local[j] + wan[j])
+      lp.push(a); tp.push(b)
+      localLine += (j === 0 ? 'M' : 'L') + a
+      wanLine += (j === 0 ? 'M' : 'L') + b
+    }
+
+    var JW = 524, JH = 40, jpeak = 11
+    var jx = function (i) { return (i * (JW - 1) / (N - 1)).toFixed(1) }
+    var jy = function (v) { return (JH - (JH - 3) * v / jpeak).toFixed(1) }
+    var jp = [], jitterLine = ''
+    for (var k = 0; k < N; k++) {
+      var p = jx(k) + ',' + jy(jit[k])
+      jp.push(p)
+      jitterLine += (k === 0 ? 'M' : 'L') + p
+    }
+
+    var lossIdx = [39, 90, 91]
+    var lossBars = lossIdx.map(function (i) {
+      var h = i === 39 ? 12 : 20
+      return { x: jx(i), y: (26 - h).toFixed(1), h: h }
+    })
+
+    return {
+      c: {
+        localLine: localLine,
+        wanLine: wanLine,
+        localArea: 'M0,' + H + 'L' + lp.join('L') + 'L' + W + ',' + H + 'Z',
+        wanArea: 'M' + tp.join('L') + 'L' + lp.slice().reverse().join('L') + 'Z',
+        jitterLine: jitterLine,
+        jitterArea: 'M0,' + JH + 'L' + jp.join('L') + 'L' + JW + ',' + JH + 'Z',
+        lossBars: lossBars
+      }
+    }
+  }
+}
+</script>
+</body>
+</html>

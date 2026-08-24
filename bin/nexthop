@@ -1,0 +1,5 @@
+#!/bin/bash
+# The Nexthop query CLI. History, events, tests, reports — all in JSON,
+# except `report`, which is the plain-text ISP-ticket summary.
+exec env PYTHONPATH="$(dirname "$(dirname "$(realpath "$0")")")" \
+  python3 -m nexthopd.cli "$@"

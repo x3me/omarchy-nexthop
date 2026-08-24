@@ -1,0 +1,22 @@
+# Optional: run nexthopd as a systemd --user unit so monitoring continues
+# while omarchy-shell is down (a shell restart, a different session).
+#
+#   mkdir -p ~/.config/systemd/user
+#   sed "s|@PLUGIN_DIR@|$HOME/.config/omarchy/plugins/io.github.x3me.nexthop|" \
+#     nexthopd.service > ~/.config/systemd/user/nexthopd.service
+#   systemctl --user enable --now nexthopd
+#
+# The shell's Service.qml sees the flock is held and simply attaches.
+[Unit]
+Description=Nexthop internet quality monitor daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m nexthopd
+WorkingDirectory=@PLUGIN_DIR@
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

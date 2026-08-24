@@ -1,0 +1,8 @@
+PING 10.10.0.253 (10.10.0.253) 56(84) bytes of data.
+[1787562369.690501] no answer yet for icmp_seq=1
+[1787562370.195259] no answer yet for icmp_seq=2
+[1787562370.698418] no answer yet for icmp_seq=3
+[1787562371.202303] no answer yet for icmp_seq=4
+[1787562371.707355] no answer yet for icmp_seq=5
+[1787562372.221354] no answer yet for icmp_seq=5
+[1787562372.290416] From 10.10.0.147 icmp_seq=1 Destination Host Unreachable

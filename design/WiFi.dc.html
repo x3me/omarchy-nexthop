@@ -1,0 +1,188 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; background: #0e0e14; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7aa2f7; } a:hover { color: #b4bee6; }
+    .cap { font-size: 10px; letter-spacing: 0.12em; color: #565f89; }
+    .tab { flex-grow: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #a9b1d6; background: rgba(169,177,214,0.04); border: 1px solid rgba(169,177,214,0.4); }
+    .tabon { flex-grow: 1; height: 26px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #c0caf5; background: rgba(169,177,214,0.18); border: 1px solid transparent; }
+    .sep { height: 1px; background: rgba(169,177,214,0.12); }
+    .kv { display: flex; align-items: baseline; justify-content: space-between; }
+    .k { font-size: 11px; color: #565f89; }
+    .v { font-size: 11px; color: #c0caf5; }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; width: 560px; background: #1a1b26; border: 2px solid #7aa2f7; box-sizing: border-box; padding: 18px; color: #a9b1d6;">
+
+  <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;">
+    <div style="display: flex; align-items: flex-start; gap: 10px;">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#9ece6a" stroke-width="1.6" stroke-linecap="round" style="margin-top: 2px;">
+        <path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5 12.2a10.5 10.5 0 0 1 14 0"></path><path d="M8.2 15.9a6 6 0 0 1 7.6 0"></path><circle cx="12" cy="19.3" r="1.1" fill="#9ece6a" stroke="none"></circle>
+      </svg>
+      <div style="display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-size: 16px; font-weight: 700; color: #c0caf5;">Excitel</div>
+        <div class="cap" style="letter-spacing: 0.1em;">EXCELLENT &middot; ONLINE 4H 12M</div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1px;">
+      <div style="font-size: 30px; font-weight: 700; line-height: 1; color: #9ece6a;">94</div>
+      <div class="cap">EXPERIENCE</div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 6px; margin-top: 16px;">
+    <div class="tab">Overview</div><div class="tab">Latency</div><div class="tab">Speed</div><div class="tabon">Wi-Fi</div><div class="tab">Events</div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 14px 0;"></div>
+
+  <div class="cap" style="margin-bottom: 11px;">THE LOCAL LEG &middot; LAPTOP TO ROUTER</div>
+
+  <div style="display: flex; align-items: flex-end; gap: 22px;">
+    <div style="display: flex; flex-direction: column; gap: 2px;">
+      <div style="font-size: 28px; font-weight: 700; line-height: 1; color: #9ece6a;">&minus;47<span style="font-size: 12px; color: #565f89; font-weight: 400;"> dBm</span></div>
+      <div class="cap" style="letter-spacing: 0.1em;">SIGNAL</div>
+    </div>
+    <div style="flex-grow: 1; display: flex; flex-direction: column; gap: 6px; padding-bottom: 3px;">
+      <div style="position: relative; height: 8px; background: rgba(169,177,214,0.10);">
+        <div style="height: 8px; width: 78%; background: #9ece6a;"></div>
+        <div style="position: absolute; left: 55%; top: -3px; width: 1px; height: 14px; background: rgba(169,177,214,0.35);"></div>
+      </div>
+      <div style="display: flex; justify-content: space-between;">
+        <div style="font-size: 9px; color: #414868;">&minus;90 unusable</div>
+        <div style="font-size: 9px; color: #414868;">&minus;67 marginal</div>
+        <div style="font-size: 9px; color: #414868;">&minus;30 max</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; margin: 16px 0 6px 0;">
+    <div class="cap">SIGNAL &amp; LOCAL LAG &middot; LAST 30 MIN</div>
+    <div style="font-size: 10px; color: #565f89;">one roam</div>
+  </div>
+
+  <svg width="524" height="82" viewBox="0 0 524 82" style="display: block;">
+    <line x1="0" y1="81.5" x2="524" y2="81.5" stroke="rgba(169,177,214,0.16)"></line>
+    <line x1="{{c.roamX}}" y1="0" x2="{{c.roamX}}" y2="82" stroke="rgba(187,154,247,0.5)" stroke-width="1" stroke-dasharray="2 3"></line>
+    <path d="{{c.sigArea}}" fill="rgba(158,206,106,0.16)"></path>
+    <path d="{{c.sigLine}}" fill="none" stroke="#9ece6a" stroke-width="1.4" stroke-linejoin="round"></path>
+    <path d="{{c.lagLine}}" fill="none" stroke="#565f89" stroke-width="1" stroke-linejoin="round"></path>
+  </svg>
+
+  <div style="display: flex; align-items: center; gap: 16px; margin-top: 6px;">
+    <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 10px; height: 2px; background: #9ece6a;"></div><div style="font-size: 10px; color: #565f89;">signal</div></div>
+    <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 10px; height: 2px; background: #565f89;"></div><div style="font-size: 10px; color: #565f89;">local lag</div></div>
+    <div style="display: flex; align-items: center; gap: 6px;"><div style="width: 1px; height: 9px; background: #bb9af7;"></div><div style="font-size: 10px; color: #565f89;">roamed to a stronger AP</div></div>
+  </div>
+
+  <div class="sep" style="margin: 16px 0 12px 0;"></div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 24px;">
+    <div class="kv"><span class="k">Band</span><span class="v">5 GHz</span></div>
+    <div class="kv"><span class="k">Channel</span><span class="v">44 &middot; 80 MHz</span></div>
+    <div class="kv"><span class="k">Tx rate</span><span class="v">866 Mbps</span></div>
+    <div class="kv"><span class="k">Rx rate</span><span class="v">780 Mbps</span></div>
+    <div class="kv"><span class="k">Standard</span><span class="v">802.11ax</span></div>
+    <div class="kv"><span class="k">Security</span><span class="v">WPA2</span></div>
+    <div class="kv"><span class="k">BSSID</span><span class="v">c8:3a:35:4f:12:80</span></div>
+    <div class="kv"><span class="k">Interface</span><span class="v">wlan0</span></div>
+  </div>
+
+  <div class="sep" style="margin: 14px 0 12px 0;"></div>
+
+  <div class="cap" style="margin-bottom: 10px;">AIRTIME HEALTH &middot; WHY WI-FI FEELS SLOW WHEN SIGNAL LOOKS FINE</div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px;">
+    <div style="display: flex; flex-direction: column; gap: 5px;">
+      <div style="font-size: 18px; font-weight: 700; line-height: 1; color: #9ece6a;">1.2 %</div>
+      <div class="cap" style="letter-spacing: 0.08em;">TX RETRIES</div>
+      <div style="height: 3px; background: rgba(169,177,214,0.12);"><div style="height: 3px; width: 12%; background: #9ece6a;"></div></div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 5px;">
+      <div style="font-size: 18px; font-weight: 700; line-height: 1; color: #e0af68;">7</div>
+      <div class="cap" style="letter-spacing: 0.08em;">TX FAILED</div>
+      <div style="height: 3px; background: rgba(169,177,214,0.12);"><div style="height: 3px; width: 26%; background: #e0af68;"></div></div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 5px;">
+      <div style="font-size: 18px; font-weight: 700; line-height: 1; color: #9ece6a;">0</div>
+      <div class="cap" style="letter-spacing: 0.08em;">BEACON LOSS</div>
+      <div style="height: 3px; background: rgba(169,177,214,0.12);"><div style="height: 3px; width: 3%; background: #9ece6a;"></div></div>
+    </div>
+  </div>
+
+  <div class="sep" style="margin: 14px 0 12px 0;"></div>
+
+  <div class="cap" style="margin-bottom: 10px;">LINK EVENTS</div>
+
+  <div style="display: flex; flex-direction: column; gap: 8px;">
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <div style="font-size: 10px; color: #565f89; width: 46px; flex-shrink: 0;">12:41</div>
+      <div style="width: 5px; height: 5px; background: #bb9af7; flex-shrink: 0; transform: translateY(-1px);"></div>
+      <div style="font-size: 11px; color: #a9b1d6; flex-grow: 1;">Roamed to c8:3a:35:4f:12:80, channel 149 &rarr; 44</div>
+      <div style="font-size: 10px; color: #565f89;">&minus;61 &rarr; &minus;47 dBm</div>
+    </div>
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <div style="font-size: 10px; color: #565f89; width: 46px; flex-shrink: 0;">11:58</div>
+      <div style="width: 5px; height: 5px; background: #e0af68; flex-shrink: 0; transform: translateY(-1px);"></div>
+      <div style="font-size: 11px; color: #a9b1d6; flex-grow: 1;">Rate dropped to 173 Mbps for 40 s</div>
+      <div style="font-size: 10px; color: #565f89;">microwave band</div>
+    </div>
+    <div style="display: flex; align-items: baseline; gap: 10px;">
+      <div style="font-size: 10px; color: #565f89; width: 46px; flex-shrink: 0;">08:32</div>
+      <div style="width: 5px; height: 5px; background: #9ece6a; flex-shrink: 0; transform: translateY(-1px);"></div>
+      <div style="font-size: 11px; color: #a9b1d6; flex-grow: 1;">Associated with Excitel after wake</div>
+      <div style="font-size: 10px; color: #565f89;">1.4 s to online</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":560,"height":800}}'>
+class Component extends DCLogic {
+  rng(seed) { let s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296 } }
+
+  renderVals() {
+    var N = 100, rand = this.rng(9111), W = 524, H = 82
+    var roam = 62
+    var sig = [], lag = []
+    for (var i = 0; i < N; i++) {
+      var base = i < roam ? -61 : -47
+      sig.push(base + (rand() - 0.5) * 4)
+      lag.push(1.2 + rand() * 1.1 + (i < roam ? 0.8 : 0))
+    }
+    var lo = -80, hi = -35
+    var xAt = function (i) { return (i * (W - 1) / (N - 1)).toFixed(1) }
+    var sy = function (v) { return (H - (H - 6) * (v - lo) / (hi - lo)).toFixed(1) }
+    var ly = function (v) { return (H - (H - 6) * v / 8).toFixed(1) }
+
+    var sp = [], sigLine = '', lagLine = ''
+    for (var j = 0; j < N; j++) {
+      var a = xAt(j) + ',' + sy(sig[j])
+      sp.push(a)
+      sigLine += (j === 0 ? 'M' : 'L') + a
+      lagLine += (j === 0 ? 'M' : 'L') + xAt(j) + ',' + ly(lag[j])
+    }
+
+    return {
+      c: {
+        sigLine: sigLine,
+        sigArea: 'M0,' + H + 'L' + sp.join('L') + 'L' + W + ',' + H + 'Z',
+        lagLine: lagLine,
+        roamX: xAt(roam)
+      }
+    }
+  }
+}
+</script>
+</body>
+</html>

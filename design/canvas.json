@@ -1,0 +1,94 @@
+{
+  "artboards": [
+    {
+      "file": "BarStates.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 900,
+      "h": 470,
+      "title": "Bar widget"
+    },
+    {
+      "file": "SpeedTest.dc.html",
+      "x": 1040,
+      "y": 0,
+      "w": 1000,
+      "h": 560,
+      "title": "Speed test overlay"
+    },
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 720,
+      "w": 560,
+      "h": 720,
+      "title": "Panel \u2014 Overview"
+    },
+    {
+      "file": "Latency.dc.html",
+      "x": 700,
+      "y": 720,
+      "w": 560,
+      "h": 900,
+      "title": "Panel \u2014 Latency"
+    },
+    {
+      "file": "Speed.dc.html",
+      "x": 1400,
+      "y": 720,
+      "w": 560,
+      "h": 780,
+      "title": "Panel \u2014 Speed"
+    },
+    {
+      "file": "WiFi.dc.html",
+      "x": 0,
+      "y": 1780,
+      "w": 560,
+      "h": 710,
+      "title": "Panel \u2014 Wi-Fi"
+    },
+    {
+      "file": "Events.dc.html",
+      "x": 700,
+      "y": 1780,
+      "w": 560,
+      "h": 680,
+      "title": "Panel \u2014 Events"
+    },
+    {
+      "file": "Architecture.dc.html",
+      "x": 1400,
+      "y": 1780,
+      "w": 1120,
+      "h": 1300,
+      "title": "Architecture"
+    }
+  ],
+  "annotations": [
+    {
+      "id": "brief",
+      "x": -560,
+      "y": 0,
+      "w": 440,
+      "text": "Nexthop \u2014 an internet quality monitor for Omarchy.\n\nSplits your Wi-Fi from your ISP, hop by hop.\n\nEverything here is lifted from the real shell source: JetBrains Mono, square corners (your Hyprland rounding is 0), 2px #7aa2f7 panel border, and the 10px uppercase-dim label over bright-value grammar that the built-in network panel and Vitals both use.\n\nStatic mockups, one artboard per screen."
+    },
+    {
+      "id": "panels",
+      "x": -560,
+      "y": 720,
+      "w": 440,
+      "text": "Five tabs, one panel.\n\nOverview answers \"is it me or is it them\" in one glance. The other four are for when the answer is them.\n\nThe Overview artboard has a state switch above it \u2014 flip it to degraded or outage to see the bad days, including the recommendation strip."
+    },
+    {
+      "id": "arch",
+      "x": -560,
+      "y": 1780,
+      "w": 440,
+      "text": "The plugin stays a thin reader. nexthopd \u2014 Python 3, standard library only \u2014 owns every measurement and writes three files.\n\nSettled: Python over Rust, because it installs with just a clone. A prebuilt binary in the repo would trip the marketplace's automated security baseline.\n\nid: io.github.x3me.nexthop"
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

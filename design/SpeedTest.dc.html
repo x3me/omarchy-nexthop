@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; background: #0a0a0d; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7aa2f7; } a:hover { color: #b4bee6; }
+  </style>
+</helmet>
+
+<div style="position: relative; width: 1000px; height: 560px; background: #000000; overflow: hidden;">
+  <div style="position: absolute; inset: 0; background: rgba(10,10,14,0.78);"></div>
+
+  <div style="position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 0;">
+
+    <div style="font-size: 11px; letter-spacing: 0.42em; color: rgba(255,255,255,0.55); margin-bottom: 22px;">EXCITEL</div>
+
+    <div style="display: flex; align-items: flex-start; gap: 78px;">
+
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 14px;">
+        <svg width="300" height="300" viewBox="0 0 300 300" style="display: block;">
+          <defs>
+            <linearGradient id="ndl-down" gradientUnits="userSpaceOnUse" x1="{{g.down.nx1}}" y1="{{g.down.ny1}}" x2="{{g.down.nx2}}" y2="{{g.down.ny2}}">
+              <stop offset="0" stop-color="rgba(255,255,255,0.10)"></stop>
+              <stop offset="1" stop-color="#7aa2f7"></stop>
+            </linearGradient>
+          </defs>
+          <path d="{{g.arc}}" fill="none" stroke="rgba(255,255,255,0.13)" stroke-width="2" stroke-linecap="round"></path>
+          <sc-for list="{{g.ticks}}" as="t" hint-placeholder-count="41">
+            <line x1="{{t.x1}}" y1="{{t.y1}}" x2="{{t.x2}}" y2="{{t.y2}}" stroke="{{t.stroke}}" stroke-width="{{t.w}}"></line>
+          </sc-for>
+          <line x1="{{g.down.nx1}}" y1="{{g.down.ny1}}" x2="{{g.down.nx2}}" y2="{{g.down.ny2}}" stroke="url(#ndl-down)" stroke-width="3.2" stroke-linecap="round"></line>
+          <text x="150" y="164" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="42" font-weight="700" fill="#ffffff">412.3</text>
+          <text x="150" y="184" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12" fill="rgba(255,255,255,0.55)">Mbps</text>
+        </svg>
+        <div style="font-size: 11px; letter-spacing: 0.3em; color: rgba(255,255,255,0.9);">DOWNLOAD</div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 14px;">
+        <svg width="300" height="300" viewBox="0 0 300 300" style="display: block;">
+          <defs>
+            <linearGradient id="ndl-up" gradientUnits="userSpaceOnUse" x1="{{g.up.nx1}}" y1="{{g.up.ny1}}" x2="{{g.up.nx2}}" y2="{{g.up.ny2}}">
+              <stop offset="0" stop-color="rgba(255,255,255,0.10)"></stop>
+              <stop offset="1" stop-color="#7aa2f7"></stop>
+            </linearGradient>
+          </defs>
+          <path d="{{g.arc}}" fill="none" stroke="rgba(255,255,255,0.13)" stroke-width="2" stroke-linecap="round"></path>
+          <sc-for list="{{g.ticks}}" as="t" hint-placeholder-count="41">
+            <line x1="{{t.x1}}" y1="{{t.y1}}" x2="{{t.x2}}" y2="{{t.y2}}" stroke="{{t.stroke}}" stroke-width="{{t.w}}"></line>
+          </sc-for>
+          <line x1="{{g.up.nx1}}" y1="{{g.up.ny1}}" x2="{{g.up.nx2}}" y2="{{g.up.ny2}}" stroke="url(#ndl-up)" stroke-width="3.2" stroke-linecap="round"></line>
+          <text x="150" y="164" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="42" font-weight="700" fill="#ffffff">48.1</text>
+          <text x="150" y="184" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12" fill="rgba(255,255,255,0.55)">Mbps</text>
+        </svg>
+        <div style="font-size: 11px; letter-spacing: 0.3em; color: rgba(255,255,255,0.55);">UPLOAD</div>
+      </div>
+
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 26px; margin-top: 30px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,0.10);">
+      <div style="display: flex; align-items: baseline; gap: 8px;">
+        <span style="font-size: 10px; letter-spacing: 0.16em; color: rgba(255,255,255,0.4);">IDLE</span>
+        <span style="font-size: 14px; color: rgba(255,255,255,0.9);">9 ms</span>
+      </div>
+      <div style="width: 26px; height: 1px; background: rgba(255,255,255,0.2);"></div>
+      <div style="display: flex; align-items: baseline; gap: 8px;">
+        <span style="font-size: 10px; letter-spacing: 0.16em; color: rgba(255,255,255,0.4);">UNDER LOAD</span>
+        <span style="font-size: 14px; color: #ffc678;">34 ms</span>
+      </div>
+      <div style="width: 26px; height: 1px; background: rgba(255,255,255,0.2);"></div>
+      <div style="display: flex; align-items: baseline; gap: 8px;">
+        <span style="font-size: 10px; letter-spacing: 0.16em; color: rgba(255,255,255,0.4);">BUFFERBLOAT</span>
+        <span style="font-size: 14px; color: #a9e88a;">A&minus;</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="position: absolute; left: 26px; bottom: 22px; font-size: 10px; letter-spacing: 0.14em; color: rgba(255,255,255,0.28);">SCALE 500 Mbps &middot; OOKLA &middot; DELHI</div>
+  <div style="position: absolute; right: 26px; bottom: 22px; font-size: 10px; letter-spacing: 0.14em; color: rgba(255,255,255,0.28);">ENTER TO RUN AGAIN &middot; ESC TO CLOSE</div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":1000,"height":560}}'>
+class Component extends DCLogic {
+  polar(cx, cy, r, deg) {
+    var t = deg * Math.PI / 180
+    return { x: cx + r * Math.cos(t), y: cy + r * Math.sin(t) }
+  }
+
+  renderVals() {
+    var cx = 150, cy = 152, R = 120
+    var START = 135, SWEEP = 270
+    var a0 = this.polar(cx, cy, R, START)
+    var a1 = this.polar(cx, cy, R, START + SWEEP)
+    var arc = 'M' + a0.x.toFixed(2) + ',' + a0.y.toFixed(2) +
+              'A' + R + ',' + R + ' 0 1 1 ' + a1.x.toFixed(2) + ',' + a1.y.toFixed(2)
+
+    var ticks = []
+    for (var i = 0; i <= 40; i++) {
+      var deg = START + SWEEP * i / 40
+      var major = i % 5 === 0
+      var inner = major ? R - 17 : R - 9
+      var p1 = this.polar(cx, cy, R - 3, deg)
+      var p2 = this.polar(cx, cy, inner, deg)
+      ticks.push({
+        x1: p1.x.toFixed(2), y1: p1.y.toFixed(2),
+        x2: p2.x.toFixed(2), y2: p2.y.toFixed(2),
+        stroke: major ? 'rgba(255,255,255,0.42)' : 'rgba(255,255,255,0.16)',
+        w: major ? 2 : 1
+      })
+    }
+
+    var self = this
+    function needle(value, scale) {
+      var frac = Math.max(0, Math.min(1, value / scale))
+      var deg = START + SWEEP * frac
+      var hub = self.polar(cx, cy, 24, deg)
+      var tip = self.polar(cx, cy, R - 26, deg)
+      return {
+        nx1: hub.x.toFixed(2), ny1: hub.y.toFixed(2),
+        nx2: tip.x.toFixed(2), ny2: tip.y.toFixed(2)
+      }
+    }
+
+    return { g: { arc: arc, ticks: ticks, down: needle(412.3, 500), up: needle(48.1, 500) } }
+  }
+}
+</script>
+</body>
+</html>

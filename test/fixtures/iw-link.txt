@@ -1,0 +1,11 @@
+Connected to b4:a2:5c:19:d6:20 (on wlo1)
+	SSID: Excitel
+	freq: 5180.0
+	RX: 3863830534 bytes (50083937 packets)
+	TX: 548710762 bytes (4490767 packets)
+	signal: -64 dBm
+	rx bitrate: 309.7 MBit/s 40MHz HE-MCS 6 HE-NSS 2 HE-GI 0 HE-DCM 0
+	tx bitrate: 458.8 MBit/s 40MHz HE-MCS 9 HE-NSS 2 HE-GI 0 HE-DCM 0
+	bss flags: short-slot-time
+	dtim period: 1
+	beacon int: 100

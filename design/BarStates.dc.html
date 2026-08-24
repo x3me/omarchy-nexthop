@@ -1,0 +1,164 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; background: #0e0e14; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7aa2f7; } a:hover { color: #b4bee6; }
+    .bar { display: flex; align-items: center; justify-content: space-between; height: 26px; background: #1a1b26; padding: 0 8px; box-sizing: border-box; flex-grow: 1; }
+    .grp { display: flex; align-items: center; gap: 10px; }
+    .lbl { font-size: 10px; letter-spacing: 0.1em; color: #565f89; width: 176px; flex-shrink: 0; line-height: 1.5; }
+    .row { display: flex; align-items: center; gap: 18px; }
+    .me { display: flex; align-items: center; gap: 5px; padding: 0 6px; height: 21px; }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; gap: 18px; width: 900px; padding: 26px; box-sizing: border-box;">
+
+  <div style="display: flex; flex-direction: column; gap: 4px;">
+    <div style="font-size: 13px; color: #c0caf5; letter-spacing: 0.02em;">Bar widget &mdash; the only always-visible surface</div>
+    <div style="font-size: 11px; color: #565f89; line-height: 1.6;">26 px tall, drawn in the shell's bar font. Four display modes, all six states. Colour is the whole message: you should know your connection went bad without reading a number.</div>
+  </div>
+
+  <div style="height: 1px; background: rgba(169,177,214,0.12);"></div>
+
+  <div class="row">
+    <div class="lbl">MODE A<br>INDEX &middot; DEFAULT</div>
+    <div class="bar">
+      <div class="grp">
+        <div style="display: flex; gap: 5px;"><div style="width: 7px; height: 7px; background: #7aa2f7;"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div></div>
+      </div>
+      <div class="grp">
+        <div class="me" style="background: rgba(169,177,214,0.04);">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9ece6a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h4l3-8 4 16 3-8h6"></path></svg>
+          <span style="font-size: 11px; color: #9ece6a; font-weight: 500;">94</span>
+        </div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12.4a10 10 0 0 1 13 0"></path><circle cx="12" cy="18" r="1.2" fill="#a9b1d6" stroke="none"></circle></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"></path></svg>
+        <span style="font-size: 11px; color: #a9b1d6;">14:32</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="lbl">MODE B<br>LIVE LATENCY</div>
+    <div class="bar">
+      <div class="grp">
+        <div style="display: flex; gap: 5px;"><div style="width: 7px; height: 7px; background: #7aa2f7;"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div></div>
+      </div>
+      <div class="grp">
+        <div class="me">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h4l3-8 4 16 3-8h6"></path></svg>
+          <span style="font-size: 11px; color: #a9b1d6;">9 ms</span>
+        </div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12.4a10 10 0 0 1 13 0"></path><circle cx="12" cy="18" r="1.2" fill="#a9b1d6" stroke="none"></circle></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"></path></svg>
+        <span style="font-size: 11px; color: #a9b1d6;">14:32</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="lbl">MODE C<br>LIVE SPARKLINE</div>
+    <div class="bar">
+      <div class="grp">
+        <div style="display: flex; gap: 5px;"><div style="width: 7px; height: 7px; background: #7aa2f7;"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div></div>
+      </div>
+      <div class="grp">
+        <div class="me">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9ece6a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h4l3-8 4 16 3-8h6"></path></svg>
+          <svg width="38" height="12" viewBox="0 0 38 12"><polyline points="0,9 3,8 6,10 9,6 12,8 15,4 18,9 21,7 24,10 27,5 30,8 33,6 36,7" fill="none" stroke="#7aa2f7" stroke-width="1.2" stroke-linejoin="round"></polyline></svg>
+        </div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12.4a10 10 0 0 1 13 0"></path><circle cx="12" cy="18" r="1.2" fill="#a9b1d6" stroke="none"></circle></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"></path></svg>
+        <span style="font-size: 11px; color: #a9b1d6;">14:32</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="lbl">DEGRADED<br>WAN LEG SLOW</div>
+    <div class="bar">
+      <div class="grp">
+        <div style="display: flex; gap: 5px;"><div style="width: 7px; height: 7px; background: #7aa2f7;"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div></div>
+      </div>
+      <div class="grp">
+        <div class="me" style="background: rgba(224,175,104,0.10);">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#e0af68" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h4l3-8 4 16 3-8h6"></path></svg>
+          <span style="font-size: 11px; color: #e0af68; font-weight: 500;">61</span>
+        </div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12.4a10 10 0 0 1 13 0"></path><circle cx="12" cy="18" r="1.2" fill="#a9b1d6" stroke="none"></circle></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"></path></svg>
+        <span style="font-size: 11px; color: #a9b1d6;">14:32</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="lbl">OUTAGE<br>ROUTER OK, WAN DEAD</div>
+    <div class="bar">
+      <div class="grp">
+        <div style="display: flex; gap: 5px;"><div style="width: 7px; height: 7px; background: #7aa2f7;"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div></div>
+      </div>
+      <div class="grp">
+        <div class="me" style="background: rgba(247,118,142,0.14);">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f7768e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h6l4 0"></path><path d="M16 13h6"></path><path d="M12.5 8.5 15 13l-2.5 4.5"></path></svg>
+          <span style="font-size: 11px; color: #f7768e; font-weight: 500;">2m 14s</span>
+        </div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12.4a10 10 0 0 1 13 0"></path><circle cx="12" cy="18" r="1.2" fill="#a9b1d6" stroke="none"></circle></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"></path></svg>
+        <span style="font-size: 11px; color: #a9b1d6;">14:32</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="lbl">SPEED TEST RUNNING<br>PROGRESS ON THE WIDGET</div>
+    <div class="bar" style="position: relative;">
+      <div class="grp">
+        <div style="display: flex; gap: 5px;"><div style="width: 7px; height: 7px; background: #7aa2f7;"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div><div style="width: 7px; height: 7px; background: rgba(169,177,214,0.28);"></div></div>
+      </div>
+      <div class="grp">
+        <div class="me" style="background: rgba(122,162,247,0.12); position: relative;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#7aa2f7" stroke-width="1.7" stroke-linecap="round"><path d="M4 18a9 9 0 1 1 16 0"></path><path d="M12 14.5 16.5 9"></path></svg>
+          <span style="font-size: 11px; color: #7aa2f7;">386 &darr;</span>
+          <div style="position: absolute; left: 0; bottom: 0; width: 62%; height: 2px; background: #7aa2f7;"></div>
+        </div>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linecap="round"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12.4a10 10 0 0 1 13 0"></path><circle cx="12" cy="18" r="1.2" fill="#a9b1d6" stroke="none"></circle></svg>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#a9b1d6" stroke-width="1.6" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z"></path></svg>
+        <span style="font-size: 11px; color: #a9b1d6;">14:32</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: rgba(169,177,214,0.12);"></div>
+
+  <div style="display: flex; gap: 26px;">
+    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+      <div style="font-size: 10px; letter-spacing: 0.1em; color: #565f89;">TOOLTIP ON HOVER</div>
+      <div style="font-size: 11px; color: #a9b1d6; line-height: 1.6;">Excitel &middot; 94 excellent<br>local 1.2 ms &middot; wan 8.4 ms &middot; 0.0% loss</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+      <div style="font-size: 10px; letter-spacing: 0.1em; color: #565f89;">CLICK</div>
+      <div style="font-size: 11px; color: #a9b1d6; line-height: 1.6;">Opens the panel.<br>Middle-click runs a speed test.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+      <div style="font-size: 10px; letter-spacing: 0.1em; color: #565f89;">NOTIFICATION</div>
+      <div style="font-size: 11px; color: #a9b1d6; line-height: 1.6;">Fires on outage start and recovery,<br>with the leg that failed named.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":900,"height":520}}'>
+class Component extends DCLogic {}
+</script>
+</body>
+</html>

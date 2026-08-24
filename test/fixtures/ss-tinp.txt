@@ -1,0 +1,8 @@
+ESTAB    0      0      192.0.2.10:36900    198.51.100.7:443  users:(("chrome",pid=4958,fd=66))
+	 cubic wscale:7,10 rto:213 rtt:12.8/10.5 mss:1238 bytes_sent:328028 bytes_acked:328029 bytes_received:2724692 segs_out:1205 segs_in:2905
+ESTAB    0      0      192.0.2.10:54430    203.0.113.9:443  users:(("slack",pid=7753,fd=28))
+	 cubic wscale:12,10 rto:232 rtt:31.2/4.5 mss:1238 bytes_sent:14099 bytes_retrans:108 bytes_acked:13992 bytes_received:65451
+ESTAB    0      0      192.0.2.10:39590    198.51.100.7:443  users:(("chrome",pid=4958,fd=159))
+	 cubic wscale:7,10 rto:216 rtt:15.0/12.1 mss:1238 bytes_sent:4858 bytes_acked:4859 bytes_received:8142
+ESTAB    0      0      192.0.2.10:41000    203.0.113.20:22
+	 cubic rto:210 rtt:10/5 mss:1400 bytes_sent:999 bytes_received:888

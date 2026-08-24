@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; background: #0e0e14; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color: #7aa2f7; } a:hover { color: #b4bee6; }
+    .band { border: 1px solid rgba(169,177,214,0.22); background: rgba(169,177,214,0.025); padding: 16px; box-sizing: border-box; }
+    .bandcap { font-size: 10px; letter-spacing: 0.14em; color: #565f89; margin-bottom: 13px; }
+    .box { border: 1px solid rgba(169,177,214,0.28); background: #1a1b26; padding: 12px 13px; box-sizing: border-box; display: flex; flex-direction: column; gap: 5px; }
+    .bt { font-size: 12px; color: #c0caf5; font-weight: 500; }
+    .bs { font-size: 10px; letter-spacing: 0.08em; color: #7aa2f7; }
+    .bb { font-size: 10px; color: #565f89; line-height: 1.65; }
+    .flow { display: flex; align-items: center; justify-content: center; gap: 11px; padding: 11px 0; }
+    .flowt { font-size: 10px; color: #565f89; letter-spacing: 0.04em; }
+    .g3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .g2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; gap: 0; width: 1120px; padding: 28px; box-sizing: border-box; color: #a9b1d6;">
+
+  <div style="display: flex; flex-direction: column; gap: 5px; margin-bottom: 20px;">
+    <div style="font-size: 15px; color: #c0caf5; font-weight: 700;">Architecture</div>
+    <div style="font-size: 11px; color: #565f89; line-height: 1.65; max-width: 720px;">Plugins run unsandboxed inside the single long-lived <span style="color: #a9b1d6;">omarchy-shell</span> process, so nothing that samples twice a second belongs in QML. The shell side stays a thin reader; a small daemon owns every measurement, and three files are the whole contract between them.</div>
+  </div>
+
+  <div class="band">
+    <div class="bandcap">INSIDE OMARCHY-SHELL &middot; QML, LOADED BY THE PLUGIN REGISTRY</div>
+    <div class="g3">
+      <div class="box">
+        <div class="bt">BarWidget.qml</div>
+        <div class="bs">kind: bar-widget</div>
+        <div class="bb">Index, latency or live sparkline. Colour carries the state. Click opens the panel, middle-click runs a peak test.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Panel.qml</div>
+        <div class="bs">five tab Loaders</div>
+        <div class="bb">Only the selected tab is alive, so a hidden tab costs nothing per sample. Charts are Canvas, same technique as the UniFi plugin.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Service.qml</div>
+        <div class="bs">kind: service</div>
+        <div class="bb">Starts at shell startup, spawns the daemon if no lock is held, restarts it if it dies, raises outage notifications.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <svg width="13" height="30" viewBox="0 0 13 30"><path d="M6.5 0v22" stroke="#565f89" stroke-width="1"></path><path d="M2.5 19l4 5 4-5" fill="none" stroke="#565f89" stroke-width="1"></path></svg>
+    <div class="flowt">FileView { watchChanges: true } for live state &nbsp;&middot;&nbsp; one Process call to <span style="color: #a9b1d6;">nexthop query</span> when you open a longer window</div>
+    <svg width="13" height="30" viewBox="0 0 13 30"><path d="M6.5 30V8" stroke="#565f89" stroke-width="1"></path><path d="M2.5 11l4-5 4 5" fill="none" stroke="#565f89" stroke-width="1"></path></svg>
+  </div>
+
+  <div class="band">
+    <div class="bandcap">THE CONTRACT &middot; ~/.LOCAL/STATE/NEXTHOP</div>
+    <div class="g3">
+      <div class="box">
+        <div class="bt">live.json</div>
+        <div class="bs">rewritten 2&times; / sec</div>
+        <div class="bb">Both legs, lag, loss, rates, signal, the three component scores and the index. Under 1 KB, atomic rename. This is all the bar widget ever reads.</div>
+      </div>
+      <div class="box">
+        <div class="bt">recent.json</div>
+        <div class="bs">rewritten every 5 sec</div>
+        <div class="bb">A 30-minute ring buffer, pre-downsampled to ~360 points. The panel's default graphs paint from it with no subprocess at all.</div>
+      </div>
+      <div class="box">
+        <div class="bt">history.db</div>
+        <div class="bs">sqlite, stdlib</div>
+        <div class="bb">1-minute rows for 7 days, 1-hour rows for a year, every speed test and every event kept. QML never speaks SQL &mdash; the CLI answers in JSON.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <svg width="13" height="30" viewBox="0 0 13 30"><path d="M6.5 30V8" stroke="#565f89" stroke-width="1"></path><path d="M2.5 11l4-5 4 5" fill="none" stroke="#565f89" stroke-width="1"></path></svg>
+    <div class="flowt">writes only &nbsp;&middot;&nbsp; the daemon never talks to the shell, so either side can restart without the other noticing</div>
+  </div>
+
+  <div class="band">
+    <div class="bandcap">NEXTHOPD &middot; PYTHON 3, STANDARD LIBRARY ONLY, NO PIP</div>
+
+    <div class="g3" style="margin-bottom: 14px;">
+      <div class="box">
+        <div class="bt">Local leg</div>
+        <div class="bs">2 Hz</div>
+        <div class="bb">One persistent <span style="color: #a9b1d6;">ping -D -i 0.5</span> to the default gateway, parsed line by line. No process spawn per sample.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Wan leg</div>
+        <div class="bs">2 Hz</div>
+        <div class="bb">Same again to an anchor. Wan latency is the anchor minus the gateway, which is what separates your Wi-Fi from your ISP.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Link + counters</div>
+        <div class="bs">1 Hz / 5 sec</div>
+        <div class="bb"><span style="color: #a9b1d6;">/sys/class/net</span> byte counters for throughput; <span style="color: #a9b1d6;">iw station dump</span> for signal, bitrate, retries and roams.</div>
+      </div>
+    </div>
+
+    <div class="g3" style="margin-bottom: 14px;">
+      <div class="box">
+        <div class="bt">DNS timing</div>
+        <div class="bs">every 30 sec</div>
+        <div class="bb">Resolution time against the configured resolver, plus a public control. Catches the failure that looks like "internet is down" but is not.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Content speed</div>
+        <div class="bs">hourly, ~15 MB</div>
+        <div class="bb">A short ranged fetch, enough to score Speed honestly without moving real data. This is what feeds the index.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Scorer</div>
+        <div class="bs">continuous</div>
+        <div class="bb">Lag from latency, jitter and loss &rarr; Responsiveness. Disruptions &rarr; Reliability. Content speed &rarr; Speed. Equal thirds, 0&ndash;100.</div>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="bt">Roll-up and retention</div>
+      <div class="bb" style="line-height: 1.7;">Raw 2 Hz samples never hit the disk. The daemon folds them into 1-second aggregates in memory, 1-minute rows on the way to sqlite, and 1-hour rows after a week. A month of continuous monitoring lands under 12 MB.</div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <svg width="13" height="30" viewBox="0 0 13 30"><path d="M6.5 0v22" stroke="#565f89" stroke-width="1"></path><path d="M2.5 19l4 5 4-5" fill="none" stroke="#565f89" stroke-width="1"></path></svg>
+    <div class="flowt">only when you ask, or when a schedule you turned on says so</div>
+  </div>
+
+  <div class="band">
+    <div class="bandcap">ON DEMAND</div>
+    <div class="g2">
+      <div class="box">
+        <div class="bt">Peak speed test</div>
+        <div class="bs">ookla &rarr; cloudflare &rarr; fast.com</div>
+        <div class="bb">Uses the official <span style="color: #a9b1d6;">speedtest</span> CLI when it is on the machine, for server choice and a shareable result. Falls back to a Cloudflare or fast.com run that needs nothing installed &mdash; the same method Omarchy's own speed test uses. Idle and loaded latency are captured on every run.</div>
+      </div>
+      <div class="box">
+        <div class="bt">Notifications and report</div>
+        <div class="bs">omarchy-notification-send</div>
+        <div class="bb">One notification when a disruption starts and one when it clears, naming the leg that failed. "Copy report" renders the visible window as plain text with timestamps, both legs and loss.</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin-top: 24px; padding-top: 20px; border-top: 1px solid rgba(169,177,214,0.14);">
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div style="font-size: 10px; letter-spacing: 0.14em; color: #565f89;">WHY A DAEMON AND NOT QML TIMERS</div>
+      <div style="font-size: 11px; color: #a9b1d6; line-height: 1.7;">History has to survive a shell restart, and you restart the shell every time you change a theme. Sampling twice a second from QML would also mean a subprocess per probe inside the process that draws your desktop. And the panel must open already full of data, not start collecting when you look at it.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 7px;">
+      <div style="font-size: 10px; letter-spacing: 0.14em; color: #565f89;">TWO WAYS TO RUN IT</div>
+      <div style="font-size: 11px; color: #a9b1d6; line-height: 1.7;">By default the shell service starts the daemon, so installing the plugin is still just a clone and an enable &mdash; the marketplace installer never runs code. Anyone who wants monitoring while the shell is down installs a <span style="color: #c0caf5;">systemd --user</span> unit with one command; the service sees the lock is held and simply attaches.</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"$preview":{"width":1120,"height":1180}}'>
+class Component extends DCLogic {}
+</script>
+</body>
+</html>

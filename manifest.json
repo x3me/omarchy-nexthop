@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.x3me.nexthop",
+  "name": "Nexthop",
+  "version": "0.1.0",
+  "author": "Extreme Labs",
+  "license": "MIT",
+  "description": "Splits your Wi-Fi from your ISP, hop by hop. Continuous latency, jitter and loss on both legs of your connection, with history, outage detection and speed tests.",
+  "homepage": "https://github.com/x3me/omarchy-nexthop",
+  "repository": "https://github.com/x3me/omarchy-nexthop",
+  "keywords": [
+    "network",
+    "internet",
+    "latency",
+    "jitter",
+    "monitoring",
+    "speedtest",
+    "wifi"
+  ],
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Nexthop",
+    "description": "Connection quality on the bar; click for latency, speed, Wi-Fi and outage history split by leg",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "displayMode": "Index",
+      "internetAnchor": "1.1.1.1",
+      "probeIntervalMs": 500,
+      "contentSpeed": true,
+      "contentSpeedIntervalMin": 60,
+      "peakEngine": "Auto",
+      "planDownMbps": 0,
+      "planUpMbps": 0,
+      "notifyOutage": true,
+      "historyDays": 7,
+      "throughputWindowS": 3
+    },
+    "schema": [
+      {
+        "key": "displayMode",
+        "type": "enum",
+        "label": "What the bar shows",
+        "options": [
+          "Index",
+          "Lag",
+          "Sparkline",
+          "Icon only"
+        ],
+        "defaultValue": "Index",
+        "description": "Index is the 0-100 score. Lag is the current round trip in milliseconds. Sparkline draws the last 30 samples."
+      },
+      {
+        "key": "internetAnchor",
+        "type": "string",
+        "label": "Internet anchor",
+        "defaultValue": "1.1.1.1",
+        "description": "The host pinged past your router. Its latency minus the router's is your ISP leg."
+      },
+      {
+        "key": "probeIntervalMs",
+        "type": "integer",
+        "label": "Probe interval (ms)",
+        "min": 250,
+        "max": 5000,
+        "step": 250,
+        "defaultValue": 500,
+        "description": "500 ms is two samples a second, about 11 MB a day. Raise it to use less."
+      },
+      {
+        "key": "contentSpeed",
+        "type": "boolean",
+        "label": "Measure content speed automatically",
+        "defaultValue": true,
+        "description": "A short ranged download that scores Speed honestly. Roughly 15 MB per check."
+      },
+      {
+        "key": "contentSpeedIntervalMin",
+        "type": "integer",
+        "label": "Content speed interval (minutes)",
+        "min": 15,
+        "max": 1440,
+        "step": 15,
+        "defaultValue": 60
+      },
+      {
+        "key": "peakEngine",
+        "type": "enum",
+        "label": "Peak speed test engine",
+        "options": [
+          "Auto",
+          "Ookla",
+          "Cloudflare",
+          "fast.com"
+        ],
+        "defaultValue": "Auto",
+        "description": "Auto prefers the official speedtest CLI when it is installed, then Cloudflare, then fast.com. Peak tests only ever run when you ask for one."
+      },
+      {
+        "key": "planDownMbps",
+        "type": "integer",
+        "label": "Plan download (Mbps)",
+        "min": 0,
+        "max": 10000,
+        "step": 10,
+        "defaultValue": 0,
+        "description": "Optional. When set, Speed is scored against your plan (ISP accountability) instead of the built-in experience curve and your own baseline."
+      },
+      {
+        "key": "planUpMbps",
+        "type": "integer",
+        "label": "Plan upload (Mbps)",
+        "min": 0,
+        "max": 10000,
+        "step": 10,
+        "defaultValue": 0,
+        "description": "Optional, used together with the plan download."
+      },
+      {
+        "key": "throughputWindowS",
+        "type": "integer",
+        "label": "Throughput averaging window (seconds)",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 3,
+        "description": "The receiving/sending numbers average over this window. Larger is calmer, smaller is livelier."
+      },
+      {
+        "key": "notifyOutage",
+        "type": "boolean",
+        "label": "Notify on outage and recovery",
+        "defaultValue": true,
+        "description": "One notification when a disruption starts, one when it clears, naming the leg that failed."
+      },
+      {
+        "key": "historyDays",
+        "type": "integer",
+        "label": "Keep per-minute history for (days)",
+        "min": 1,
+        "max": 90,
+        "step": 1,
+        "defaultValue": 7,
+        "description": "Hourly rollups are kept for a year regardless."
+      }
+    ]
+  }
+}

@@ -1,0 +1,153 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+
+// Nexthop's bar entry: the one always-visible surface. Colour carries the
+// state — the number is detail, the colour is the verdict. Clicking opens
+// the panel; middle-click asks the daemon for a peak speed test.
+BarWidget {
+  id: root
+  moduleName: "io.github.x3me.nexthop"
+
+  // ---- live state ----------------------------------------------------------
+  readonly property string statePath: {
+    var base = Quickshell.env("XDG_STATE_HOME")
+    if (!base || base.length === 0) base = Quickshell.env("HOME") + "/.local/state"
+    return base + "/nexthop"
+  }
+
+  property var live: null
+
+  FileView {
+    path: root.statePath + "/live.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.applyLive(text())
+    onFileChanged: reload()
+    onLoadFailed: root.live = null
+  }
+
+  function applyLive(raw) {
+    try { root.live = JSON.parse(raw) } catch (e) { /* mid-rotation; keep last */ }
+  }
+
+  // ---- derived -------------------------------------------------------------
+  readonly property string displayMode: setting("displayMode", "Index")
+  readonly property string netState: live ? (live.state || "online") : "no-daemon"
+  readonly property var index: live && live.index !== null && live.index !== undefined
+    ? live.index : null
+  readonly property var lagNow: live && live.lag ? live.lag.now : null
+
+  readonly property color okColor: bar ? bar.foreground : Color.foreground
+  // State colours resolve through the theme palette: green/yellow/red exist
+  // in every Omarchy theme's colors.toml, surfaced via Color singleton.
+  readonly property color stateColor: {
+    if (netState === "local-down" || netState === "wan-down") return Color.urgent
+    if (netState === "degraded") return "#e0af68"
+    if (index === null) return okColor
+    if (index >= 80) return okColor
+    if (index >= 50) return "#e0af68"
+    return Color.urgent
+  }
+
+  readonly property string glyph: {
+    if (netState === "local-down") return "󱚵"   // nf-md-wifi_strength_alert
+    if (netState === "wan-down") return "󰲛"     // nf-md-web_off / broken link
+    return "󰓅"                                   // nf-md-speedometer
+  }
+
+  readonly property string barText: {
+    if (netState === "no-daemon") return glyph
+    if (netState === "local-down" || netState === "wan-down") {
+      var since = live && live.down_since ? live.down_since : 0
+      if (!since) return glyph
+      var s = Math.max(0, Math.round(Date.now() / 1000 - since))
+      var m = Math.floor(s / 60)
+      return glyph + " " + (m > 0 ? m + "m" + (s % 60) + "s" : s + "s")
+    }
+    if (displayMode === "Icon only") return glyph
+    if (displayMode === "Lag")
+      return glyph + " " + (lagNow !== null ? Math.round(lagNow) + "ms" : "--")
+    return glyph + " " + (index !== null ? index : "--")
+  }
+
+  // ---- panel wiring (same shape contract as weather / vitals) --------------
+  function injectPanel() {
+    var target = panelLoader.item
+    if (!target) return
+    if ("bar" in target) target.bar = root.bar
+    if ("settings" in target) target.settings = root.settings
+    if ("anchorItem" in target) target.anchorItem = button
+    if ("hostWidget" in target) target.hostWidget = root
+  }
+
+  function togglePanel() {
+    if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
+  }
+
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+
+  function open() {
+    if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey()
+  }
+
+  function close() {
+    if (panelLoader.item && panelLoader.item.close) panelLoader.item.close()
+  }
+
+  readonly property bool popoutSwitchClosing: panelLoader.item
+    ? panelLoader.item.popoutSwitchClosing === true : false
+
+  function closeForPopoutSwitch() {
+    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+  }
+
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  onBarChanged: injectPanel()
+  onSettingsChanged: injectPanel()
+
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
+  Process {
+    id: peakRequest
+    command: ["sh", "-c",
+      "cd '" + Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "") +
+      "' && exec python3 -m nexthopd.cli peak"]
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: root.barText
+    foreground: root.stateColor
+    useActiveColor: false
+    tooltipText: {
+      if (!root.live) return "Nexthop: waiting for the daemon"
+      var l = root.live
+      var name = l.link && (l.link.ssid || l.link.name) || ""
+      var parts = [name, (l.index !== null ? l.index + " " + l.band : "")]
+      if (l.local && l.local.p50 !== null && l.wan && l.wan.p50 !== null)
+        parts.push("local " + l.local.p50 + " ms · wan " + l.wan.p50 + " ms")
+      return parts.filter(function(p) { return p && p.length }).join("\n")
+    }
+
+    onPressed: function(b) {
+      if (b === Qt.MiddleButton) peakRequest.running = true
+      else root.togglePanel()
+    }
+  }
+}

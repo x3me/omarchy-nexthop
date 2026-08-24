@@ -1,0 +1,6 @@
+PING 10.10.0.1 (10.10.0.1) 56(84) bytes of data.
+[1787562260.703963] 64 bytes from 10.10.0.1: icmp_seq=1 ttl=64 time=9.13 ms
+[1787562261.204546] 64 bytes from 10.10.0.1: icmp_seq=2 ttl=64 time=9.00 ms
+[1787562261.707487] 64 bytes from 10.10.0.1: icmp_seq=3 ttl=64 time=11.3 ms
+[1787562262.201694] 64 bytes from 10.10.0.1: icmp_seq=4 ttl=64 time=4.38 ms
+[1787562262.702621] 64 bytes from 10.10.0.1: icmp_seq=5 ttl=64 time=4.17 ms

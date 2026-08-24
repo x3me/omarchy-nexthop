@@ -1,0 +1,19 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests
+        run: python3 -m unittest discover -s test -v
+      - name: Manifest is valid JSON
+        run: python3 -c "import json; json.load(open('manifest.json'))"
+      - name: Daemon imports on stdlib alone
+        run: python3 -c "import nexthopd.daemon, nexthopd.cli, nexthopd.speedtest"
