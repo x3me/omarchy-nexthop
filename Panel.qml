@@ -350,12 +350,16 @@ Panel {
             }
           }
 
-          Column {
+          Item {
             id: headerRight
             anchors.right: parent.right
-            spacing: Style.space(1)
+            anchors.verticalCenter: parent.verticalCenter
+            width: indexText.implicitWidth + experienceLabel.implicitWidth
+              + Style.space(8)
+            height: indexText.implicitHeight
 
             Text {
+              id: indexText
               textFormat: Text.PlainText
               anchors.right: parent.right
               text: root.live && root.live.index !== null && root.live.index !== undefined
@@ -365,9 +369,14 @@ Panel {
               font.pixelSize: Style.fontPx(2.4)
               font.weight: Font.Bold
             }
+            // On the number's baseline rather than under it — the label is
+            // one word, and a whole row of header for it was dead space.
             Text {
+              id: experienceLabel
               textFormat: Text.PlainText
-              anchors.right: parent.right
+              anchors.right: indexText.left
+              anchors.rightMargin: Style.space(8)
+              anchors.baseline: indexText.baseline
               text: "EXPERIENCE"
               color: root.dim
               font.family: root.fontFamily
