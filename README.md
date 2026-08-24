@@ -10,6 +10,14 @@ call anyone.
 
 ![Nexthop panel](preview.png)
 
+| Latency, by leg | Speed |
+|---|---|
+| ![Latency tab](docs/latency.png) | ![Speed tab](docs/speed.png) |
+
+| Wi-Fi | Applications |
+|---|---|
+| ![Wi-Fi tab](docs/wifi.png) | ![Apps tab](docs/apps.png) |
+
 ## What it measures
 
 - **Two-leg latency, twice a second.** One persistent ping to your gateway,
