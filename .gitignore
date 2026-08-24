@@ -3,3 +3,4 @@ __pycache__/
 *.bak.*
 .venv/
 design/omarchy-internet-quality-monitor.html
+CLAUDE.local.md
