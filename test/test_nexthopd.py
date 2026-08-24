@@ -237,38 +237,72 @@ class LinkEvents(unittest.TestCase):
     def kinds(self):
         return [e["kind"] for e in self.store.events()]
 
-    def test_associate_and_roam(self):
+    def test_first_sighting_is_not_an_association(self):
+        # A daemon restart sees an existing link — that is not an event.
         t = time.time()
-        self.watch.sample(t, {})
-        self.watch.sample(t + 2, {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "Office",
-                                  "channel": 149, "signal_dbm": -61})
-        self.watch.sample(t + 4, {"bssid": "bb:bb:bb:bb:bb:bb", "ssid": "Office",
+        self.watch.sample(t, {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "Office"})
+        self.assertEqual(self.kinds(), [])
+
+    def test_roam_and_detail(self):
+        t = time.time()
+        self.watch.sample(t, {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "Office",
+                              "channel": 149, "signal_dbm": -61})
+        self.watch.sample(t + 2, {"bssid": "bb:bb:bb:bb:bb:bb", "ssid": "Office",
                                   "channel": 44, "signal_dbm": -47})
         kinds = self.kinds()
-        self.assertIn("associate", kinds)
         self.assertIn("roam", kinds)
+        self.assertNotIn("associate", kinds)
         roam = [e for e in self.store.events() if e["kind"] == "roam"][0]
         self.assertIn("149", roam["detail"])
         self.assertIn("44", roam["detail"])
         self.assertIn("-61", roam["detail"])
 
+    def test_associate_needs_a_confirmed_gap(self):
+        t = time.time()
+        link = {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "Office"}
+        self.watch.sample(t, link)
+        # A brief iw hiccup (fewer empty reads than the threshold) is not a
+        # disassociation, so the recovery is not an association.
+        for i in range(LinkWatch.GAP_SAMPLES - 1):
+            self.watch.sample(t + 2 + i * 2, {})
+        self.watch.sample(t + 20, link)
+        self.assertEqual(self.kinds(), [])
+        # A confirmed gap is, and the recovery is logged once.
+        for i in range(LinkWatch.GAP_SAMPLES):
+            self.watch.sample(t + 30 + i * 2, {})
+        self.watch.sample(t + 60, link)
+        self.assertEqual(self.kinds(), ["associate"])
+
+    BUSY = 1_000_000  # bytes/sec, well above the idle floor
+
     def test_rate_drop_needs_sustain(self):
         t = time.time()
         link = {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "X", "channel": 44}
         for i in range(5):
-            self.watch.sample(t + i * 2, dict(link, tx_mbps=500))
+            self.watch.sample(t + i * 2, dict(link, tx_mbps=500), self.BUSY)
         # A momentary dip is not an event.
-        self.watch.sample(t + 12, dict(link, tx_mbps=120))
-        self.watch.sample(t + 14, dict(link, tx_mbps=500))
+        self.watch.sample(t + 12, dict(link, tx_mbps=120), self.BUSY)
+        self.watch.sample(t + 14, dict(link, tx_mbps=500), self.BUSY)
         self.assertNotIn("rate-drop", self.kinds())
         # A sustained one is, and it closes with the recovery.
         for i in range(8):
-            self.watch.sample(t + 20 + i * 2, dict(link, tx_mbps=110))
+            self.watch.sample(t + 20 + i * 2, dict(link, tx_mbps=110), self.BUSY)
         self.assertIn("rate-drop", self.kinds())
-        self.watch.sample(t + 40, dict(link, tx_mbps=480))
+        self.watch.sample(t + 40, dict(link, tx_mbps=480), self.BUSY)
         drop = [e for e in self.store.events() if e["kind"] == "rate-drop"][0]
         self.assertIsNotNone(drop["ended_ts"])
         self.assertIn("110", drop["detail"])
+
+    def test_idle_rate_drops_are_not_events(self):
+        # Power save renegotiates a low bitrate the moment the link idles;
+        # with no traffic that is invisible to the user and must not log.
+        t = time.time()
+        link = {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "X", "channel": 44}
+        for i in range(5):
+            self.watch.sample(t + i * 2, dict(link, tx_mbps=2000), self.BUSY)
+        for i in range(20):
+            self.watch.sample(t + 20 + i * 2, dict(link, tx_mbps=120), 500)
+        self.assertNotIn("rate-drop", self.kinds())
 
     def test_throttled_to_one_hz(self):
         t = time.time()

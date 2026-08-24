@@ -90,10 +90,21 @@ class LinkWatch:
     LOW_FRACTION = 0.4
     RECOVER_FRACTION = 0.6
     SUSTAIN_S = 10.0
+    # Rate drops are only meaningful under traffic: Wi-Fi power save
+    # renegotiates a low bitrate the moment the link idles, and logging
+    # that teaches people to ignore the log. Below this many bytes/sec of
+    # combined throughput the link counts as idle.
+    TRAFFIC_FLOOR_BPS = 25_000
+    # Consecutive empty link reads before the link counts as genuinely
+    # gone. A single failed `iw` call is a hiccup, not a disassociation —
+    # and its recovery must not be logged as a fresh association.
+    GAP_SAMPLES = 5
 
     def __init__(self, store):
         self.store = store
-        self.prev = {}
+        self.prev = None          # last non-empty link, None until first seen
+        self.gap_count = 0
+        self.disassociated = False
         self.rate_ceiling = 0.0
         self.low_since = None
         self.low_floor = None
@@ -104,22 +115,38 @@ class LinkWatch:
         eid = self.store.open_event(int(ts), kind, "info", "local", detail)
         self.store.close_event(eid, int(ts))
 
-    def sample(self, now, link):
+    def sample(self, now, link, traffic_bps=0.0):
         # The caller runs twice a second; once a second is plenty here.
         if now - self.last_sample < 1.0:
             return
         self.last_sample = now
-        prev, self.prev = self.prev, dict(link) if link else {}
-        if not link or not link.get("bssid"):
-            self._close_rate_event(now)
-            self.rate_ceiling = 0.0
-            return
 
+        if not link or not link.get("bssid"):
+            # An empty read is a hiccup until it persists: `iw` times out
+            # now and then, and treating each blink as a disassociation
+            # spammed the log with fake re-associations.
+            self.gap_count += 1
+            if self.gap_count == self.GAP_SAMPLES:
+                self.disassociated = True
+                self._close_rate_event(now)
+                self.rate_ceiling = 0.0
+            return
+        self.gap_count = 0
+
+        prev, self.prev = self.prev, dict(link)
         bssid = link.get("bssid", "")
-        prev_bssid = prev.get("bssid", "")
+        prev_bssid = prev.get("bssid", "") if prev else ""
         ssid = link.get("ssid", "")
 
-        if bssid and not prev_bssid:
+        if prev is None:
+            # The daemon's first sighting of an existing link is not an
+            # association — logging it stamped every daemon restart into
+            # the event log.
+            self.disassociated = False
+            return
+
+        if self.disassociated:
+            self.disassociated = False
             self._instant(now, "associate", "Associated with " + (ssid or bssid))
         elif bssid and prev_bssid and bssid != prev_bssid:
             parts = ["Roamed to " + bssid]
@@ -141,9 +168,16 @@ class LinkWatch:
         tx = link.get("tx_mbps")
         if tx is None or tx <= 0:
             return
+        if (traffic_bps or 0) < self.TRAFFIC_FLOOR_BPS:
+            # Idle link: whatever bitrate power save negotiated is
+            # unobservable to the user. Freeze the tracker — and close an
+            # open drop event, since its duration would otherwise count
+            # idle time as suffering.
+            self._close_rate_event(now)
+            return
         # A slowly decaying ceiling: the best rate seen lately, with a
         # half-life of a few minutes so an old burst does not set the bar
-        # forever.
+        # forever. Only rates seen under traffic feed it.
         self.rate_ceiling = max(tx, self.rate_ceiling * 0.998)
         if self.rate_ceiling < 100:
             return  # too slow a link for a drop to mean anything
@@ -456,7 +490,8 @@ class Daemon:
         snap = net.snapshot(self.config["internetAnchor"])
         network = snap.get("ssid") or snap.get("name") or ""
         if snap.get("kind") == "wifi":
-            self.link_watch.sample(now, snap)
+            self.link_watch.sample(now, snap,
+                                   (self.rates[0] or 0) + (self.rates[1] or 0))
             st = snap.get("station") or {}
             if st.get("tx_packets"):
                 st["retry_pct"] = round(
