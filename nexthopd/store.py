@@ -148,14 +148,20 @@ class Store:
 
     # ---------------------------------------------------------------- reads
 
-    def series(self, seconds: float, now: float = None) -> list:
+    def series(self, seconds: float, now: float = None,
+               resolution: str = "auto") -> list:
         """History over a window, at whichever resolution suits it.
 
-        Under six hours reads per-minute rows; anything longer reads hourly
-        ones, so a seven-day graph is 168 points rather than 10,080.
+        Auto: under six hours reads per-minute rows; anything longer reads
+        hourly ones, so a seven-day graph is 168 points rather than 10,080.
+        Callers that genuinely want the fine rows (the 24 h experience
+        ribbon) ask for "minute" explicitly.
         """
         now = now or time.time()
-        table = "minute" if seconds <= 6 * 3600 else "hour"
+        if resolution in ("minute", "hour"):
+            table = resolution
+        else:
+            table = "minute" if seconds <= 6 * 3600 else "hour"
         rows = self.db.execute(
             f"SELECT * FROM {table} WHERE ts >= ? ORDER BY ts",
             (int(now - seconds),),

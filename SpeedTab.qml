@@ -36,6 +36,13 @@ Column {
     return Math.max(1, best)
   }
 
+  function fmtBytes(b) {
+    if (b === null || b === undefined) return "--"
+    if (b >= 1e9) return (b / 1e9).toFixed(2) + " GB"
+    if (b >= 1e6) return (b / 1e6).toFixed(0) + " MB"
+    return (b / 1e3).toFixed(0) + " KB"
+  }
+
   function fmtRate(bps) {
     if (bps === null || bps === undefined || !isFinite(bps)) return "--"
     if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"
@@ -46,17 +53,92 @@ Column {
   // ---- live throughput ----------------------------------------------------
   Text {
     textFormat: Text.PlainText
-    text: "THROUGHPUT NOW"
+    text: "LIVE THROUGHPUT · LAST 3 MIN"
     color: tab.panel.dim
     font.family: tab.panel.fontFamily
     font.pixelSize: Style.font.caption
     font.letterSpacing: 1
   }
 
+  // Download above the axis, upload mirrored below — the mockup's cluster
+  // shape. Both directions share one scale so the asymmetry is honest.
+  Canvas {
+    id: flowChart
+    width: parent.width
+    height: Style.space(84)
+
+    readonly property var pts: {
+      var cut = Date.now() / 1000 - 180
+      return tab.panel.recentPoints.filter(function(p) { return p.t >= cut })
+    }
+    onPtsChanged: requestPaint()
+    onWidthChanged: requestPaint()
+
+    onPaint: {
+      var ctx = getContext("2d")
+      ctx.reset()
+      ctx.clearRect(0, 0, width, height)
+      var mid = Math.round(height / 2)
+      ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
+                                tab.panel.fg.b, 0.22)
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(0, mid + 0.5)
+      ctx.lineTo(width, mid + 0.5)
+      ctx.stroke()
+
+      var p = pts
+      if (!p || p.length < 2) return
+      var peak = 10 * 1024
+      for (var i = 0; i < p.length; i++) {
+        if (p[i].rx !== null) peak = Math.max(peak, p[i].rx)
+        if (p[i].tx !== null) peak = Math.max(peak, p[i].tx)
+      }
+      peak *= 1.1
+      var t0 = p[0].t, span = Math.max(1, p[p.length - 1].t - t0)
+      var half = mid - 2
+
+      function draw(key, up, tint) {
+        var runs = [], cur = []
+        for (var i = 0; i < p.length; i++) {
+          var v = p[i][key]
+          if (v === null || v === undefined) {
+            if (cur.length > 1) runs.push(cur)
+            cur = []
+          } else {
+            cur.push([(p[i].t - t0) * (width - 1) / span,
+                      mid + (up ? -1 : 1) * half * Math.min(1, v / peak)])
+          }
+        }
+        if (cur.length > 1) runs.push(cur)
+        for (var r = 0; r < runs.length; r++) {
+          var run = runs[r]
+          ctx.beginPath()
+          ctx.moveTo(run[0][0], mid)
+          for (var j = 0; j < run.length; j++) ctx.lineTo(run[j][0], run[j][1])
+          ctx.lineTo(run[run.length - 1][0], mid)
+          ctx.closePath()
+          ctx.fillStyle = Qt.rgba(tint.r, tint.g, tint.b, 0.2)
+          ctx.fill()
+          ctx.beginPath()
+          for (j = 0; j < run.length; j++) {
+            if (j === 0) ctx.moveTo(run[j][0], run[j][1])
+            else ctx.lineTo(run[j][0], run[j][1])
+          }
+          ctx.strokeStyle = tint
+          ctx.lineWidth = 1.4
+          ctx.stroke()
+        }
+      }
+      draw("rx", true, Color.accent)
+      draw("tx", false, tab.panel.warnTone)
+    }
+  }
+
   Row {
     width: parent.width
     spacing: Style.space(14)
-    readonly property real cell: (width - Style.space(14)) / 2
+    readonly property real cell: (width - Style.space(14) * 3) / 4
 
     component BigStat: Column {
       property string label: ""
@@ -94,6 +176,18 @@ Column {
       tint: tab.panel.warnTone
       value: tab.fmtRate(tab.panel.live && tab.panel.live.rates
         ? tab.panel.live.rates.tx_bps : null)
+    }
+    BigStat {
+      width: parent.cell
+      label: "DOWNLOADED"
+      value: tab.fmtBytes(tab.panel.live && tab.panel.live.rates
+        ? tab.panel.live.rates.rx_total : null)
+    }
+    BigStat {
+      width: parent.cell
+      label: "UPLOADED"
+      value: tab.fmtBytes(tab.panel.live && tab.panel.live.rates
+        ? tab.panel.live.rates.tx_total : null)
     }
   }
 

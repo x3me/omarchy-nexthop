@@ -66,7 +66,7 @@ def cmd_query(args):
         emit({"error": "no history yet"})
         return 1
     seconds = parse_window(args.window)
-    rows, table = store.series(seconds)
+    rows, table = store.series(seconds, resolution=args.resolution)
     emit({"window_s": seconds, "resolution": table, "rows": rows})
     return 0
 
@@ -172,6 +172,8 @@ def main(argv=None):
     sub.add_parser("live")
     q = sub.add_parser("query")
     q.add_argument("--window", default="30m")
+    q.add_argument("--resolution", default="auto",
+                   choices=["auto", "minute", "hour"])
     e = sub.add_parser("events")
     e.add_argument("--window", default="7d")
     t = sub.add_parser("tests")

@@ -14,6 +14,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 
 from . import __version__, apps, net, score, speedtest
 from .paths import (ensure_state_dir, live_path, recent_path, db_path,
@@ -306,6 +307,10 @@ class Daemon:
         # flicker rather than as a number.
         self.counter_samples = []
         self.rates = (None, None)       # bytes/sec
+        # 5-second aux samples riding along in recent.json: throughput and
+        # signal, so the panel's charts have history the moment they open.
+        self.aux_ring = deque(maxlen=400)
+        self.last_signal = None
         self.watch_local = LegWatch("local")
         self.watch_wan = LegWatch("wan")
         self.link_watch = LinkWatch(self.store)
@@ -556,6 +561,7 @@ class Daemon:
 
         snap = net.snapshot(self.config["internetAnchor"])
         network = snap.get("ssid") or snap.get("name") or ""
+        self.last_signal = snap.get("signal_dbm")
         if snap.get("kind") == "wifi":
             self.link_watch.sample(now, snap,
                                    (self.rates[0] or 0) + (self.rates[1] or 0))
@@ -588,7 +594,9 @@ class Daemon:
             "lag": {"now": lag,
                     "best": ts.get("p50"), "worst": ts.get("max")},
             "local": ls, "total": ts, "wan": ws,
-            "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1]},
+            "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1],
+                      "rx_total": self.counter_samples[-1][1] if self.counter_samples else None,
+                      "tx_total": self.counter_samples[-1][2] if self.counter_samples else None},
             "link": snap,
             "down_since": self.watch_local.down_since or self.watch_wan.down_since,
             "peak_running": self.peak_running,
@@ -599,6 +607,8 @@ class Daemon:
 
     def flush_recent(self, now: float):
         """recent.json: last 30 min at 5-second resolution, ~360 points."""
+        self.aux_ring.append((now, self.rates[0], self.rates[1],
+                              self.last_signal))
         points = []
         bucket = 5.0
         start = now - 1800
@@ -615,17 +625,25 @@ class Daemon:
             return out
 
         lb, tb = fold(locs), fold(tots)
+        aux_b = {}
+        for at, rx, tx, sig in self.aux_ring:
+            if at >= start:
+                aux_b[int((at - start) / bucket)] = (rx, tx, sig)
         for b in range(int(1800 / bucket)):
             l = lb.get(b, [])
             t = tb.get(b, [])
             lr = [x for x in l if x is not None]
             tr = [x for x in t if x is not None]
+            a = aux_b.get(b)
             points.append({
                 "t": round(start + b * bucket, 1),
                 "local": round(sum(lr) / len(lr), 2) if lr else None,
                 "total": round(sum(tr) / len(tr), 2) if tr else None,
                 "loss": round((len(l) - len(lr) + len(t) - len(tr)) /
                               max(1, len(l) + len(t)), 3) if (l or t) else None,
+                "rx": round(a[0], 1) if a and a[0] is not None else None,
+                "tx": round(a[1], 1) if a and a[1] is not None else None,
+                "sig": a[2] if a else None,
             })
         write_atomic(recent_path(), {"v": 1, "t": now, "bucket_s": bucket,
                                      "points": points})

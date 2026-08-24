@@ -17,9 +17,20 @@ Column {
     var all = panel.eventsData && panel.eventsData.events
       ? panel.eventsData.events : []
     var kinds = {"roam": 1, "associate": 1, "rate-drop": 1, "channel-change": 1}
+    var cut = Date.now() / 1000 - 86400
     var out = []
     for (var i = 0; i < all.length && out.length < 6; i++)
-      if (kinds[all[i].kind]) out.push(all[i])
+      if (kinds[all[i].kind] && all[i].ts >= cut) out.push(all[i])
+    return out
+  }
+
+  readonly property var roamMarks: {
+    var all = panel.eventsData && panel.eventsData.events
+      ? panel.eventsData.events : []
+    var cut = Date.now() / 1000 - 1800
+    var out = []
+    for (var i = 0; i < all.length; i++)
+      if (all[i].kind === "roam" && all[i].ts >= cut) out.push(all[i].ts)
     return out
   }
 
@@ -152,6 +163,168 @@ Column {
           }
         }
       }
+    }
+
+    // ---- signal & local lag history ---------------------------------------
+    Item {
+      width: parent.width
+      height: sigLabel.implicitHeight
+
+      Text {
+        id: sigLabel
+        textFormat: Text.PlainText
+        text: "SIGNAL & LOCAL LAG · LAST 30 MIN"
+        color: tab.panel.dim
+        font.family: tab.panel.fontFamily
+        font.pixelSize: Style.font.caption
+        font.letterSpacing: 1
+      }
+      Text {
+        textFormat: Text.PlainText
+        anchors.right: parent.right
+        text: {
+          var n = tab.roamMarks.length
+          return n === 0 ? "" : n === 1 ? "one roam" : n + " roams"
+        }
+        color: tab.panel.dim
+        font.family: tab.panel.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    Canvas {
+      id: sigChart
+      width: parent.width
+      height: Style.space(78)
+
+      readonly property var pts: tab.panel.recentPoints
+      readonly property var roams: tab.roamMarks
+      onPtsChanged: requestPaint()
+      onRoamsChanged: requestPaint()
+      onWidthChanged: requestPaint()
+
+      onPaint: {
+        var ctx = getContext("2d")
+        ctx.reset()
+        ctx.clearRect(0, 0, width, height)
+        var bottom = height - 1
+        ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
+                                  tab.panel.fg.b, 0.16)
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(0, bottom + 0.5)
+        ctx.lineTo(width, bottom + 0.5)
+        ctx.stroke()
+
+        var p = pts
+        if (!p || p.length < 2) return
+        var t0 = p[0].t, span = Math.max(1, p[p.length - 1].t - t0)
+        function xAt(t) { return (t - t0) * (width - 1) / span }
+
+        // Roam markers first, dashed, under the series.
+        ctx.strokeStyle = Qt.rgba(0.73, 0.6, 0.97, 0.55)
+        ctx.setLineDash([2, 3])
+        for (var m = 0; m < roams.length; m++) {
+          var rx = xAt(roams[m])
+          if (rx < 0 || rx > width) continue
+          ctx.beginPath()
+          ctx.moveTo(rx, 0)
+          ctx.lineTo(rx, height)
+          ctx.stroke()
+        }
+        ctx.setLineDash([])
+
+        function runs(key, yAt) {
+          var out = [], cur = []
+          for (var i = 0; i < p.length; i++) {
+            var v = p[i][key]
+            if (v === null || v === undefined) {
+              if (cur.length > 1) out.push(cur)
+              cur = []
+            } else {
+              cur.push([xAt(p[i].t), yAt(v)])
+            }
+          }
+          if (cur.length > 1) out.push(cur)
+          return out
+        }
+
+        // Signal on the fixed -90..-30 dBm scale, as a filled band.
+        var ok = tab.panel.okTone
+        var sigRuns = runs("sig", function(v) {
+          var f = Math.max(0, Math.min(1, (v + 90) / 60))
+          return bottom - (bottom - 3) * f
+        })
+        for (var r = 0; r < sigRuns.length; r++) {
+          var run = sigRuns[r]
+          ctx.beginPath()
+          ctx.moveTo(run[0][0], bottom)
+          for (var j = 0; j < run.length; j++) ctx.lineTo(run[j][0], run[j][1])
+          ctx.lineTo(run[run.length - 1][0], bottom)
+          ctx.closePath()
+          ctx.fillStyle = Qt.rgba(ok.r, ok.g, ok.b, 0.14)
+          ctx.fill()
+          ctx.beginPath()
+          for (j = 0; j < run.length; j++) {
+            if (j === 0) ctx.moveTo(run[j][0], run[j][1])
+            else ctx.lineTo(run[j][0], run[j][1])
+          }
+          ctx.strokeStyle = ok
+          ctx.lineWidth = 1.4
+          ctx.stroke()
+        }
+
+        // Local lag on its own scale, a thin dim line.
+        var lagPeak = 8
+        for (var i = 0; i < p.length; i++) {
+          if (p[i].local !== null && p[i].local !== undefined)
+            lagPeak = Math.max(lagPeak, p[i].local)
+        }
+        lagPeak *= 1.15
+        var lagRuns = runs("local", function(v) {
+          return bottom - (bottom - 3) * Math.min(1, v / lagPeak)
+        })
+        ctx.strokeStyle = tab.panel.dim
+        ctx.lineWidth = 1
+        for (r = 0; r < lagRuns.length; r++) {
+          run = lagRuns[r]
+          ctx.beginPath()
+          for (j = 0; j < run.length; j++) {
+            if (j === 0) ctx.moveTo(run[j][0], run[j][1])
+            else ctx.lineTo(run[j][0], run[j][1])
+          }
+          ctx.stroke()
+        }
+      }
+    }
+
+    Row {
+      spacing: Style.space(16)
+
+      component ChartKey: Row {
+        property color tint: "white"
+        property string label: ""
+        property bool dashed: false
+        spacing: Style.space(6)
+        Rectangle {
+          width: parent.dashed ? 1 : Style.space(10)
+          height: parent.dashed ? Style.space(9) : 2
+          color: parent.tint
+          anchors.verticalCenter: parent.verticalCenter
+        }
+        Text {
+          textFormat: Text.PlainText
+          text: parent.label
+          color: tab.panel.dim
+          font.family: tab.panel.fontFamily
+          font.pixelSize: Style.font.caption
+          anchors.verticalCenter: parent.verticalCenter
+        }
+      }
+
+      ChartKey { tint: tab.panel.okTone; label: "signal" }
+      ChartKey { tint: tab.panel.dim; label: "local lag" }
+      ChartKey { tint: "#bb9af7"; label: "roam"; dashed: true }
     }
 
     PanelSeparator { width: parent.width }
