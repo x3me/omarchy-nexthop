@@ -352,6 +352,48 @@ class ConfigValidation(unittest.TestCase):
         self.assertEqual(cfg["planDownMbps"], 450)
 
 
+class FdSafety(unittest.TestCase):
+    def test_config_symlink_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target.json"
+            target.write_text('{"historyDays": 30}')
+            cfg = Config(Path(d) / "sub")
+            cfg.path.parent.mkdir()
+            cfg.path.symlink_to(target)
+            cfg.refresh()
+            # A symlinked config is refused outright (O_NOFOLLOW).
+            self.assertEqual(cfg["historyDays"], 7)
+
+    def test_config_bound_is_on_the_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Config(Path(d))
+            cfg.path.write_text('{"pad": "' + 'x' * (70 * 1024)
+                                + '", "historyDays": 30}')
+            cfg.refresh()
+            self.assertEqual(cfg["historyDays"], 7)
+
+    def test_lock_symlink_never_truncates_target(self):
+        import os as _os
+        from nexthopd.daemon import Daemon
+        with tempfile.TemporaryDirectory() as d:
+            victim = Path(d) / "victim"
+            victim.write_text("precious data that must survive")
+            _os.environ["XDG_STATE_HOME"] = d
+            try:
+                state = Path(d) / "nexthop"
+                state.mkdir()
+                (state / "nexthopd.lock").symlink_to(victim)
+                daemon = Daemon()
+                try:
+                    self.assertFalse(daemon.acquire_lock())
+                finally:
+                    daemon.store.close()
+            finally:
+                del _os.environ["XDG_STATE_HOME"]
+            self.assertEqual(victim.read_text(),
+                             "precious data that must survive")
+
+
 class AppAttribution(unittest.TestCase):
     def fixture(self):
         return (FIXTURES / "ss-tinp.txt").read_text()

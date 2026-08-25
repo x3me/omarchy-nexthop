@@ -31,9 +31,17 @@ def write_atomic(path: Path, payload: dict):
         raise
 
 
-def read_json(path: Path, default=None):
+def read_json(path: Path, default=None, max_bytes: int = 4 * 1024 * 1024):
+    """Bounded read of a state file. The bound lives on the read, not on a
+    prior stat, for the same reason as the daemon's config read."""
     try:
         with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
+            data = f.read(max_bytes + 1)
+    except (OSError, UnicodeDecodeError):
+        return default
+    if len(data) > max_bytes:
+        return default
+    try:
+        return json.loads(data)
+    except ValueError:
         return default

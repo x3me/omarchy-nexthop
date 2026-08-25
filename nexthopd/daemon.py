@@ -11,6 +11,7 @@ import json
 import os
 import re
 import signal
+import stat as stat_module
 import sys
 import threading
 import time
@@ -100,19 +101,40 @@ class Config:
         self._mtime = 0
 
     def refresh(self):
+        # Everything is checked on the file descriptor actually read — a
+        # stat followed by a separate open is a race an attacker wins by
+        # swapping the file in between. O_NOFOLLOW refuses symlinks, fstat
+        # types and dates the very fd we read, and the size bound is
+        # enforced by the bounded read itself, not by a prior check.
         try:
-            st = self.path.stat()
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except OSError:
             return
-        if st.st_mtime == self._mtime:
+        try:
+            st = os.fstat(fd)
+            if not stat_module.S_ISREG(st.st_mode):
+                return
+            if st.st_mtime == self._mtime:
+                return
+            self._mtime = st.st_mtime
+            chunks = []
+            remaining = self.MAX_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        except OSError:
             return
-        self._mtime = st.st_mtime
-        if st.st_size > self.MAX_BYTES:
+        finally:
+            os.close(fd)
+        if len(data) > self.MAX_BYTES:
             return
         try:
-            with open(self.path) as f:
-                loaded = json.load(f)
-        except (OSError, ValueError):
+            loaded = json.loads(data)
+        except ValueError:
             return
         if not isinstance(loaded, dict):
             return
@@ -328,14 +350,30 @@ class Daemon:
 
     def acquire_lock(self) -> bool:
         """One daemon per user. The shell service and a systemd unit can both
-        try to start us; whoever loses the lock just exits quietly."""
-        self._lock_fh = open(lock_path(), "w")
+        try to start us; whoever loses the lock just exits quietly.
+
+        The lock file sits at a predictable path, so it is opened without
+        truncation and without following symlinks — a planted symlink must
+        fail the open, never redirect a truncation somewhere else — and it
+        is only ever truncated after this process holds the flock.
+        """
         try:
-            fcntl.flock(self._lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd = os.open(lock_path(),
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600)
         except OSError:
             return False
-        self._lock_fh.write(str(os.getpid()))
-        self._lock_fh.flush()
+        try:
+            if not stat_module.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                return False
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+        self._lock_fh = os.fdopen(fd, "r+")
         return True
 
     def start_probes(self):
