@@ -367,6 +367,9 @@ class Daemon:
             if not stat_module.S_ISREG(os.fstat(fd).st_mode):
                 os.close(fd)
                 return False
+            # The creation mode only applies to new files; a lock file left
+            # by an older version keeps its old permissions until this.
+            os.fchmod(fd, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
@@ -780,11 +783,18 @@ class Daemon:
 
             time.sleep(max(0.1, tick - (time.time() - now)))
 
+    # Exit code contract with the shell service: LOCK_HELD means another
+    # instance owns the measurement and the service must not respawn us.
+    # Every other exit — including a clean 0 from SIGTERM — deserves a
+    # respawn, because a daemon that was asked to stop is still a daemon
+    # that is no longer measuring.
+    EXIT_LOCK_HELD = 3
+
     def run(self):
         if not self.acquire_lock():
             print("nexthopd: another instance holds the lock, exiting",
                   file=sys.stderr)
-            return 0
+            return self.EXIT_LOCK_HELD
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
         # SIGUSR1 is the "run a peak test" doorbell — file-free, and safe to

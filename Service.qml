@@ -42,12 +42,14 @@ Item {
 
   FileView {
     path: root.pluginDir + "/manifest.json"
+    watchChanges: true
     printErrors: false
     onLoaded: {
       var raw = text()
       if (!raw || raw.length > 262144) return
       try { root.manifestVersion = String(JSON.parse(raw).version || "") } catch (e) {}
     }
+    onFileChanged: reload()
   }
 
   FileView {
@@ -115,10 +117,12 @@ Item {
     running: true
 
     onExited: function(code, status) {
-      // Exit 0 is the "lock already held" path — another instance owns the
-      // measurement, so there is nothing to supervise. Anything else is a
-      // crash worth retrying, but never in a tight loop.
-      if (code === 0) return
+      // Exit 3 is the daemon's "lock already held" code — another instance
+      // owns the measurement, so there is nothing to supervise. Every
+      // other exit gets a respawn with backoff: a SIGTERM'd daemon exits 0
+      // and treating that as success once left the plugin unmonitored
+      // until the next shell restart.
+      if (code === 3) return
       root.failures += 1
       restartTimer.interval = Math.min(60000, 2000 * Math.pow(2, root.failures - 1))
       restartTimer.restart()
