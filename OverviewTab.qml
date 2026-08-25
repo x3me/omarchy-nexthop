@@ -154,6 +154,8 @@ Column {
     points: tab.panel.recentPoints
     wanColor: Color.accent
     localColor: tab.panel.dim
+    showScale: true
+    fontFamily: tab.panel.fontFamily
   }
 
   Row {

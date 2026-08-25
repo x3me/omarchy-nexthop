@@ -23,6 +23,10 @@ Canvas {
   // Larger charts label their scale; the compact overview chart stays clean.
   property bool showScale: false
   property string fontFamily: Style.font.family
+  // Hover crosshair with the values under the cursor. -1 = no hover.
+  property real hoverX: -1
+  property color readoutBg: Color.popups.background
+  property color readoutFg: Color.popups.text
 
   readonly property real peakMs: {
     var peak = 0
@@ -37,6 +41,12 @@ Canvas {
   onWidthChanged: requestPaint()
   onHeightChanged: requestPaint()
   onWanColorChanged: requestPaint()
+  onHoverXChanged: requestPaint()
+
+  HoverHandler {
+    onPointChanged: chart.hoverX = hovered ? point.position.x : -1
+    onHoveredChanged: if (!hovered) chart.hoverX = -1
+  }
 
   onPaint: {
     var ctx = getContext("2d")
@@ -135,6 +145,48 @@ Canvas {
     for (i = 0; i < pts.length; i++) {
       if (pts[i].loss !== null && pts[i].loss !== undefined && pts[i].loss > 0)
         ctx.fillRect(xAt(pts[i].t) - 1, bottom - 8, 2, 8)
+    }
+
+    // Hover crosshair: nearest sample by time, values in a readout box.
+    if (hoverX >= 0) {
+      var tAt = t0 + hoverX * span / (width - 1)
+      var best = null, bestD = Infinity
+      for (i = 0; i < pts.length; i++) {
+        var d = Math.abs(pts[i].t - tAt)
+        if (d < bestD) { bestD = d; best = pts[i] }
+      }
+      if (best) {
+        var cx = xAt(best.t)
+        ctx.strokeStyle = Qt.rgba(readoutFg.r, readoutFg.g, readoutFg.b, 0.4)
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(cx + 0.5, 0)
+        ctx.lineTo(cx + 0.5, bottom)
+        ctx.stroke()
+
+        var parts = [Qt.formatTime(new Date(best.t * 1000), "HH:mm:ss")]
+        if (best.total !== null && best.total !== undefined) {
+          var local = best.local !== null && best.local !== undefined ? best.local : 0
+          parts.push("wan " + Math.max(0, best.total - local).toFixed(1) + " ms")
+          parts.push("local " + local.toFixed(1) + " ms")
+        } else {
+          parts.push("no data")
+        }
+        if (best.loss !== null && best.loss !== undefined && best.loss > 0)
+          parts.push("loss " + Math.round(best.loss * 100) + "%")
+        var label = parts.join("  ·  ")
+
+        ctx.font = "10px " + fontFamily
+        ctx.textBaseline = "top"
+        var w = ctx.measureText(label).width + 12
+        var bx = Math.max(2, Math.min(width - w - 2, cx - w / 2))
+        ctx.fillStyle = Qt.rgba(readoutBg.r, readoutBg.g, readoutBg.b, 0.92)
+        ctx.fillRect(bx, 2, w, 16)
+        ctx.strokeStyle = Qt.rgba(readoutFg.r, readoutFg.g, readoutFg.b, 0.25)
+        ctx.strokeRect(bx + 0.5, 2.5, w - 1, 15)
+        ctx.fillStyle = readoutFg
+        ctx.fillText(label, bx + 6, 6)
+      }
     }
   }
 }

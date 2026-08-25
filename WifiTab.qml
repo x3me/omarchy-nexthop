@@ -197,6 +197,14 @@ Column {
       width: parent.width
       height: Style.space(78)
 
+      property real hoverX: -1
+      onHoverXChanged: requestPaint()
+
+      HoverHandler {
+        onPointChanged: sigChart.hoverX = hovered ? point.position.x : -1
+        onHoveredChanged: if (!hovered) sigChart.hoverX = -1
+      }
+
       readonly property var pts: tab.panel.recentPoints
       readonly property var roams: tab.roamMarks
       onPtsChanged: requestPaint()
@@ -294,6 +302,43 @@ Column {
             else ctx.lineTo(run[j][0], run[j][1])
           }
           ctx.stroke()
+        }
+
+        if (hoverX >= 0) {
+          var tAt = t0 + hoverX * span / (width - 1)
+          var best = null, bestD = Infinity
+          for (i = 0; i < p.length; i++) {
+            var d = Math.abs(p[i].t - tAt)
+            if (d < bestD) { bestD = d; best = p[i] }
+          }
+          if (best) {
+            var cx = xAt(best.t)
+            ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
+                                      tab.panel.fg.b, 0.4)
+            ctx.lineWidth = 1
+            ctx.beginPath()
+            ctx.moveTo(cx + 0.5, 0)
+            ctx.lineTo(cx + 0.5, height)
+            ctx.stroke()
+            var parts = [Qt.formatTime(new Date(best.t * 1000), "HH:mm:ss")]
+            parts.push(best.sig !== null && best.sig !== undefined
+              ? best.sig + " dBm" : "no signal data")
+            if (best.local !== null && best.local !== undefined)
+              parts.push("lag " + best.local.toFixed(1) + " ms")
+            var label = parts.join("  ·  ")
+            ctx.font = "10px " + tab.panel.fontFamily
+            ctx.textBaseline = "top"
+            var w = ctx.measureText(label).width + 12
+            var bx = Math.max(2, Math.min(width - w - 2, cx - w / 2))
+            var bg = Color.popups.background
+            ctx.fillStyle = Qt.rgba(bg.r, bg.g, bg.b, 0.92)
+            ctx.fillRect(bx, 2, w, 16)
+            ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
+                                      tab.panel.fg.b, 0.25)
+            ctx.strokeRect(bx + 0.5, 2.5, w - 1, 15)
+            ctx.fillStyle = tab.panel.fg
+            ctx.fillText(label, bx + 6, 6)
+          }
         }
       }
     }

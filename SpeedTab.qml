@@ -67,6 +67,21 @@ Column {
     width: parent.width
     height: Style.space(84)
 
+    property real hoverX: -1
+    onHoverXChanged: requestPaint()
+
+    HoverHandler {
+      onPointChanged: flowChart.hoverX = hovered ? point.position.x : -1
+      onHoveredChanged: if (!hovered) flowChart.hoverX = -1
+    }
+
+    function fmt(bps) {
+      if (bps === null || bps === undefined) return "--"
+      if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"
+      if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " KB/s"
+      return Math.round(bps) + " B/s"
+    }
+
     readonly property var pts: {
       var cut = Date.now() / 1000 - 180
       return tab.panel.recentPoints.filter(function(p) { return p.t >= cut })
@@ -132,6 +147,43 @@ Column {
       }
       draw("rx", true, Color.accent)
       draw("tx", false, tab.panel.warnTone)
+
+      // Top-of-scale label so the silhouette has magnitude.
+      ctx.font = "10px " + tab.panel.fontFamily
+      ctx.textBaseline = "top"
+      ctx.fillStyle = tab.panel.dim
+      ctx.fillText("\u2264 " + fmt(peak), 4, 3)
+
+      if (hoverX >= 0) {
+        var tAt = t0 + hoverX * span / (width - 1)
+        var best = null, bestD = Infinity
+        for (var h = 0; h < p.length; h++) {
+          var d = Math.abs(p[h].t - tAt)
+          if (d < bestD) { bestD = d; best = p[h] }
+        }
+        if (best) {
+          var cx = (best.t - t0) * (width - 1) / span
+          ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
+                                    tab.panel.fg.b, 0.4)
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          ctx.moveTo(cx + 0.5, 0)
+          ctx.lineTo(cx + 0.5, height)
+          ctx.stroke()
+          var label = Qt.formatTime(new Date(best.t * 1000), "HH:mm:ss")
+            + "  ·  \u2193 " + fmt(best.rx) + "  ·  \u2191 " + fmt(best.tx)
+          var w = ctx.measureText(label).width + 12
+          var bx = Math.max(2, Math.min(width - w - 2, cx - w / 2))
+          var bg = Color.popups.background
+          ctx.fillStyle = Qt.rgba(bg.r, bg.g, bg.b, 0.92)
+          ctx.fillRect(bx, 2, w, 16)
+          ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
+                                    tab.panel.fg.b, 0.25)
+          ctx.strokeRect(bx + 0.5, 2.5, w - 1, 15)
+          ctx.fillStyle = tab.panel.fg
+          ctx.fillText(label, bx + 6, 6)
+        }
+      }
     }
   }
 
