@@ -121,9 +121,23 @@ Panel {
       historyDays: setting("historyDays", 7),
       throughputWindowS: setting("throughputWindowS", 3),
     }
-    configWriter.command = ["sh", "-c",
-      "mkdir -p \"$2\" && printf %s \"$1\" > \"$2/config.json\"",
-      "sh", JSON.stringify(cfg), stateDir]
+    // Written atomically via mkstemp + rename — the same discipline the
+    // daemon's own writers use. A shell redirection here would be a
+    // truncating, symlink-following write at a predictable path: exactly
+    // the class the security review flagged on the lock file.
+    configWriter.command = ["python3", "-c",
+      "import os, sys, tempfile\n" +
+      "d = sys.argv[2]\n" +
+      "os.makedirs(d, mode=0o700, exist_ok=True)\n" +
+      "fd, tmp = tempfile.mkstemp(dir=d)\n" +
+      "try:\n" +
+      "    os.write(fd, sys.argv[1].encode())\n" +
+      "    os.close(fd)\n" +
+      "    os.replace(tmp, os.path.join(d, 'config.json'))\n" +
+      "except BaseException:\n" +
+      "    os.unlink(tmp)\n" +
+      "    raise\n",
+      JSON.stringify(cfg), stateDir]
     configWriter.running = true
   }
 
