@@ -216,6 +216,17 @@ class StoreRoundtrip(unittest.TestCase):
         # Too few samples on an unknown network falls back to all networks.
         self.assertIsNotNone(self.store.baseline_speed(network="Home", now=now))
 
+    def test_baseline_no_fallback_without_local_samples(self):
+        now = int(time.time())
+        for i in range(6):
+            self.store.put_test(now - i * 3600, "content", "x",
+                                down_mbps=300, ok=True, network="OfficeA")
+        # Another network's history must not become this network's normal.
+        self.assertIsNone(self.store.baseline_speed(network="OfficeB",
+                                                    now=now, fallback=False))
+        self.assertIsNotNone(self.store.baseline_speed(network="OfficeB",
+                                                       now=now))
+
     def test_baseline_needs_enough_samples(self):
         now = int(time.time())
         for i in range(3):
@@ -438,6 +449,52 @@ class AppAttribution(unittest.TestCase):
         by_name = {a["name"]: a for a in t.rates}
         # Born between samples: its full counters are this interval's traffic.
         self.assertEqual(by_name["slack"]["rx_total"], 65451)
+
+
+class SpeedScoring(unittest.TestCase):
+    """Daemon.speed_score against a real store, no probes started."""
+
+    def setUp(self):
+        import os as _os
+        from nexthopd.daemon import Daemon
+        self.dir = tempfile.TemporaryDirectory()
+        _os.environ["XDG_STATE_HOME"] = self.dir.name
+        self.daemon = Daemon()
+        self._os = _os
+
+    def tearDown(self):
+        self.daemon.store.close()
+        del self._os.environ["XDG_STATE_HOME"]
+        self.dir.cleanup()
+
+    def put(self, ago_s, down, up, network):
+        self.daemon.store.put_test(int(time.time() - ago_s), "content",
+                                   "cloudflare", down_mbps=down, up_mbps=up,
+                                   ok=True, network=network)
+
+    def test_other_networks_checks_do_not_score_here(self):
+        self.put(600, 300, 100, "OfficeA")
+        spd, ctx = self.daemon.speed_score(time.time(), "OfficeB")
+        self.assertIsNone(spd)
+        self.assertTrue(ctx.get("pending"))
+
+    def test_median_shrugs_off_one_bad_check(self):
+        self.put(7200, 220, 90, "OfficeA")
+        self.put(3600, 240, 95, "OfficeA")
+        self.put(600, 18, 5, "OfficeA")       # the mid-roam outlier
+        spd, ctx = self.daemon.speed_score(time.time(), "OfficeA")
+        self.assertEqual(ctx["last_down"], 220)   # median, not the outlier
+        self.assertGreater(spd, 85)
+
+    def test_no_cross_network_penalty(self):
+        # A fast history elsewhere must not depress a slower network.
+        for i in range(6):
+            self.put(3600 * (i + 2), 300, 100, "FastOffice")
+        self.put(600, 30, 10, "SlowCafe")
+        spd, ctx = self.daemon.speed_score(time.time(), "SlowCafe")
+        self.assertIsNone(ctx["baseline_down"])
+        # Pure absolute curve for 30/10: mid-50s to 60 — no minus-35 cliff.
+        self.assertGreater(spd, 50)
 
 
 class AtomicState(unittest.TestCase):

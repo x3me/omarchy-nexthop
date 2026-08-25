@@ -500,8 +500,12 @@ class Daemon:
         if not self.config["contentSpeed"]:
             return
         interval = max(15, int(self.config["contentSpeedIntervalMin"])) * 60
-        if now - self.last_content_test < interval:
+        boost_at = getattr(self, "_content_boost_at", None)
+        due = (now - self.last_content_test >= interval) or \
+              (boost_at is not None and now >= boost_at)
+        if not due:
             return
+        self._content_boost_at = None
         # Skip while down — a failed transfer during an outage is not a
         # speed measurement, and skip while a peak test owns the line.
         if self.watch_wan.down_since or self.watch_local.down_since or self.peak_running:
@@ -562,15 +566,16 @@ class Daemon:
         own recent p90. The baseline is cached for a minute — it moves at
         content-check cadence, not at probe cadence.
         """
-        content = self.store.tests(limit=1, kind="content")
-        if not content or not content[0]["ok"]:
-            return None, {"basis": "auto", "baseline_down": None,
-                          "last_down": None, "last_up": None}
-        last = content[0]
+        tests = [t for t in self.store.tests(limit=12, kind="content")
+                 if t["ok"] and t["down_mbps"] is not None]
 
         plan_d = self.config["planDownMbps"]
         plan_u = self.config["planUpMbps"]
         if plan_d:
+            if not tests:
+                return None, {"basis": "plan", "plan_down": plan_d,
+                              "last_down": None, "last_up": None}
+            last = tests[0]
             spd = score.speed(last["down_mbps"], last["up_mbps"],
                               plan_d, plan_u or 0)
             return spd, {"basis": "plan", "plan_down": plan_d,
@@ -578,17 +583,38 @@ class Daemon:
                          "last_down": last["down_mbps"],
                          "last_up": last["up_mbps"]}
 
+        # Checks describe the network they ran on. A result from another
+        # network says nothing about this one, so on a network with no
+        # checks yet the component is honestly unknown (and the changed
+        # network has already scheduled a prompt check).
+        mine = [t for t in tests
+                if (t.get("network") or "") == network] if network else tests
+        if not mine:
+            return None, {"basis": "auto", "baseline_down": None,
+                          "last_down": None, "last_up": None,
+                          "pending": True}
+
+        # Median of the last few checks here, so one bad sample — a check
+        # that ran mid-roam or during someone's upload — cannot pin the
+        # score until the next hourly run.
+        recent = mine[:3]
+        downs = sorted(t["down_mbps"] for t in recent)
+        down = downs[len(downs) // 2]
+        ups = sorted(t["up_mbps"] for t in recent
+                     if t["up_mbps"] is not None)
+        up = ups[len(ups) // 2] if ups else None
+
         cache = getattr(self, "_baseline_cache", None)
         if not cache or now - cache[0] > 60 or cache[2] != network:
-            baseline = self.store.baseline_speed(network=network, now=now)
+            baseline = self.store.baseline_speed(network=network, now=now,
+                                                 fallback=False)
             cache = (now, baseline, network)
             self._baseline_cache = cache
         baseline = cache[1]
-        spd = score.speed(last["down_mbps"], last["up_mbps"],
-                          baseline_down=baseline)
+        spd = score.speed(down, up, baseline_down=baseline)
         return spd, {"basis": "auto", "baseline_down": baseline,
-                     "last_down": last["down_mbps"],
-                     "last_up": last["up_mbps"]}
+                     "last_down": down, "last_up": up,
+                     "samples": len(recent)}
 
     def compose_live(self, now: float) -> dict:
         ls = Series.stats(self.local.since(30))
@@ -603,6 +629,15 @@ class Daemon:
         snap = net.snapshot(self.config["internetAnchor"])
         network = snap.get("ssid") or snap.get("name") or ""
         self.last_signal = snap.get("signal_dbm")
+        prev = getattr(self, "_content_network", None)
+        if network and prev is not None and network != prev:
+            # New network: the hourly cadence would leave Speed unknown or
+            # stale for up to an hour here. Measure soon — after a settle
+            # delay, so a roam in progress is not sampled as the network's
+            # capability.
+            self._content_boost_at = now + 90
+        if network:
+            self._content_network = network
         if snap.get("kind") == "wifi":
             self.link_watch.sample(now, snap,
                                    (self.rates[0] or 0) + (self.rates[1] or 0))

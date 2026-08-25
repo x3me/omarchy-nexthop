@@ -198,7 +198,8 @@ class Store:
         return row["d"], row["u"]
 
     def baseline_speed(self, days: int = 30, network: str = "",
-                       min_samples: int = 5, now: float = None):
+                       min_samples: int = 5, now: float = None,
+                       fallback: bool = True):
         """This connection's own normal: the p90 of recent content downloads.
 
         p90 rather than max so one lucky quiet-hour run does not set a bar
@@ -225,6 +226,11 @@ class Store:
             result = p90(rows)
             if result is not None:
                 return result
+        # The caller decides whether a cross-network baseline is meaningful.
+        # For the degradation penalty it is not: "is it normal here" cannot
+        # be answered with another network's normal.
+        if not fallback:
+            return None
         rows = self.db.execute(
             """SELECT down_mbps FROM tests
                WHERE kind='content' AND ok=1 AND ts >= ?""",
