@@ -65,7 +65,10 @@ Canvas {
     if (showScale) {
       // Quarter gridlines plus the top-of-scale label, so a quiet line
       // reads as "3 ms on a 10 ms scale" rather than as an empty box.
-      ctx.strokeStyle = Qt.rgba(axisColor.r, axisColor.g, axisColor.b, 0.5)
+      // Barely-there on purpose: they are reference, not content — and
+      // Qt.rgba here sets an absolute alpha, so this must be far below
+      // the baseline's 0.15, not a multiplier of it.
+      ctx.strokeStyle = Qt.rgba(axisColor.r, axisColor.g, axisColor.b, 0.05)
       for (var g = 1; g <= 3; g++) {
         var gy = Math.round(bottom - (bottom - top) * g / 4) + 0.5
         ctx.beginPath()
