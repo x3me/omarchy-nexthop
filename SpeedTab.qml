@@ -460,7 +460,7 @@ Column {
       textFormat: Text.PlainText
       anchors.verticalCenter: parent.verticalCenter
       width: parent.width - runButton.width - Style.space(12)
-      text: "A peak test saturates the line and moves 100–400 MB. It only runs when you ask."
+      text: "A peak test saturates the line for ~10 s each way — up to ~600 MB on a fast line. It only runs when you ask."
       color: tab.panel.dim
       font.family: tab.panel.fontFamily
       font.pixelSize: Style.font.caption

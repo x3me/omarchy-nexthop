@@ -497,6 +497,32 @@ class SpeedScoring(unittest.TestCase):
         self.assertGreater(spd, 50)
 
 
+class PeakSizing(unittest.TestCase):
+    """The sustained pass is sized from the estimate, floored and capped."""
+
+    def test_sized_for_ten_seconds_at_measured_rate(self):
+        from nexthopd import speedtest
+        n = speedtest._sized_pass(400.0, speedtest.PEAK_DOWN_FLOOR,
+                                  speedtest.PEAK_DOWN_CAP)
+        self.assertEqual(n, 500_000_000)  # 400 Mbps for 10 s
+        self.assertAlmostEqual(speedtest._pass_seconds(400.0, n), 10.0)
+
+    def test_slow_line_stays_small(self):
+        from nexthopd import speedtest
+        n = speedtest._sized_pass(10.0, speedtest.PEAK_DOWN_FLOOR,
+                                  speedtest.PEAK_DOWN_CAP)
+        self.assertEqual(n, 12_500_000)
+
+    def test_caps_bound_both_directions(self):
+        from nexthopd import speedtest
+        self.assertEqual(speedtest._sized_pass(10_000.0, speedtest.PEAK_DOWN_FLOOR,
+                                               speedtest.PEAK_DOWN_CAP),
+                         speedtest.PEAK_DOWN_CAP)
+        self.assertEqual(speedtest._sized_pass(0.1, speedtest.PEAK_UP_FLOOR,
+                                               speedtest.PEAK_UP_CAP),
+                         speedtest.PEAK_UP_FLOOR)
+
+
 class AtomicState(unittest.TestCase):
     def test_write_read(self):
         with tempfile.TemporaryDirectory() as d:

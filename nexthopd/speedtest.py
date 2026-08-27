@@ -163,23 +163,53 @@ def _peak_ookla() -> Optional[dict]:
         return None
 
 
+PEAK_TARGET_S = 10           # aim each sustained pass at about this long
+PEAK_DOWN_FLOOR = 10_000_000
+PEAK_DOWN_CAP = 500_000_000
+PEAK_UP_FLOOR = 5_000_000
+PEAK_UP_CAP = 100_000_000    # also bounds the in-memory upload body
+
+
+def _sized_pass(mbps: float, floor: int, cap: int) -> int:
+    """Bytes that should take about PEAK_TARGET_S at the measured rate."""
+    return max(floor, min(cap, int(mbps / 8 * PEAK_TARGET_S * 1e6)))
+
+
+def _pass_seconds(mbps: float, n_bytes: int) -> float:
+    return n_bytes * 8 / (mbps * 1e6)
+
+
 def _peak_cloudflare() -> Optional[dict]:
-    """Several large transfers back to back; the best pass is the number."""
-    best_down = 0.0
+    """An estimate pass sizes a sustained pass.
+
+    Fixed sizes made the whole test finish inside TCP ramp-up on a fast
+    line (2-3 s end to end), which both under-reads the line and leaves
+    the loaded-latency window with a handful of probe samples. The
+    estimate pass measures the rate; the sustained pass is sized to hold
+    that rate for ~PEAK_TARGET_S. A slow line's estimate pass already
+    runs that long and doubles as the sustained pass.
+    """
     total = 0
-    for n in (25_000_000, 50_000_000, 100_000_000):
+    best_down, size = _curl_timed_download(CLOUDFLARE_DOWN.format(n=25_000_000),
+                                           timeout=40)
+    total += size
+    if best_down and _pass_seconds(best_down, size) < PEAK_TARGET_S * 0.6:
+        n = _sized_pass(best_down, PEAK_DOWN_FLOOR, PEAK_DOWN_CAP)
         mbps, size = _curl_timed_download(CLOUDFLARE_DOWN.format(n=n), timeout=40)
         total += size
         if mbps:
             best_down = max(best_down, mbps)
-        if mbps and mbps < 20:
-            break  # a slow line gains nothing from the 100 MB pass
     best_up = 0.0
-    for n in (10_000_000, 25_000_000):
-        mbps, size = _curl_timed_upload(CLOUDFLARE_UP, n, timeout=40)
-        total += size
-        if mbps:
-            best_up = max(best_up, mbps)
+    up_est, size = _curl_timed_upload(CLOUDFLARE_UP, 10_000_000, timeout=40)
+    total += size
+    if up_est:
+        best_up = up_est
+        if _pass_seconds(up_est, size) < PEAK_TARGET_S * 0.6:
+            n = _sized_pass(up_est, PEAK_UP_FLOOR, PEAK_UP_CAP)
+            mbps, size = _curl_timed_upload(CLOUDFLARE_UP, n, timeout=40)
+            total += size
+            if mbps:
+                best_up = max(best_up, mbps)
     if not best_down:
         return None
     return {

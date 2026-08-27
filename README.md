@@ -108,8 +108,9 @@ the daemon holds a lock, so the shell service simply attaches.
 
 Continuous probing costs about 11 MB/day at the default 500 ms interval.
 Content checks are ~14 MB each, hourly, and can be turned off. Peak tests
-move 100–400 MB and **only ever run when you ask** — from the panel, by
-middle-clicking the bar widget, or via IPC.
+size themselves to saturate the line for ~10 s each way — up to ~600 MB
+on a fast line, far less on a slow one — and **only ever run when you
+ask**: from the panel, by middle-clicking the bar widget, or via IPC.
 
 ## Using it
 
