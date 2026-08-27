@@ -164,8 +164,11 @@ def _peak_ookla() -> Optional[dict]:
 
 
 PEAK_TARGET_S = 10           # aim each sustained pass at about this long
+PEAK_STREAMS = 4
+# __down 403s any single request of 100 MB or more; each parallel stream
+# stays under that and the streams together still carry a fast line.
+CLOUDFLARE_DOWN_MAX = 99_999_999
 PEAK_DOWN_FLOOR = 10_000_000
-PEAK_DOWN_CAP = 500_000_000
 PEAK_UP_FLOOR = 5_000_000
 PEAK_UP_CAP = 100_000_000    # also bounds the in-memory upload body
 
@@ -186,16 +189,20 @@ def _peak_cloudflare() -> Optional[dict]:
     line (2-3 s end to end), which both under-reads the line and leaves
     the loaded-latency window with a handful of probe samples. The
     estimate pass measures the rate; the sustained pass is sized to hold
-    that rate for ~PEAK_TARGET_S. A slow line's estimate pass already
-    runs that long and doubles as the sustained pass.
+    that rate for ~PEAK_TARGET_S, split over parallel streams because a
+    single stream can neither exceed the per-request byte cap nor fill a
+    fast line by itself. A slow line's estimate pass already runs that
+    long and doubles as the sustained pass.
     """
     total = 0
     best_down, size = _curl_timed_download(CLOUDFLARE_DOWN.format(n=25_000_000),
                                            timeout=40)
     total += size
     if best_down and _pass_seconds(best_down, size) < PEAK_TARGET_S * 0.6:
-        n = _sized_pass(best_down, PEAK_DOWN_FLOOR, PEAK_DOWN_CAP)
-        mbps, size = _curl_timed_download(CLOUDFLARE_DOWN.format(n=n), timeout=40)
+        n = _sized_pass(best_down / PEAK_STREAMS, PEAK_DOWN_FLOOR,
+                        CLOUDFLARE_DOWN_MAX)
+        mbps, size = _parallel_download(CLOUDFLARE_DOWN.format(n=n),
+                                        PEAK_STREAMS, timeout=40)
         total += size
         if mbps:
             best_down = max(best_down, mbps)

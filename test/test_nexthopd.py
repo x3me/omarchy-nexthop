@@ -502,22 +502,26 @@ class PeakSizing(unittest.TestCase):
 
     def test_sized_for_ten_seconds_at_measured_rate(self):
         from nexthopd import speedtest
-        n = speedtest._sized_pass(400.0, speedtest.PEAK_DOWN_FLOOR,
-                                  speedtest.PEAK_DOWN_CAP)
-        self.assertEqual(n, 500_000_000)  # 400 Mbps for 10 s
-        self.assertAlmostEqual(speedtest._pass_seconds(400.0, n), 10.0)
+        # 160 Mbps line over 4 streams: each stream carries 40 Mbps.
+        n = speedtest._sized_pass(160.0 / speedtest.PEAK_STREAMS,
+                                  speedtest.PEAK_DOWN_FLOOR,
+                                  speedtest.CLOUDFLARE_DOWN_MAX)
+        self.assertEqual(n, 50_000_000)
+        self.assertAlmostEqual(speedtest._pass_seconds(40.0, n), 10.0)
 
     def test_slow_line_stays_small(self):
         from nexthopd import speedtest
         n = speedtest._sized_pass(10.0, speedtest.PEAK_DOWN_FLOOR,
-                                  speedtest.PEAK_DOWN_CAP)
+                                  speedtest.CLOUDFLARE_DOWN_MAX)
         self.assertEqual(n, 12_500_000)
 
     def test_caps_bound_both_directions(self):
         from nexthopd import speedtest
+        # __down 403s at 100 MB and above — the per-stream cap must stay under.
+        self.assertLess(speedtest.CLOUDFLARE_DOWN_MAX, 100_000_000)
         self.assertEqual(speedtest._sized_pass(10_000.0, speedtest.PEAK_DOWN_FLOOR,
-                                               speedtest.PEAK_DOWN_CAP),
-                         speedtest.PEAK_DOWN_CAP)
+                                               speedtest.CLOUDFLARE_DOWN_MAX),
+                         speedtest.CLOUDFLARE_DOWN_MAX)
         self.assertEqual(speedtest._sized_pass(0.1, speedtest.PEAK_UP_FLOOR,
                                                speedtest.PEAK_UP_CAP),
                          speedtest.PEAK_UP_FLOOR)
