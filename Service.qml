@@ -34,37 +34,44 @@ Item {
   property string manifestVersion: ""
   property int lastRetiredPid: 0
 
-  readonly property string statePath: {
-    var base = Quickshell.env("XDG_STATE_HOME")
-    if (!base || base.length === 0) base = Quickshell.env("HOME") + "/.local/state"
-    return base + "/nexthop"
-  }
-
-  FileView {
-    path: root.pluginDir + "/manifest.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      var raw = text()
-      if (!raw || raw.length > 262144) return
-      try { root.manifestVersion = String(JSON.parse(raw).version || "") } catch (e) {}
+  // Neither the manifest nor live.json is opened from QML: `nexthop
+  // stream` reads both with a bounded, non-blocking, no-follow,
+  // regular-file-only read and emits them as lines. The version handover
+  // below acts on that data, so a tampered state file cannot stall or
+  // bloat the shell on its way to a SIGTERM decision. Two seconds is
+  // plenty — this only has to notice a fast-forwarded checkout.
+  Process {
+    id: versionStream
+    running: true
+    command: ["sh", "-c",
+              'cd "$1" && exec python3 -m nexthopd.cli stream manifest live --interval 2',
+              "sh", root.pluginDir]
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function (line) { root.applyStream(line) }
     }
-    onFileChanged: reload()
+    onExited: streamRestart.start()
   }
 
-  FileView {
-    path: root.statePath + "/live.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.checkDaemonVersion(text())
-    onFileChanged: reload()
+  Timer {
+    id: streamRestart
+    interval: 2000
+    onTriggered: versionStream.running = true
+  }
+
+  function applyStream(line) {
+    if (!line || line.length > 262144) return
+    if (line.indexOf("manifest ") === 0) {
+      try {
+        root.manifestVersion = String(JSON.parse(line.slice(9)).version || "")
+      } catch (e) {}
+    } else if (line.indexOf("live ") === 0) {
+      root.checkDaemonVersion(line.slice(5))
+    }
   }
 
   function checkDaemonVersion(raw) {
     if (manifestVersion === "") return
-    // live.json is a ~1 KB file the daemon rewrites atomically; anything
-    // larger is not ours and is not parsed.
-    if (!raw || raw.length > 262144) return
     var live
     try { live = JSON.parse(raw) } catch (e) { return }
     var pid = Math.floor(Number(live.pid))
@@ -77,22 +84,15 @@ Item {
     // something else is wrong and looping SIGTERMs will not fix it.
     if (pid === lastRetiredPid) return
     lastRetiredPid = pid
-    // Authorize the signal on the process's full identity, not a name
-    // fragment: it must belong to this user (-O), its cmdline must be
-    // exactly a python interpreter running `-m nexthopd`, and its start
-    // time must match the one the daemon published — a recycled pid can
-    // share a number, never a start time.
+    // Authorizing the signal is `nexthop retire`'s job, not a shell
+    // one-liner's: it must belong to this user, its argv must be exactly a
+    // python interpreter running `-m nexthopd`, and its start time must
+    // match the one the daemon published — a recycled pid can share a
+    // number, never a start time. Doing it in Python makes those three
+    // checks testable, which the one-liner never was.
     retireProc.command = ["sh", "-c",
-      'pid="$1"; want_start="$2"; ' +
-      '[ -O "/proc/$pid" ] || exit 0; ' +
-      'cmd=$(tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null); ' +
-      'case "$cmd" in *python*" -m nexthopd "*|*python*" -m nexthopd") ;; *) exit 0;; esac; ' +
-      'if [ "$want_start" != "0" ]; then ' +
-      'start=$(awk "{print \$(NF-30)}" /dev/null 2>/dev/null; ' +
-      'start=$(sed -e "s/^.*) //" "/proc/$pid/stat" 2>/dev/null | awk "{print \$20}"); ' +
-      '[ "$start" = "$want_start" ] || exit 0; fi; ' +
-      'kill "$pid" 2>/dev/null || true',
-      "sh", String(pid), String(startTicks)]
+      'cd "$1" && exec python3 -m nexthopd.cli retire --pid "$2" --start "$3"',
+      "sh", root.pluginDir, String(pid), String(startTicks)]
     retireProc.running = true
     respawnTimer.restart()
   }

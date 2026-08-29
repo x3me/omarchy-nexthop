@@ -8,10 +8,11 @@ import qs.Ui
 
 // The Nexthop panel: header verdict, five tabs, one alive at a time.
 //
-// All data arrives through files the daemon writes — live.json via FileView
-// for the always-current numbers, recent.json for the default graphs, and
-// `nexthop query` through a Process when a tab asks for a longer window.
-// The panel never probes anything itself.
+// All data arrives through files the daemon writes, but never through a
+// file handle the shell holds: `nexthop stream` reads live.json (the
+// always-current numbers), apps.json and recent.json (the default graphs)
+// and feeds them here as lines, and `nexthop query` runs on demand when a
+// tab asks for a longer window. The panel never probes anything itself.
 Panel {
   id: root
   moduleName: "io.github.x3me.nexthop"
@@ -46,50 +47,13 @@ Panel {
   readonly property string pluginDir:
     Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
 
-  property var live: null
-  property var recent: null
-
-  // Every state file has a known small size; a file past its bound is not
-  // ours and is never parsed. live ~1 KB, apps ~8 KB, recent ~30 KB.
-  function parseBounded(raw, cap) {
-    if (!raw || raw.length > cap) return null
-    try { return JSON.parse(raw) } catch (e) { return null }
-  }
-
-  FileView {
-    path: root.stateDir + "/live.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      var v = root.parseBounded(text(), 262144)
-      if (v !== null) root.live = v
-    }
-    onFileChanged: reload()
-  }
-
-  property var appsData: null
-
-  FileView {
-    path: root.stateDir + "/apps.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      var v = root.parseBounded(text(), 1048576)
-      if (v !== null) root.appsData = v
-    }
-    onFileChanged: reload()
-  }
-
-  FileView {
-    path: root.stateDir + "/recent.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: {
-      var v = root.parseBounded(text(), 1048576)
-      if (v !== null) root.recent = v
-    }
-    onFileChanged: reload()
-  }
+  // The panel opens no file of its own. The bar widget that creates it
+  // owns the single `nexthop stream` reader — a bounded, non-blocking,
+  // no-follow, regular-file-only read out in a small helper — and the
+  // panel binds to what it already parsed.
+  readonly property var live: hostWidget ? hostWidget.live : null
+  readonly property var recent: hostWidget ? hostWidget.recent : null
+  readonly property var appsData: hostWidget ? hostWidget.appsData : null
 
   // recent.json points, trimmed to the slots that actually have data.
   readonly property var recentPoints: {

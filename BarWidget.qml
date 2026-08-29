@@ -12,27 +12,55 @@ BarWidget {
   moduleName: "io.github.x3me.nexthop"
 
   // ---- live state ----------------------------------------------------------
-  readonly property string statePath: {
-    var base = Quickshell.env("XDG_STATE_HOME")
-    if (!base || base.length === 0) base = Quickshell.env("HOME") + "/.local/state"
-    return base + "/nexthop"
-  }
+  //
+  // The shell never opens a state file itself. `nexthop stream` performs a
+  // bounded, non-blocking, no-follow, regular-file-only read and hands us
+  // whole lines, so an oversized file, a FIFO or a symlink swapped in at
+  // the predictable path is refused in a small short-lived process instead
+  // of allocating or stalling inside the long-lived shell.
+  readonly property string pluginDir:
+    Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
 
+  // One reader serves the whole widget: the panel below is created by this
+  // component and binds to these properties rather than opening anything
+  // itself, so the shell runs a single helper, not one per surface.
   property var live: null
+  property var recent: null
+  property var appsData: null
 
-  FileView {
-    path: root.statePath + "/live.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.applyLive(text())
-    onFileChanged: reload()
-    onLoadFailed: root.live = null
+  Process {
+    id: stateStream
+    running: true
+    command: ["sh", "-c",
+              'cd "$1" && exec python3 -m nexthopd.cli stream live apps recent',
+              "sh", root.pluginDir]
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function (line) { root.applyStream(line) }
+    }
+    onExited: streamRestart.start()
   }
 
-  function applyLive(raw) {
-    // live.json is ~1 KB; a larger file is not the daemon's and is ignored.
-    if (!raw || raw.length > 262144) return
-    try { root.live = JSON.parse(raw) } catch (e) { /* mid-rotation; keep last */ }
+  // The reader dies with the daemon's package on an update; bring it back.
+  Timer {
+    id: streamRestart
+    interval: 2000
+    onTriggered: stateStream.running = true
+  }
+
+  // Each file has a known small size; a line past its bound is not ours.
+  // live ~1 KB, apps ~8 KB, recent ~30 KB.
+  function applyStream(line) {
+    var sp = line ? line.indexOf(" ") : -1
+    if (sp <= 0) return
+    var key = line.slice(0, sp)
+    if (line.length - sp - 1 > (key === "live" ? 262144 : 1048576)) return
+    var v
+    try { v = JSON.parse(line.slice(sp + 1)) } catch (e) { return }
+    if (v === null || v === undefined) return
+    if (key === "live") root.live = v
+    else if (key === "apps") root.appsData = v
+    else if (key === "recent") root.recent = v
   }
 
   // ---- derived -------------------------------------------------------------

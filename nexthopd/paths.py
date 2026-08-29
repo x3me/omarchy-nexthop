@@ -31,6 +31,7 @@ def ensure_state_dir() -> Path:
 
 LIVE = "live.json"
 RECENT = "recent.json"
+APPS = "apps.json"
 DB = "history.db"
 LOCK = "nexthopd.lock"
 
@@ -41,6 +42,17 @@ def live_path() -> Path:
 
 def recent_path() -> Path:
     return state_dir() / RECENT
+
+
+def apps_path() -> Path:
+    return state_dir() / APPS
+
+
+def manifest_path() -> Path:
+    """The plugin's own manifest, beside this package rather than in the
+    state dir — the shell service reads it to spot a fast-forwarded
+    checkout."""
+    return Path(__file__).resolve().parent.parent / "manifest.json"
 
 
 def db_path() -> Path:

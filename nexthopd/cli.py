@@ -19,9 +19,9 @@ import signal
 import sys
 import time
 
-from .paths import db_path, live_path, lock_path
-from .state import read_json
-from .store import Store
+from .paths import (apps_path, db_path, live_path, lock_path, manifest_path,
+                    recent_path)
+from .state import read_json, read_text_bounded
 
 WINDOWS = {"m": 60, "h": 3600, "d": 86400}
 
@@ -50,7 +50,120 @@ def cmd_live(_args):
     return 0
 
 
+# The QML side never opens a state file itself. It runs `nexthop stream`
+# and reads whole lines, so the only code that touches these paths is the
+# bounded no-follow non-blocking read in state.py — an oversized file, a
+# FIFO or a symlink swap is refused here, in a small short-lived process,
+# instead of allocating or stalling inside the long-lived shell.
+#
+# Keys, never paths: the caller picks from this table, so no argument it
+# passes can widen what gets opened. Caps match each file's real size
+# (live ~1 KB, apps ~8 KB, recent ~30 KB) with generous headroom.
+STREAMABLE = {
+    "live": (live_path, 256 * 1024),
+    "apps": (apps_path, 1024 * 1024),
+    "recent": (recent_path, 1024 * 1024),
+    "manifest": (manifest_path, 256 * 1024),
+}
+
+
+def cmd_stream(args):
+    """Emit `<key> <json>` lines whenever a watched file's contents change.
+
+    The payload is re-serialised here rather than forwarded verbatim: it
+    guarantees one line per record whatever the file's own formatting
+    (manifest.json is indented, the state files are not), and it means
+    only JSON this process already parsed successfully is ever handed to
+    the shell.
+    """
+    keys = [k for k in dict.fromkeys(args.keys) if k in STREAMABLE]
+    if not keys:
+        print("stream: nothing to watch", file=sys.stderr)
+        return 2
+    interval = min(max(args.interval, 0.1), 60.0)
+    last = {}
+    while True:
+        for key in keys:
+            resolve, cap = STREAMABLE[key]
+            got = read_text_bounded(resolve(), cap)
+            if got is None:
+                continue
+            text, stamp = got
+            if last.get(key) == stamp:
+                continue
+            last[key] = stamp
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                continue          # a half-written or foreign file; skip it
+            # ensure_ascii escapes any newline inside a string, so the
+            # record cannot break the line framing.
+            line = json.dumps(payload, separators=(",", ":"))
+            try:
+                sys.stdout.write(f"{key} {line}\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, ValueError):
+                # The shell went away; so do we. _exit skips the
+                # interpreter's final flush, which would only raise the
+                # same broken pipe again and print it to stderr.
+                os._exit(0)
+        time.sleep(interval)
+
+
+def authorized_to_retire(pid: int, want_start: int) -> bool:
+    """Is this pid really our daemon, and the same one live.json named?
+
+    Three independent facts, all read from /proc and none of them a name
+    match: the process must belong to this user, its argv must be exactly
+    a python interpreter running `-m nexthopd`, and its start time must
+    equal the one the daemon published. A recycled pid can reproduce the
+    number but never the start time.
+
+    This lives here rather than in a shell one-liner because the one-liner
+    could not be tested and, as it turned out, did not run at all: the
+    NUL it passed to `tr` truncated the script at execve.
+    """
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = [a.decode("utf-8", "replace")
+                    for a in f.read(4096).split(b"\0") if a]
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read(4096)
+    except (OSError, ValueError):
+        return False
+    if len(argv) < 3 or "python" not in os.path.basename(argv[0]):
+        return False
+    if argv[1] != "-m" or argv[2] != "nexthopd" or len(argv) > 3:
+        return False
+    if want_start:
+        try:
+            start = int(data[data.rindex(b")") + 2:].split()[19])
+        except (ValueError, IndexError):
+            return False
+        if start != want_start:
+            return False
+    return True
+
+
+def cmd_retire(args):
+    """SIGTERM a stale daemon, but only once its identity checks out."""
+    if args.pid <= 0 or args.pid == os.getpid():
+        return 1
+    if not authorized_to_retire(args.pid, args.start):
+        return 1
+    try:
+        os.kill(args.pid, signal.SIGTERM)
+    except OSError:
+        return 1
+    return 0
+
+
 def open_store():
+    # Imported here, not at module scope: `stream` runs for the life of the
+    # shell and has no use for sqlite3, so it should not pay to load it.
+    from .store import Store
     path = db_path()
     if not path.exists():
         return None
@@ -182,9 +295,16 @@ def main(argv=None):
     sub.add_parser("peak")
     r = sub.add_parser("report")
     r.add_argument("--window", default="24h")
+    s = sub.add_parser("stream")
+    s.add_argument("keys", nargs="+", choices=sorted(STREAMABLE))
+    s.add_argument("--interval", type=float, default=0.5)
+    rt = sub.add_parser("retire")
+    rt.add_argument("--pid", type=int, required=True)
+    rt.add_argument("--start", type=int, default=0)
     args = ap.parse_args(argv)
     return {"live": cmd_live, "query": cmd_query, "events": cmd_events,
-            "tests": cmd_tests, "peak": cmd_peak, "report": cmd_report}[args.cmd](args)
+            "tests": cmd_tests, "peak": cmd_peak, "report": cmd_report,
+            "stream": cmd_stream, "retire": cmd_retire}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from nexthopd.store import Store  # noqa: E402
 from nexthopd.state import write_atomic, read_json  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
+REPO = Path(__file__).resolve().parent.parent
 
 
 class PingParsing(unittest.TestCase):
@@ -403,6 +404,184 @@ class FdSafety(unittest.TestCase):
                 del _os.environ["XDG_STATE_HOME"]
             self.assertEqual(victim.read_text(),
                              "precious data that must survive")
+
+
+class StateReadSafety(unittest.TestCase):
+    """The read the QML side consumes: bounded, non-blocking, no-follow,
+    regular files only. Every property is enforced on the fd actually read,
+    so a state file swapped at its predictable path can neither redirect
+    the read, stall it, nor allocate without limit."""
+
+    def setUp(self):
+        from nexthopd.state import read_text_bounded
+        self.read = read_text_bounded
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_regular_file_reads(self):
+        (self.d / "live.json").write_text('{"a":1}')
+        got = self.read(self.d / "live.json", 1024)
+        self.assertIsNotNone(got)
+        self.assertEqual(got[0], '{"a":1}')
+
+    def test_symlink_refused_and_target_unread(self):
+        secret = self.d / "secret"
+        secret.write_text("SENSITIVE")
+        (self.d / "live.json").symlink_to(secret)
+        self.assertIsNone(self.read(self.d / "live.json", 1024))
+
+    def test_fifo_refused_without_blocking(self):
+        import os as _os
+        _os.mkfifo(self.d / "live.json")
+        # No writer will ever open this; a blocking open would hang here.
+        self.assertIsNone(self.read(self.d / "live.json", 1024))
+
+    def test_oversized_refused_by_the_read_itself(self):
+        (self.d / "live.json").write_text("x" * 5000)
+        self.assertIsNone(self.read(self.d / "live.json", 1024))
+
+    def test_exactly_at_the_cap_is_allowed(self):
+        (self.d / "live.json").write_text("y" * 1024)
+        got = self.read(self.d / "live.json", 1024)
+        self.assertIsNotNone(got)
+        self.assertEqual(len(got[0]), 1024)
+
+    def test_directory_refused(self):
+        self.assertIsNone(self.read(self.d, 1024))
+
+    def test_missing_file_is_none(self):
+        self.assertIsNone(self.read(self.d / "nope.json", 1024))
+
+    def test_stamp_changes_only_when_the_file_does(self):
+        p = self.d / "live.json"
+        p.write_text('{"a":1}')
+        first = self.read(p, 1024)[1]
+        self.assertEqual(self.read(p, 1024)[1], first)
+        import os as _os
+        p.write_text('{"a":2}')
+        _os.utime(p, ns=(0, 12345))
+        self.assertNotEqual(self.read(p, 1024)[1], first)
+
+    def test_stream_keys_are_a_closed_set(self):
+        from nexthopd.cli import STREAMABLE
+        # The QML side names a key, never a path — nothing it passes can
+        # widen what gets opened.
+        self.assertEqual(sorted(STREAMABLE),
+                         ["apps", "live", "manifest", "recent"])
+
+    def test_indented_json_still_streams_as_one_line(self):
+        # manifest.json is pretty-printed. Forwarding it verbatim would
+        # emit several lines and the shell service would never learn the
+        # version, silently disabling the update handover.
+        import json as _json
+        p = self.d / "manifest.json"
+        p.write_text(_json.dumps({"version": "9.9.9", "kinds": ["service"]},
+                                 indent=2))
+        text = self.read(p, 1024)[0]
+        self.assertIn("\n", text)
+        line = _json.dumps(_json.loads(text), separators=(",", ":"))
+        self.assertNotIn("\n", line)
+        self.assertEqual(_json.loads(line)["version"], "9.9.9")
+
+    def test_embedded_newline_cannot_break_framing(self):
+        import json as _json
+        p = self.d / "live.json"
+        p.write_text(_json.dumps({"note": "one\ntwo", "v": 1}))
+        text = self.read(p, 4096)[0]
+        line = _json.dumps(_json.loads(text), separators=(",", ":"))
+        self.assertNotIn("\n", line)
+        self.assertEqual(_json.loads(line)["note"], "one\ntwo")
+
+
+class RetireAuthorization(unittest.TestCase):
+    """The guard that stands between a version mismatch and a SIGTERM.
+
+    It used to be a shell one-liner that could not be tested; it passed a
+    NUL to `tr`, so execve truncated the script and no daemon was ever
+    actually retired. These cases pin each fact it checks.
+    """
+
+    def setUp(self):
+        from nexthopd.cli import authorized_to_retire
+        self.auth = authorized_to_retire
+        from nexthopd.daemon import proc_start_ticks
+        self.ticks = proc_start_ticks
+
+    def spawn(self, args, cwd=None):
+        import subprocess
+        p = subprocess.Popen(args, cwd=cwd, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        time.sleep(0.4)
+        return p
+
+    def daemon_shaped(self):
+        """A process whose argv is exactly `python -m nexthopd`.
+
+        A stand-in rather than the real daemon: the real one would lose the
+        flock race against whatever is already running and exit before the
+        guard could look at it, and a test has no business probing the
+        network. The guard reads argv, owner and start time — all of which
+        this reproduces exactly.
+        """
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, True))
+        pkg = Path(d) / "nexthopd"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("import time\ntime.sleep(30)\n")
+        return self.spawn([sys.executable, "-m", "nexthopd"], cwd=d)
+
+    def test_daemon_argv_with_matching_start_is_authorized(self):
+        p = self.daemon_shaped()
+        self.assertTrue(self.auth(p.pid, self.ticks(p.pid)))
+
+    def test_wrong_start_time_refused(self):
+        p = self.daemon_shaped()
+        self.assertFalse(self.auth(p.pid, self.ticks(p.pid) + 1))
+
+    def test_zero_start_skips_only_the_time_check(self):
+        # live.json from a daemon too old to publish pid_start: argv and
+        # ownership still have to hold.
+        p = self.daemon_shaped()
+        self.assertTrue(self.auth(p.pid, 0))
+
+    def test_other_python_process_refused(self):
+        # Same interpreter, different module: never ours to signal.
+        p = self.spawn([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.assertFalse(self.auth(p.pid, 0))
+
+    def test_lookalike_argv_refused(self):
+        # A process that merely mentions nexthopd is not the daemon.
+        p = self.spawn([sys.executable, "-c",
+                        "import time; time.sleep(30)  # -m nexthopd"])
+        self.assertFalse(self.auth(p.pid, 0))
+
+    def test_extra_arguments_refused(self):
+        p = self.spawn([sys.executable, "-m", "nexthopd.cli", "stream", "live"])
+        self.assertFalse(self.auth(p.pid, 0))
+
+    def test_pid_that_does_not_exist_refused(self):
+        self.assertFalse(self.auth(999999, 0))
+
+    def test_pid_one_refused(self):
+        # Owned by root, so the ownership check alone stops us.
+        self.assertFalse(self.auth(1, 0))
+
+    def test_command_string_carries_no_nul(self):
+        # The regression itself: the argv QML hands to sh must survive
+        # execve, which a NUL byte would truncate.
+        import subprocess
+        cmd = ('cd "$1" && exec python3 -m nexthopd.cli retire '
+               '--pid "$2" --start "$3"')
+        self.assertNotIn("\0", cmd)
+        r = subprocess.run(["sh", "-c", cmd, "sh", str(REPO), "999999", "0"],
+                           capture_output=True)
+        self.assertEqual(r.returncode, 1)      # refused, not a syntax error
+        self.assertEqual(r.stderr, b"")
 
 
 class AppAttribution(unittest.TestCase):
