@@ -195,6 +195,73 @@ class LoadTagging(unittest.TestCase):
         self.assertFalse(broken._loaded())
 
 
+class ApplicationPath(unittest.TestCase):
+    """The TCP-handshake probe that sits beside ICMP.
+
+    ICMP is answered by fast paths in hardware and can be spoofed by
+    anything on the way; a handshake to port 443 has to reach a listener
+    that completes it. The gap between the two is the measurement.
+    """
+
+    def setUp(self):
+        import os as _os
+        from nexthopd.daemon import Daemon
+        self.dir = tempfile.TemporaryDirectory()
+        _os.environ["XDG_STATE_HOME"] = self.dir.name
+        self.daemon = Daemon()
+        self._os = _os
+
+    def tearDown(self):
+        self.daemon.store.close()
+        del self._os.environ["XDG_STATE_HOME"]
+        self.dir.cleanup()
+
+    def test_reports_the_gap_against_icmp(self):
+        now = time.time()
+        for i in range(30):
+            self.daemon.total.add(now - 30 + i, 7.0)     # ICMP: fast-pathed
+            self.daemon.app.add(now - 30 + i, 12.0)      # handshake: honest
+        ap = self.daemon.app_path(300.0)
+        self.assertTrue(ap["available"])
+        self.assertAlmostEqual(ap["icmp_delta_ms"], 5.0, places=1)
+
+    def test_anchor_that_refuses_443_reads_as_unavailable_not_broken(self):
+        # Every sample failing is a fact about the target, not a fault in
+        # the connection — it must not surface as 100% packet loss.
+        now = time.time()
+        for i in range(20):
+            self.daemon.total.add(now - 20 + i, 8.0)
+            self.daemon.app.add(now - 20 + i, None)
+        ap = self.daemon.app_path(300.0)
+        self.assertFalse(ap["available"])
+        self.assertIsNone(ap["icmp_delta_ms"])
+
+    def test_no_samples_yet_is_unavailable_without_a_delta(self):
+        ap = self.daemon.app_path(300.0)
+        self.assertFalse(ap["available"])
+        self.assertIsNone(ap["icmp_delta_ms"])
+        self.assertIsNone(ap["request"])
+
+    def test_tcp_probe_records_a_failure_rather_than_raising(self):
+        from nexthopd.probes import TcpProbe
+        s = Series()
+        # Reserved-for-documentation address; nothing answers.
+        p = TcpProbe("192.0.2.1", s, 1.0, "t", port=9)
+        p.CONNECT_TIMEOUT_S = 0.25
+        p._once()
+        self.assertEqual(len(s.all()), 1)
+        self.assertIsNone(s.all()[0][1])
+        self.assertFalse(p.ever_connected)
+
+    def test_tcp_probe_tags_load_like_the_ping_probe(self):
+        from nexthopd.probes import TcpProbe
+        s = Series()
+        p = TcpProbe("192.0.2.1", s, 1.0, "t", loaded_fn=lambda: True, port=9)
+        p.CONNECT_TIMEOUT_S = 0.25
+        p._once()
+        self.assertTrue(s.all()[0][2])
+
+
 class Scoring(unittest.TestCase):
     def test_lag_charges_for_loss(self):
         clean = {"count": 100, "loss": 0.0, "p75": 10.0, "jitter": 1.0}

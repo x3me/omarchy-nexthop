@@ -10,8 +10,10 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import stat as stat_module
+import subprocess
 import sys
 import threading
 import time
@@ -20,7 +22,7 @@ from collections import deque
 from . import __version__, apps, net, score, speedtest
 from .paths import (ensure_state_dir, live_path, recent_path, db_path,
                     lock_path, state_dir)
-from .probes import Series, PingProbe
+from .probes import Series, PingProbe, TcpProbe
 from .state import write_atomic
 from .store import Store
 
@@ -32,6 +34,22 @@ OUTAGE_AFTER_LOSSES = 8
 # Probes needed on each side of the idle/loaded split before their ratio is
 # reported. Below this the comparison is sampling noise.
 MIN_LOAD_SPLIT_SAMPLES = 10
+
+# The application-path probe: a TCP handshake to the anchor's TLS port,
+# once a second. Slower than the ICMP cadence on purpose — this exists to
+# characterise the gap against ICMP, not to detect outages, and it opens a
+# real connection to someone else's server every time it runs.
+TCP_PROBE_INTERVAL_S = 1.0
+TCP_PROBE_PORT = 443
+
+# One real HTTP/3 request every five minutes, as ground truth for what a
+# request actually costs end to end. A DNS-over-HTTPS query is the smallest
+# honest request available: 251 bytes of response, so the whole sample
+# including the QUIC handshake costs a few KB — about 2 MB a day, against
+# the ~11 MB a day the continuous probing already spends.
+H3_SAMPLE_INTERVAL_S = 300.0
+H3_URL = "https://one.one.one.one/dns-query?name=example.com&type=A"
+H3_TIMEOUT_S = 10.0
 
 
 def proc_start_ticks(pid):
@@ -324,6 +342,13 @@ class Daemon:
         self.store = Store(db_path())
         self.local = Series()
         self.total = Series()
+        # TCP-handshake RTT to the same anchor, on 443. Same host, same
+        # path, different protocol — so the gap against the ICMP series is
+        # attributable to the protocol rather than to the target.
+        self.app = Series()
+        self.app_request = None          # last HTTP/3 request sample
+        self._curl_h3 = None             # cached curl capability
+        self.last_app_request = 0.0
         self.probes = []
         self.running = True
         self.route = {}
@@ -403,6 +428,10 @@ class Daemon:
                       loaded_fn=lambda: self.link_loaded)
         p.start()
         self.probes.append(p)
+        p = TcpProbe(anchor, self.app, TCP_PROBE_INTERVAL_S, "app",
+                     loaded_fn=lambda: self.link_loaded, port=TCP_PROBE_PORT)
+        p.start()
+        self.probes.append(p)
 
     def restart_probes_if_route_changed(self):
         """New default route (roamed networks, docked, VPN up) — new targets."""
@@ -416,6 +445,10 @@ class Daemon:
         self.probes.clear()
         self.local = Series()
         self.total = Series()
+        # TCP-handshake RTT to the same anchor, on 443. Same host, same
+        # path, different protocol — so the gap against the ICMP series is
+        # attributable to the protocol rather than to the target.
+        self.app = Series()
         self.route = fresh
         self.counter_samples = []
         self.start_probes()
@@ -631,6 +664,78 @@ class Daemon:
                      "last_down": down, "last_up": up,
                      "samples": len(recent)}
 
+    def sample_app_request(self):
+        """One real HTTP/3 request, for what a request actually costs.
+
+        The TCP probe gives a round trip comparable with ICMP; this gives
+        what neither measures — handshake plus first byte over the protocol
+        a browser would use. Degrades to HTTP/2 where curl has no HTTP/3
+        rather than reporting nothing.
+        """
+        if not shutil.which("curl"):
+            return
+        proto = ["--http3"] if self._curl_has_http3() else ["--http2"]
+        cmd = (["curl", "-sS", "-o", "/dev/null",
+                "--max-time", str(int(H3_TIMEOUT_S))]
+               + proto
+               + ["-H", "accept: application/dns-json",
+                  "-w", "%{http_version} %{time_appconnect} "
+                        "%{time_starttransfer} %{size_download} %{http_code}",
+                  H3_URL])
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=H3_TIMEOUT_S + 5)
+        except (subprocess.TimeoutExpired, OSError):
+            self.app_request = {"ok": False, "at": time.time()}
+            return
+        if r.returncode != 0:
+            self.app_request = {"ok": False, "at": time.time()}
+            return
+        try:
+            version, appconnect, ttfb, size, code = r.stdout.split()
+            self.app_request = {
+                "ok": code.startswith("2"),
+                "protocol": "h3" if version.startswith("3") else "h" + version,
+                "handshake_ms": round(float(appconnect) * 1000.0, 1),
+                "ttfb_ms": round(float(ttfb) * 1000.0, 1),
+                "bytes": int(size),
+                "at": time.time(),
+            }
+        except (ValueError, IndexError):
+            self.app_request = {"ok": False, "at": time.time()}
+
+    def _curl_has_http3(self) -> bool:
+        """Cached once: curl is not rebuilt mid-run."""
+        if self._curl_h3 is None:
+            try:
+                out = subprocess.run(["curl", "--version"], capture_output=True,
+                                     text=True, timeout=5).stdout
+                self._curl_h3 = "HTTP3" in out
+            except (subprocess.TimeoutExpired, OSError):
+                self._curl_h3 = False
+        return self._curl_h3
+
+    def app_path(self, window_s: float = 300.0) -> dict:
+        """The application path beside the ICMP one, and the gap between.
+
+        `icmp_delta_ms` is what this probe exists to produce: how much
+        lower ICMP reads than a handshake over the same path to the same
+        host. A large positive gap means the ICMP figure — and any score
+        built on it — is flattering the connection.
+        """
+        app_stats = Series.stats(self.app.since(window_s))
+        icmp_stats = Series.stats(self.total.since(window_s))
+        out = {"rtt": app_stats, "request": self.app_request}
+        # Every sample failing means the anchor does not answer on this
+        # port: a fact about the target, not a fault in the connection.
+        out["available"] = bool(app_stats["count"]) and app_stats["loss"] != 1.0
+        delta = None
+        if (out["available"] and app_stats.get("p50") is not None
+                and icmp_stats.get("p50") is not None):
+            delta = round(app_stats["p50"] - icmp_stats["p50"], 2)
+        out["icmp_delta_ms"] = delta
+        return out
+
     def bufferbloat(self, window_s: float = 300.0) -> dict:
         """Lag while the link was idle vs while it was carrying traffic.
 
@@ -722,6 +827,7 @@ class Daemon:
                     "inflation": bloat["inflation"],
                     "loaded_samples": bloat["loaded_samples"]},
             "local": ls, "total": ts, "wan": ws,
+            "app": self.app_path(300.0),
             "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1],
                       "rx_total": self.counter_samples[-1][1] if self.counter_samples else None,
                       "tx_total": self.counter_samples[-1][2] if self.counter_samples else None},
@@ -867,6 +973,13 @@ class Daemon:
                                  now=now)
 
             self.maybe_content_test(now)
+
+            if now - self.last_app_request >= H3_SAMPLE_INTERVAL_S:
+                self.last_app_request = now
+                # Off the loop: a request can block for seconds and the
+                # bar must keep updating at 2 Hz while it does.
+                threading.Thread(target=self.sample_app_request,
+                                 name="app-request", daemon=True).start()
 
             if self.peak_requested.is_set():
                 self.peak_requested.clear()

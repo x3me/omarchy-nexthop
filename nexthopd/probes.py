@@ -8,6 +8,7 @@ for us, and `-O` makes it say so out loud when a packet goes missing.
 
 import re
 import shutil
+import socket
 import statistics
 import subprocess
 import threading
@@ -231,3 +232,77 @@ class PingProbe(threading.Thread):
             t, seq = float(m.group(1)), int(m.group(2))
             self._pending.setdefault(seq, t)
             self._expire(t)
+
+
+class TcpProbe(threading.Thread):
+    """Connect-time RTT to the anchor's TLS port, feeding a Series.
+
+    ICMP measures what routers choose to answer, and they answer it fast:
+    many devices handle it in hardware, in an ASIC or via XDP, while real
+    traffic waits in the user-space path behind the queues that actually
+    hold it up. Anything on the way can also reply on the destination's
+    behalf, because there is nothing in ICMP to prove otherwise.
+
+    A TCP handshake cannot be shortcut that way. The SYN has to reach a
+    listener that completes it, over port 443 where the user's own traffic
+    goes, so its round trip is the one applications experience. One
+    connection per sample, opened and closed — no payload, no TLS, nothing
+    kept.
+
+    Reported beside the ICMP number rather than replacing it: the gap
+    between the two is the measurement, and it has to be trusted before it
+    can move a score.
+    """
+
+    daemon = True
+    CONNECT_TIMEOUT_S = 2.0
+
+    def __init__(self, target: str, series: Series, interval_s: float = 1.0,
+                 name: str = "", loaded_fn=None, port: int = 443):
+        super().__init__(name=f"tcp-{name or target}", daemon=True)
+        self.target = target
+        self.port = port
+        self.series = series
+        self.interval = max(0.25, interval_s)
+        self.loaded_fn = loaded_fn
+        self._stop = threading.Event()
+        self.ever_connected = False
+
+    def stop(self):
+        self._stop.set()
+
+    def _loaded(self) -> bool:
+        try:
+            return bool(self.loaded_fn()) if self.loaded_fn else False
+        except Exception:
+            return False
+
+    def _once(self):
+        started = time.time()
+        t0 = time.monotonic()
+        try:
+            sock = socket.create_connection((self.target, self.port),
+                                            timeout=self.CONNECT_TIMEOUT_S)
+        except (OSError, ValueError):
+            self.series.add(started, None, self._loaded())
+            return
+        rtt = (time.monotonic() - t0) * 1000.0
+        try:
+            sock.close()
+        except OSError:
+            pass
+        self.ever_connected = True
+        self.series.add(started, round(rtt, 2), self._loaded())
+
+    def run(self):
+        while not self._stop.is_set():
+            if not self.target:
+                self._stop.wait(5.0)
+                continue
+            t0 = time.monotonic()
+            try:
+                self._once()
+            except Exception:
+                # Never let a socket or DNS failure take the daemon with it.
+                pass
+            self._stop.wait(max(0.0, self.interval - (time.monotonic() - t0)))
