@@ -54,7 +54,7 @@
 
   <div class="flow">
     <svg width="13" height="30" viewBox="0 0 13 30"><path d="M6.5 0v22" stroke="#565f89" stroke-width="1"></path><path d="M2.5 19l4 5 4-5" fill="none" stroke="#565f89" stroke-width="1"></path></svg>
-    <div class="flowt">FileView { watchChanges: true } for live state &nbsp;&middot;&nbsp; one Process call to <span style="color: #a9b1d6;">nexthop query</span> when you open a longer window</div>
+    <div class="flowt">One <span style="color: #a9b1d6;">nexthop stream</span> reader for live state &mdash; bounded, no-follow, regular-file-only, so the shell never opens a state path itself &nbsp;&middot;&nbsp; one Process call to <span style="color: #a9b1d6;">nexthop query</span> when you open a longer window</div>
     <svg width="13" height="30" viewBox="0 0 13 30"><path d="M6.5 30V8" stroke="#565f89" stroke-width="1"></path><path d="M2.5 11l4-5 4 5" fill="none" stroke="#565f89" stroke-width="1"></path></svg>
   </div>
 
@@ -107,19 +107,19 @@
 
     <div class="g3" style="margin-bottom: 14px;">
       <div class="box">
-        <div class="bt">DNS timing</div>
-        <div class="bs">every 30 sec</div>
-        <div class="bb">Resolution time against the configured resolver, plus a public control. Catches the failure that looks like "internet is down" but is not.</div>
+        <div class="bt">Application path</div>
+        <div class="bs">1 Hz + 5 min</div>
+        <div class="bb">A TCP handshake to the anchor on 443, and one HTTPS request every five minutes. Routers answer pings from hardware and rate-limit them under load, so ICMP alone is not what applications get.</div>
       </div>
       <div class="box">
         <div class="bt">Content speed</div>
-        <div class="bs">hourly, ~15 MB</div>
+        <div class="bs">hourly, ~14 MB</div>
         <div class="bb">A short ranged fetch, enough to score Speed honestly without moving real data. This is what feeds the index.</div>
       </div>
       <div class="box">
         <div class="bt">Scorer</div>
         <div class="bs">continuous</div>
-        <div class="bb">Lag from latency, jitter and loss &rarr; Responsiveness. Disruptions &rarr; Reliability. Content speed &rarr; Speed. Equal thirds, 0&ndash;100.</div>
+        <div class="bb">Lag from latency, jitter and loss &rarr; Responsiveness. Downtime &rarr; Reliability. Content speed &rarr; Speed. Weakest-link, 0&ndash;100: you feel the bottleneck, not the average.</div>
       </div>
     </div>
 

@@ -85,7 +85,7 @@
       "x": -560,
       "y": 1780,
       "w": 440,
-      "text": "The plugin stays a thin reader. nexthopd \u2014 Python 3, standard library only \u2014 owns every measurement and writes three files.\n\nSettled: Python over Rust, because it installs with just a clone. A prebuilt binary in the repo would trip the marketplace's automated security baseline.\n\nid: io.github.x3me.nexthop"
+      "text": "The plugin stays a thin reader. nexthopd \u2014 Python 3, standard library only \u2014 owns every measurement and writes four files.\n\nThe shell never opens one of them: a bounded, no-follow reader hands it whole lines, so a swapped or oversized file cannot stall or bloat the process that draws your desktop.\n\nSettled: Python over Rust, because it installs with just a clone. A prebuilt binary in the repo would trip the marketplace's automated security baseline.\n\nid: io.github.x3me.nexthop"
     }
   ],
   "launch": {
