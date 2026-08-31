@@ -94,6 +94,100 @@ Column {
   readonly property var events: panel.eventsData && panel.eventsData.events
     ? panel.eventsData.events : []
 
+  // Consecutive events of the same kind, this close together, are one
+  // episode rather than several: a laptop bouncing between two access
+  // points is a single story, and listing each hop separately buries the
+  // outages that actually matter under a wall of roams.
+  readonly property int episodeGapS: 600
+  // Beyond this the list stops being readable and the report is the right
+  // tool. Nothing is discarded — the count of what is not shown is stated.
+  readonly property int maxRows: 12
+
+  readonly property var episodes: foldEvents(events)
+  readonly property var shownEpisodes: episodes.slice(0, maxRows)
+  readonly property int hiddenEvents: {
+    var n = 0
+    for (var i = maxRows; i < episodes.length; i++) n += episodes[i].count
+    return n
+  }
+
+  // Outages and associations are never folded: each one is its own fact.
+  function groupable(kind) {
+    return kind === "roam" || kind === "rate-drop" || kind === "disruption"
+  }
+
+  function foldEvents(list) {
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i]
+      var g = out.length ? out[out.length - 1] : null
+      if (g && g.kind === e.kind && groupable(e.kind)
+          && (g.oldestTs - e.ts) <= episodeGapS) {
+        g.count += 1
+        g.oldestTs = e.ts
+        g.members.push(e)
+      } else {
+        out.push({kind: e.kind, ts: e.ts, oldestTs: e.ts,
+                  count: 1, members: [e], first: e})
+      }
+    }
+    return out
+  }
+
+  // The first four octets are the same across every access point on one
+  // site, so they carry no information — only the last two identify which
+  // radio this was. The stored event keeps the full address for the report.
+  function shortMac(text) {
+    return String(text).replace(
+      /\b(?:[0-9a-fA-F]{2}:){4}([0-9a-fA-F]{2}:[0-9a-fA-F]{2})\b/g, "…$1")
+  }
+
+  function roamTargets(members) {
+    var seen = []
+    for (var i = 0; i < members.length; i++) {
+      var m = /Roamed to ([0-9a-fA-F:]{17})/.exec(members[i].detail || "")
+      if (!m) continue
+      var short = shortMac(m[1])
+      if (seen.indexOf(short) < 0) seen.push(short)
+    }
+    return seen
+  }
+
+  function lowestRate(members) {
+    var low = null
+    for (var i = 0; i < members.length; i++) {
+      var m = /dropped to (\d+)/.exec(members[i].detail || "")
+      if (m && (low === null || Number(m[1]) < low)) low = Number(m[1])
+    }
+    return low
+  }
+
+  function describeEpisode(g) {
+    if (g.count === 1) return describe(g.first)
+    if (g.kind === "roam") {
+      var aps = roamTargets(g.members)
+      return "Roamed " + g.count + "×"
+        + (aps.length > 1 ? " between " + aps.join(" ↔ ")
+           : aps.length === 1 ? " to " + aps[0] : "")
+    }
+    if (g.kind === "rate-drop") {
+      var low = lowestRate(g.members)
+      return "Tx rate dropped " + g.count + "×"
+        + (low !== null ? ", lowest " + low + " Mbps" : "")
+    }
+    return describe(g.first) + " · " + g.count + "×"
+  }
+
+  // A folded episode reports how long it went on; a single event reports
+  // its own duration, which for an instant event is nothing.
+  function episodeDuration(g) {
+    if (g.count === 1) return duration(g.first)
+    var s = g.ts - g.oldestTs
+    if (s < 60) return s + "s"
+    if (s < 3600) return Math.floor(s / 60) + "m"
+    return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m"
+  }
+
   property bool copied: false
 
   function describe(e) {
@@ -101,7 +195,7 @@ Column {
       return "No internet. The router still answered, so the fault was upstream."
     if (e.kind === "outage" && e.leg === "local")
       return "Router unreachable — nothing on the local network answered."
-    return e.detail || e.kind
+    return shortMac(e.detail || e.kind)
   }
 
   function duration(e) {
@@ -319,7 +413,7 @@ Column {
     spacing: Style.space(9)
 
     Repeater {
-      model: tab.events
+      model: tab.shownEpisodes
 
       Row {
         id: eventRow
@@ -359,7 +453,7 @@ Column {
           textFormat: Text.PlainText
           width: parent.width - Style.space(64) - Style.space(5)
             - Style.space(54) - Style.space(10) * 3
-          text: tab.describe(eventRow.modelData)
+          text: tab.describeEpisode(eventRow.modelData)
           color: tab.panel.fg
           font.family: tab.panel.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -370,13 +464,27 @@ Column {
           textFormat: Text.PlainText
           width: Style.space(54)
           horizontalAlignment: Text.AlignRight
-          text: tab.duration(eventRow.modelData)
-          color: eventRow.modelData.ended_ts ? tab.panel.dim : Color.urgent
+          text: tab.episodeDuration(eventRow.modelData)
+          color: eventRow.modelData.count === 1 && !eventRow.modelData.first.ended_ts
+            ? Color.urgent : tab.panel.dim
           font.family: tab.panel.fontFamily
           font.pixelSize: Style.font.caption
         }
       }
     }
+  }
+
+  Text {
+    width: parent.width
+    visible: tab.hiddenEvents > 0
+    textFormat: Text.PlainText
+    text: "+ " + tab.hiddenEvents + " earlier "
+      + (tab.hiddenEvents === 1 ? "event" : "events")
+      + " — the copied report has the full list."
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+    wrapMode: Text.WordWrap
   }
 
   PanelSeparator { width: parent.width }
