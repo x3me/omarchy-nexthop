@@ -43,13 +43,30 @@ TCP_PROBE_INTERVAL_S = 1.0
 TCP_PROBE_PORT = 443
 
 # One real HTTP/3 request every five minutes, as ground truth for what a
-# request actually costs end to end. A DNS-over-HTTPS query is the smallest
-# honest request available: 251 bytes of response, so the whole sample
-# including the QUIC handshake costs a few KB — about 2 MB a day, against
-# the ~11 MB a day the continuous probing already spends.
+# request actually costs end to end. A HEAD request returns no body at all,
+# so the sample costs only the handshake — a few KB, about 1 MB a day
+# against the ~11 MB a day the continuous probing already spends.
 H3_SAMPLE_INTERVAL_S = 300.0
-H3_URL = "https://one.one.one.one/dns-query?name=example.com&type=A"
 H3_TIMEOUT_S = 10.0
+
+# TLS needs a name the certificate covers, and a bare IP has none. These
+# map the well-known anchor addresses to the name that serves the SAME
+# host — one.one.one.one *is* 1.1.1.1 — so the request measures the path
+# everything else measures, not some other operator's. An anchor we have
+# no name for is skipped rather than quietly redirected elsewhere.
+H3_HOSTS = {
+    "1.1.1.1": "one.one.one.one", "1.0.0.1": "one.one.one.one",
+    "8.8.8.8": "dns.google", "8.8.4.4": "dns.google",
+    "9.9.9.9": "dns.quad9.net", "149.112.112.112": "dns.quad9.net",
+}
+
+
+def h3_target(anchor: str):
+    """The hostname to request, for an anchor — or None if there isn't one."""
+    if anchor in H3_HOSTS:
+        return H3_HOSTS[anchor]
+    # A hostname anchor already validates; a bare address never will.
+    return anchor if any(c.isalpha() for c in anchor) else None
 
 
 def proc_start_ticks(pid):
@@ -674,14 +691,18 @@ class Daemon:
         """
         if not shutil.which("curl"):
             return
+        host = h3_target(self.config["internetAnchor"])
+        if not host:
+            self.app_request = {"ok": False, "skipped": "no TLS name for anchor",
+                                "at": time.time()}
+            return
         proto = ["--http3"] if self._curl_has_http3() else ["--http2"]
-        cmd = (["curl", "-sS", "-o", "/dev/null",
+        cmd = (["curl", "-sS", "-I", "-o", "/dev/null",
                 "--max-time", str(int(H3_TIMEOUT_S))]
                + proto
-               + ["-H", "accept: application/dns-json",
-                  "-w", "%{http_version} %{time_appconnect} "
+               + ["-w", "%{http_version} %{time_appconnect} "
                         "%{time_starttransfer} %{size_download} %{http_code}",
-                  H3_URL])
+                  f"https://{host}/"])
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=H3_TIMEOUT_S + 5)

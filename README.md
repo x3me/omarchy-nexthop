@@ -104,13 +104,34 @@ To keep monitoring while the shell is down, install the optional
 systemd unit (see the comments in [`nexthopd.service`](nexthopd.service));
 the daemon holds a lock, so the shell service simply attaches.
 
-### Data budget
+### What it talks to, and what that costs
 
-Continuous probing costs about 11 MB/day at the default 500 ms interval.
-Content checks are ~14 MB each, hourly, and can be turned off. Peak tests
-size themselves to saturate the line for ~10 s each way — up to ~600 MB
-on a fast line, far less on a slow one — and **only ever run when you
-ask**: from the panel, by middle-clicking the bar widget, or via IPC.
+Everything below goes to your own gateway and to the internet anchor you
+configure (`1.1.1.1` by default) — nowhere else, apart from the speed-test
+hosts named at the end.
+
+| Probe | Where | Cost |
+| --- | --- | --- |
+| ICMP, both legs | your gateway and the anchor | ~11 MB/day at the default 500 ms interval |
+| TCP handshake | the anchor, port 443, once a second | negligible — a connection opened and closed, no payload |
+| One HTTPS request | the anchor, by its TLS name, every 5 min | ~1 MB/day — a HEAD request, so no body is transferred |
+| Content check | speed.cloudflare.com | ~14 MB each, hourly, and can be turned off |
+| Peak test | Ookla / Cloudflare / fast.com | up to ~600 MB, **only ever when you ask** |
+
+The TCP and HTTPS probes exist because ICMP is not what applications
+experience: routers commonly answer pings from hardware while real traffic
+waits in the queues that actually cause delay, and they rate-limit pings
+under load. Measuring both, against the same host, shows the difference
+rather than assuming it.
+
+The HTTPS request needs a name TLS can validate, so a bare-IP anchor is
+mapped to the name serving that same address — `one.one.one.one` *is*
+`1.1.1.1`. An anchor with no such name is skipped rather than quietly
+redirected somewhere else.
+
+Peak tests size themselves to saturate the line for ~10 s each way — far
+less on a slow one — and run only from the panel, by middle-clicking the
+bar widget, or via IPC.
 
 ## Using it
 

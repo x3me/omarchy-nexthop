@@ -242,6 +242,24 @@ class ApplicationPath(unittest.TestCase):
         self.assertIsNone(ap["icmp_delta_ms"])
         self.assertIsNone(ap["request"])
 
+    def test_h3_target_follows_the_anchor(self):
+        from nexthopd.daemon import h3_target
+        # one.one.one.one IS 1.1.1.1 — the name exists so TLS can validate,
+        # not to reach somewhere else.
+        self.assertEqual(h3_target("1.1.1.1"), "one.one.one.one")
+        self.assertEqual(h3_target("8.8.8.8"), "dns.google")
+        self.assertEqual(h3_target("dns.example.net"), "dns.example.net")
+
+    def test_unknown_bare_ip_anchor_is_skipped_not_redirected(self):
+        from nexthopd.daemon import h3_target
+        # Sending the sample to Cloudflare when the user chose another
+        # anchor would measure a different path and a different operator.
+        self.assertIsNone(h3_target("192.0.2.1"))
+        self.daemon.config.values["internetAnchor"] = "192.0.2.1"
+        self.daemon.sample_app_request()
+        self.assertFalse(self.daemon.app_request["ok"])
+        self.assertIn("skipped", self.daemon.app_request)
+
     def test_tcp_probe_records_a_failure_rather_than_raising(self):
         from nexthopd.probes import TcpProbe
         s = Series()
