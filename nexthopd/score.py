@@ -56,6 +56,30 @@ def _interp(anchors, x):
     return float(anchors[-1][1])
 
 
+# What one lost packet costs, in milliseconds. It is a retransmit timeout,
+# so it scales with the link's own round trip rather than being a constant:
+# RTO is roughly SRTT + 4·RTTVAR, and nothing recovers faster than Linux's
+# 200 ms floor. The stall factor is on top, because a drop costs more than
+# the resent packet — everything behind it waits (head-of-line blocking)
+# and the congestion window has to climb back.
+LOSS_RTO_FLOOR_MS = 200.0
+LOSS_RTT_MULTIPLIER = 3.0
+LOSS_STALL_FACTOR = 5.0
+
+
+def loss_cost_ms(p75_ms: float) -> float:
+    """Milliseconds of felt lag per unit of loss, for a link this fast.
+
+    Below ~67 ms p75 this returns 1000, which is exactly the flat constant
+    it replaces — so ordinary connections score as they always did. Above
+    it the charge grows with the round trip, which is the part the constant
+    got wrong: on a 600 ms satellite link a dropped packet does not cost the
+    same 10 ms per percent that it costs on fibre.
+    """
+    return LOSS_STALL_FACTOR * max(LOSS_RTO_FLOOR_MS,
+                                   LOSS_RTT_MULTIPLIER * max(0.0, p75_ms))
+
+
 def lag_ms(stats: dict):
     """One number for how the connection feels, in milliseconds.
 
@@ -63,7 +87,7 @@ def lag_ms(stats: dict):
     swings to 90 ms and drops a packet every few seconds feels much worse
     than its median suggests. So lag leans on p75 rather than the median,
     adds the jitter the user actually perceives, and charges for loss at a
-    rate that reflects a retransmit round trip.
+    rate that reflects a retransmit round trip on THIS link.
     """
     if not stats or stats.get("count", 0) == 0:
         return None
@@ -73,7 +97,7 @@ def lag_ms(stats: dict):
         return None if loss < 1.0 else 1500.0
     base = stats["p75"]
     jitter = stats.get("jitter") or 0.0
-    return round(base + 1.5 * jitter + loss * 1000.0, 1)
+    return round(base + 1.5 * jitter + loss * loss_cost_ms(base), 1)
 
 
 def responsiveness(lag):
@@ -82,19 +106,51 @@ def responsiveness(lag):
     return round(_interp(LAG_ANCHORS, lag), 1)
 
 
-def reliability(outage_fraction: float, disruptions: int, covered: bool = True):
-    """Uptime, not smoothness.
+RELIABILITY_WINDOW_S = 24 * 3600
+
+# A self-healed interruption is real but not as bad as being down, so its
+# time is charged at a discount.
+DISRUPTION_TIME_WEIGHT = 0.5
+# Each interruption also costs recovery beyond its own length — a dropped
+# call is redialled, a stream rebuffers, a download restarts — so every
+# event carries this much equivalent disruption. Expressed in SECONDS on
+# purpose: a penalty in raw points cannot be compared with downtime, which
+# is exactly how the old flat "6 points per disruption" ended up charging a
+# brief blip more than an hour offline.
+DISRUPTION_RECOVERY_S = 300.0
+# Backstop so a pathological count can never dominate the component.
+DISRUPTION_MAX_PENALTY = 25.0
+
+
+def reliability(outage_fraction: float, disruptions: int, covered: bool = True,
+                disruption_fraction: float = 0.0,
+                window_s: float = RELIABILITY_WINDOW_S):
+    """Uptime, not smoothness — everything charged in one currency: time.
 
     Orb moved reliability to bite only during true outages, and that is the
     right call: a wobbly ten minutes is already punished by responsiveness,
     and double-counting it made the overall score swing on a single bad
     evening. Here an outage is total loss on the wan leg; a disruption is a
     shorter interruption that resolved on its own.
+
+    Both are now charged by DURATION. They used to be charged in different
+    currencies — outages by their share of the window, disruptions at a flat
+    6 points each — and the units did not meet: over a 24 h window one
+    ten-minute outage cost 0.7 points while three self-healed blips cost 18,
+    so the milder event was punished twenty-six times harder, and seventeen
+    blips zeroed the component outright. Time is the honest unit for "how
+    much of today was this connection unusable", and an event's recovery
+    cost is expressed in seconds so it lands on the same scale.
     """
     if not covered:
         return 100.0
-    score = 100.0 - 100.0 * max(0.0, min(1.0, outage_fraction))
-    score -= 6.0 * max(0, disruptions)
+    window = window_s if window_s and window_s > 0 else RELIABILITY_WINDOW_S
+    down = max(0.0, min(1.0, outage_fraction))
+    disrupted_s = (max(0.0, min(1.0, disruption_fraction)) * window
+                   + max(0, disruptions) * DISRUPTION_RECOVERY_S)
+    penalty = min(DISRUPTION_MAX_PENALTY,
+                  100.0 * DISRUPTION_TIME_WEIGHT * min(1.0, disrupted_s / window))
+    score = 100.0 - 100.0 * down - penalty
     return round(max(0.0, min(100.0, score)), 1)
 
 
@@ -154,8 +210,25 @@ def speed(down_mbps, up_mbps, plan_down=0, plan_up=0, baseline_down=None):
     return round(max(0.0, base - degradation_penalty(down_mbps, baseline_down)), 1)
 
 
+# How much of the index the worst component owns. The remainder lets the
+# other two nudge it up a little, so "everything else is excellent" still
+# reads differently from "everything is mediocre".
+INDEX_WORST_WEIGHT = 0.92
+
+
 def index(resp, rel, spd):
-    """Equal thirds, skipping any component we genuinely cannot measure.
+    """Weakest-link, skipping any component we genuinely cannot measure.
+
+    A mean let one broken dimension hide behind two good ones: a line
+    scoring Responsiveness 40, Reliability 100, Speed 95 averaged to 78 and
+    read as "okay" — while video calls on it did not work. That is exactly
+    the habit this module exists to avoid, reintroduced at the last step.
+    People experience the bottleneck, not the average, so the worst
+    component sets the number and the others only nudge it.
+
+    This also puts us where the rest of the field is: Pulse aggregates
+    weakest-link (validated against a real fleet) and IETF
+    draft-ietf-ippm-qoo takes a strict minimum. A mean was the outlier.
 
     Scoring an unmeasured component as zero would be a lie; scoring it as
     100 would be a different lie. Leaving it out and saying so is honest,
@@ -165,7 +238,13 @@ def index(resp, rel, spd):
     parts = [p for p in (resp, rel, spd) if p is not None]
     if not parts:
         return None
-    return int(round(sum(parts) / len(parts)))
+    worst = min(parts)
+    others = list(parts)
+    others.remove(worst)          # by equality: one instance, ties keep the rest
+    if not others:
+        return int(round(worst))
+    rest = sum(others) / len(others)
+    return int(round(INDEX_WORST_WEIGHT * worst + (1.0 - INDEX_WORST_WEIGHT) * rest))
 
 
 def band(score):

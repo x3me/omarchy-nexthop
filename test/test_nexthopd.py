@@ -126,8 +126,84 @@ class Scoring(unittest.TestCase):
         self.assertEqual(score.band(None), "unknown")
 
     def test_index_skips_unknown_components(self):
-        self.assertEqual(score.index(90.0, 100.0, None), 95)
+        # Weakest-link: 90 owns the number, 100 nudges it up slightly.
+        self.assertEqual(score.index(90.0, 100.0, None), 91)
         self.assertIsNone(score.index(None, None, None))
+        # A single measurable component is that component.
+        self.assertEqual(score.index(None, 73.0, None), 73)
+
+    def test_index_does_not_let_good_components_mask_a_broken_one(self):
+        # A line whose calls do not work, with a fast download and no
+        # outages. The mean called this 78 ("okay"); the bottleneck is 40.
+        idx = score.index(40.0, 100.0, 95.0)
+        self.assertLess(idx, 50)
+        self.assertEqual(score.band(idx), "poor")
+
+    def test_index_still_rewards_an_otherwise_excellent_connection(self):
+        # All three healthy: the number stays where the components are.
+        self.assertGreaterEqual(score.index(96.0, 100.0, 94.0), 94)
+
+    def test_index_ties_do_not_lose_a_component(self):
+        self.assertEqual(score.index(70.0, 70.0, 70.0), 70)
+
+    def test_loss_costs_the_same_as_before_on_an_ordinary_link(self):
+        # The flat 1000 ms/unit-loss was right for normal round trips, so
+        # nothing changes for them — only the shape above the RTO floor.
+        for p75 in (5.0, 15.0, 40.0, 66.0):
+            self.assertEqual(score.loss_cost_ms(p75), 1000.0)
+
+    def test_loss_costs_more_on_a_high_latency_link(self):
+        # A retransmit on a 600 ms link is not the same 10 ms per percent
+        # that it is on fibre.
+        self.assertGreater(score.loss_cost_ms(600.0),
+                           score.loss_cost_ms(15.0) * 5)
+        fibre = score.lag_ms({"count": 100, "p75": 15.0, "jitter": 3.0,
+                              "loss": 0.01})
+        sat = score.lag_ms({"count": 100, "p75": 600.0, "jitter": 30.0,
+                            "loss": 0.01})
+        self.assertAlmostEqual(fibre - 19.5, 10.0, places=1)   # 10 ms, as before
+        self.assertAlmostEqual(sat - 645.0, 90.0, places=1)    # 90 ms, scaled
+
+    def test_loss_cost_never_drops_below_the_rto_floor(self):
+        self.assertEqual(score.loss_cost_ms(0.0),
+                         score.LOSS_STALL_FACTOR * score.LOSS_RTO_FLOOR_MS)
+
+    def test_reliability_charges_outages_harder_than_self_healed_blips(self):
+        # The inversion this replaced: three brief disruptions used to cost
+        # 18 points while a ten-minute outage cost 0.7, so the milder event
+        # was punished twenty-six times harder.
+        day = 24 * 3600
+        outage = score.reliability(600 / day, 0)
+        blips = score.reliability(0.0, 3, disruption_fraction=45 / day)
+        self.assertLess(outage, blips,
+                        "ten minutes fully down must cost more than three "
+                        "short self-healed blips")
+
+    def test_reliability_scales_with_downtime(self):
+        day = 24 * 3600
+        self.assertGreater(score.reliability(600 / day, 0),
+                           score.reliability(3600 / day, 0))
+        self.assertGreater(score.reliability(3600 / day, 0),
+                           score.reliability(6 * 3600 / day, 0))
+
+    def test_a_bad_evening_of_blips_cannot_zero_reliability(self):
+        # Seventeen disruptions used to land on exactly 0.0.
+        day = 24 * 3600
+        rel = score.reliability(0.0, 17, disruption_fraction=17 * 30 / day)
+        self.assertGreater(rel, 90.0)   # not a catastrophe
+        self.assertLess(rel, 100.0)     # but not free either
+
+    def test_repeated_blips_still_cost_more_than_one(self):
+        day = 24 * 3600
+        one = score.reliability(0.0, 1, disruption_fraction=300 / day)
+        many = score.reliability(0.0, 10, disruption_fraction=300 / day)
+        self.assertLess(many, one)
+
+    def test_total_downtime_floors_at_zero(self):
+        self.assertEqual(score.reliability(1.0, 0), 0.0)
+
+    def test_uncovered_window_is_not_punished(self):
+        self.assertEqual(score.reliability(0.0, 5, covered=False), 100.0)
 
     def test_wan_subtraction_monotone(self):
         w = score.wan_from(
@@ -196,15 +272,27 @@ class StoreRoundtrip(unittest.TestCase):
         eid = self.store.open_event(int(now - 600), "outage", "critical",
                                     "wan", "test")
         self.store.close_event(eid, int(now - 540))
-        frac, disruptions = self.store.outage_stats(3600, now=now)
+        frac, disruptions, disrupt_frac = self.store.outage_stats(3600, now=now)
         self.assertAlmostEqual(frac, 60 / 3600, places=3)
         self.assertEqual(disruptions, 0)
+        self.assertEqual(disrupt_frac, 0.0)
 
     def test_ongoing_outage_counts_to_now(self):
         now = time.time()
         self.store.open_event(int(now - 120), "outage", "critical", "wan", "t")
-        frac, _ = self.store.outage_stats(3600, now=now)
+        frac, _, _ = self.store.outage_stats(3600, now=now)
         self.assertAlmostEqual(frac, 120 / 3600, places=3)
+
+    def test_disruptions_report_duration_not_just_count(self):
+        now = time.time()
+        for start, length in ((900, 20), (600, 40)):
+            eid = self.store.open_event(int(now - start), "disruption",
+                                        "warning", "wan", "t")
+            self.store.close_event(eid, int(now - start + length))
+        frac, disruptions, disrupt_frac = self.store.outage_stats(3600, now=now)
+        self.assertEqual(frac, 0.0)
+        self.assertEqual(disruptions, 2)
+        self.assertAlmostEqual(disrupt_frac, 60 / 3600, places=3)
 
     def test_baseline_is_p90_per_network(self):
         now = int(time.time())

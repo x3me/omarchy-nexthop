@@ -238,7 +238,12 @@ class Store:
         return p90(rows)
 
     def outage_stats(self, seconds: float, now: float = None):
-        """(fraction of the window fully down, count of shorter disruptions)."""
+        """(fraction fully down, count of disruptions, fraction disrupted).
+
+        Disruptions carry their duration as well as their count because
+        reliability charges both kinds of interruption in the same currency —
+        time. Counting alone made three brief blips outweigh an hour offline.
+        """
         now = now or time.time()
         start = now - seconds
         rows = self.db.execute(
@@ -246,6 +251,7 @@ class Store:
                WHERE kind IN ('outage', 'disruption') AND (ended_ts IS NULL OR ended_ts >= ?)""",
             (int(start),)).fetchall()
         down = 0.0
+        disrupted = 0.0
         disruptions = 0
         for r in rows:
             begin = max(r["ts"], start)
@@ -257,4 +263,7 @@ class Store:
                 down += end - begin
             else:
                 disruptions += 1
-        return (down / seconds if seconds else 0.0), disruptions
+                disrupted += end - begin
+        span = seconds if seconds else 0.0
+        return ((down / span if span else 0.0), disruptions,
+                (disrupted / span if span else 0.0))

@@ -623,8 +623,9 @@ class Daemon:
         lag = score.lag_ms(ts)
         resp = score.responsiveness(lag) if ts["count"] else None
 
-        out_frac, disruptions = self.store.outage_stats(24 * 3600, now)
-        rel = score.reliability(out_frac, disruptions)
+        out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
+        rel = score.reliability(out_frac, disruptions,
+                                disruption_fraction=disrupt_frac)
 
         snap = net.snapshot(self.config["internetAnchor"])
         network = snap.get("ssid") or snap.get("name") or ""
@@ -731,8 +732,9 @@ class Daemon:
         lag = score.lag_ms(ts)
         resp = score.responsiveness(lag) if ts["count"] else None
 
-        out_frac, disruptions = self.store.outage_stats(24 * 3600, now)
-        rel = score.reliability(out_frac, disruptions)
+        out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
+        rel = score.reliability(out_frac, disruptions,
+                                disruption_fraction=disrupt_frac)
         snap_link = net.wifi_link(self.route.get("iface", "")) \
             if net.is_wireless(self.route.get("iface", "")) else {}
         spd, _ = self.speed_score(now, snap_link.get("ssid", ""))
