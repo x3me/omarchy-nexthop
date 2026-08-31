@@ -15,6 +15,10 @@ SAMPLE_COLUMNS = [
     "wan_p50", "wan_p95", "wan_jitter", "wan_loss",
     "lag", "rx_bps", "tx_bps", "signal_dbm",
     "resp", "rel", "spd", "idx",
+    # Latency split by what the link was doing at the time. The gap between
+    # them is bufferbloat, and it only accumulates into something worth
+    # scoring if it is recorded minute by minute first.
+    "lag_idle", "lag_loaded",
 ]
 
 _COLS_SQL = ", ".join(f"{c} REAL" for c in SAMPLE_COLUMNS)
@@ -62,10 +66,15 @@ class Store:
 
     def _migrate(self):
         """Additive migrations for databases created by older versions."""
-        try:
-            self.db.execute("ALTER TABLE tests ADD COLUMN network TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already there
+        for table, column in (("tests", "network"),
+                              ("minute", "lag_idle"), ("minute", "lag_loaded"),
+                              ("hour", "lag_idle"), ("hour", "lag_loaded")):
+            try:
+                self.db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} "
+                    f"{'TEXT' if column == 'network' else 'REAL'}")
+            except sqlite3.OperationalError:
+                pass  # column already there
 
     def close(self):
         try:

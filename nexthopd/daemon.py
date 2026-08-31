@@ -29,6 +29,10 @@ from .store import Store
 # enough that the notification still feels immediate.
 OUTAGE_AFTER_LOSSES = 8
 
+# Probes needed on each side of the idle/loaded split before their ratio is
+# reported. Below this the comparison is sampling noise.
+MIN_LOAD_SPLIT_SAMPLES = 10
+
 
 def proc_start_ticks(pid):
     """The process start time in clock ticks, from /proc/<pid>/stat.
@@ -329,6 +333,12 @@ class Daemon:
         # flicker rather than as a number.
         self.counter_samples = []
         self.rates = (None, None)       # bytes/sec
+        # Whether the link is carrying real traffic right now. Probes read
+        # this as each sample lands, which is what separates idle latency
+        # from latency under load — the gap between them IS bufferbloat.
+        # Same floor the link-event logic uses, for the same reason: below
+        # it, Wi-Fi power save makes the link look busy when nobody is.
+        self.link_loaded = False
         # 5-second aux samples riding along in recent.json: throughput and
         # signal, so the panel's charts have history the moment they open.
         self.aux_ring = deque(maxlen=400)
@@ -385,10 +395,12 @@ class Daemon:
         interval = int(self.config["probeIntervalMs"])
         gw = self.route.get("gateway", "")
         if gw:
-            p = PingProbe(gw, self.local, interval, "local")
+            p = PingProbe(gw, self.local, interval, "local",
+                          loaded_fn=lambda: self.link_loaded)
             p.start()
             self.probes.append(p)
-        p = PingProbe(anchor, self.total, interval, "total")
+        p = PingProbe(anchor, self.total, interval, "total",
+                      loaded_fn=lambda: self.link_loaded)
         p.start()
         self.probes.append(p)
 
@@ -418,6 +430,7 @@ class Daemon:
         if c is None:
             self.counter_samples = []
             self.rates = (None, None)
+            self.link_loaded = False
             return
         window = max(1, min(30, int(self.config["throughputWindowS"])))
         self.counter_samples.append((now, c[0], c[1]))
@@ -434,6 +447,8 @@ class Daemon:
             dt = t1 - t0
             if dt > 0 and rx1 >= rx0 and tx1 >= tx0:
                 self.rates = ((rx1 - rx0) / dt, (tx1 - tx0) / dt)
+                self.link_loaded = ((self.rates[0] or 0.0) + (self.rates[1] or 0.0)
+                                    >= LinkWatch.TRAFFIC_FLOOR_BPS)
             else:
                 # Counter reset (interface bounced) — start the window over.
                 self.counter_samples = [self.counter_samples[-1]]
@@ -466,8 +481,8 @@ class Daemon:
         """
         recent_local = self.local.since(3.0)
         recent_total = self.total.since(3.0)
-        local_ok = any(r is not None for _, r in recent_local) if recent_local else None
-        total_ok = any(r is not None for _, r in recent_total) if recent_total else None
+        local_ok = any(s[1] is not None for s in recent_local) if recent_local else None
+        total_ok = any(s[1] is not None for s in recent_total) if recent_total else None
 
         if local_ok is not None:
             move = self.watch_local.sample(local_ok, now)
@@ -539,7 +554,7 @@ class Daemon:
                 r = speedtest.peak_test(self.config["peakEngine"])
                 loaded_window = [s for s in self.total.all()
                                  if s[0] >= started and s[1] is not None]
-                loaded = (round(sorted(x for _, x in loaded_window)[len(loaded_window) // 2], 1)
+                loaded = (round(sorted(s[1] for s in loaded_window)[len(loaded_window) // 2], 1)
                           if loaded_window else None)
                 if r["ok"]:
                     self.store.put_test(
@@ -616,12 +631,45 @@ class Daemon:
                      "last_down": down, "last_up": up,
                      "samples": len(recent)}
 
+    def bufferbloat(self, window_s: float = 300.0) -> dict:
+        """Lag while the link was idle vs while it was carrying traffic.
+
+        The gap between them is bufferbloat, and it is the failure a plain
+        latency number misses entirely: a line can answer in 15 ms at rest,
+        sit at 300 ms whenever anyone downloads anything, and still look
+        excellent on every idle measurement anyone takes of it.
+
+        Both figures come from the same probe stream — no extra traffic is
+        generated to produce them. That is the whole point of tagging each
+        sample as it lands: the user's own usage supplies the load.
+        """
+        idle_s, loaded_s = Series.split_by_load(self.total.since(window_s))
+        idle_lag = score.lag_ms(Series.stats(idle_s)) if idle_s else None
+        loaded_lag = score.lag_ms(Series.stats(loaded_s)) if loaded_s else None
+        # A handful of samples on either side produces noise, not a ratio —
+        # observed live, a five-sample loaded window read as 0.59, i.e. the
+        # link answering *faster* under load. Both sides need enough
+        # samples before the comparison means anything.
+        inflation = None
+        if (idle_lag and loaded_lag and idle_lag > 0
+                and len(idle_s) >= MIN_LOAD_SPLIT_SAMPLES
+                and len(loaded_s) >= MIN_LOAD_SPLIT_SAMPLES):
+            inflation = round(loaded_lag / idle_lag, 2)
+        return {"idle": idle_lag, "loaded": loaded_lag,
+                "inflation": inflation, "loaded_samples": len(loaded_s)}
+
     def compose_live(self, now: float) -> dict:
         ls = Series.stats(self.local.since(30))
         ts = Series.stats(self.total.since(30))
         ws = score.wan_from(ts, ls)
         lag = score.lag_ms(ts)
         resp = score.responsiveness(lag) if ts["count"] else None
+        # Idle vs loaded over a longer window than the headline: bufferbloat
+        # only shows when the link has actually been used, and 30 s of an
+        # idle laptop would almost never contain a loaded sample. Reported,
+        # not yet scored — the number has to be trusted before it can move
+        # anyone's index.
+        bloat = self.bufferbloat(300.0)
 
         out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
         rel = score.reliability(out_frac, disruptions,
@@ -669,7 +717,10 @@ class Daemon:
             "scores": {"responsiveness": resp, "reliability": rel, "speed": spd},
             "speed_ctx": speed_ctx,
             "lag": {"now": lag,
-                    "best": ts.get("p50"), "worst": ts.get("max")},
+                    "best": ts.get("p50"), "worst": ts.get("max"),
+                    "idle": bloat["idle"], "loaded": bloat["loaded"],
+                    "inflation": bloat["inflation"],
+                    "loaded_samples": bloat["loaded_samples"]},
             "local": ls, "total": ts, "wan": ws,
             "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1],
                       "rx_total": self.counter_samples[-1][1] if self.counter_samples else None,
@@ -694,7 +745,8 @@ class Daemon:
 
         def fold(samples):
             out = {}
-            for t, r in samples:
+            for smp in samples:
+                t, r = smp[0], smp[1]
                 if t < start:
                     continue
                 b = int((t - start) / bucket)
@@ -735,6 +787,7 @@ class Daemon:
         out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
         rel = score.reliability(out_frac, disruptions,
                                 disruption_fraction=disrupt_frac)
+        bloat = self.bufferbloat(300.0)
         snap_link = net.wifi_link(self.route.get("iface", "")) \
             if net.is_wireless(self.route.get("iface", "")) else {}
         spd, _ = self.speed_score(now, snap_link.get("ssid", ""))
@@ -750,6 +803,7 @@ class Daemon:
                 "rx_bps": self.rates[0], "tx_bps": self.rates[1],
                 "signal_dbm": snap_link.get("signal_dbm"),
                 "resp": resp, "rel": rel, "spd": spd, "idx": idx,
+                "lag_idle": bloat["idle"], "lag_loaded": bloat["loaded"],
             },
             iface=self.route.get("iface", ""),
             network=snap_link.get("ssid", ""),

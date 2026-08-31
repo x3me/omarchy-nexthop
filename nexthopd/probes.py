@@ -35,9 +35,16 @@ class Series:
         self._samples = deque()
         self._lock = threading.Lock()
 
-    def add(self, t: float, rtt):
+    def add(self, t: float, rtt, loaded: bool = False):
+        """Record one probe result, tagged with whether the link was busy.
+
+        The tag is what makes bufferbloat visible: the same connection can
+        answer in 15 ms while idle and 300 ms while a download runs, and a
+        score built only on the idle number calls that line excellent right
+        up until someone uses it.
+        """
         with self._lock:
-            self._samples.append((t, rtt))
+            self._samples.append((t, rtt, bool(loaded)))
             cutoff = t - self.window_s
             while self._samples and self._samples[0][0] < cutoff:
                 self._samples.popleft()
@@ -50,6 +57,18 @@ class Series:
     def all(self):
         with self._lock:
             return list(self._samples)
+
+    @staticmethod
+    def split_by_load(samples):
+        """(idle, loaded) — probes taken while the link was quiet vs busy.
+
+        Samples are indexed rather than unpacked throughout, so a caller
+        holding older two-element samples still reads as idle instead of
+        raising.
+        """
+        idle = [s for s in samples if not (len(s) > 2 and s[2])]
+        loaded = [s for s in samples if len(s) > 2 and s[2]]
+        return idle, loaded
 
     @staticmethod
     def stats(samples) -> dict:
@@ -65,7 +84,7 @@ class Series:
             return {"count": 0, "loss": None, "p50": None, "p75": None,
                     "p95": None, "jitter": None, "last": None, "max": None}
 
-        rtts = [r for _, r in samples if r is not None]
+        rtts = [s[1] for s in samples if s[1] is not None]
         lost = total - len(rtts)
         loss = lost / total
 
@@ -82,7 +101,7 @@ class Series:
             return ordered[idx]
 
         deltas = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))]
-        last = next((r for _, r in reversed(samples) if r is not None), None)
+        last = next((x[1] for x in reversed(samples) if x[1] is not None), None)
 
         return {
             "count": total,
@@ -107,15 +126,25 @@ class PingProbe(threading.Thread):
     daemon = True
 
     def __init__(self, target: str, series: Series, interval_ms: int = 500,
-                 name: str = ""):
+                 name: str = "", loaded_fn=None):
         super().__init__(name=f"probe-{name or target}", daemon=True)
         self.target = target
         self.series = series
+        # Asked at the moment a sample lands, so each probe is tagged with
+        # the link state it actually experienced rather than whatever the
+        # link was doing when the window is later read.
+        self.loaded_fn = loaded_fn
         self.interval = max(0.2, interval_ms / 1000.0)
         self._stop = threading.Event()
         self._proc = None
         # seq -> timestamp first seen unanswered, drained by _expire()
         self._pending = {}
+
+    def _loaded(self) -> bool:
+        try:
+            return bool(self.loaded_fn()) if self.loaded_fn else False
+        except Exception:
+            return False        # a probe never raises into the daemon
 
     def stop(self):
         self._stop.set()
@@ -137,7 +166,7 @@ class PingProbe(threading.Thread):
         for seq, t in list(self._pending.items()):
             if now - t > grace:
                 del self._pending[seq]
-                self.series.add(t, None)
+                self.series.add(t, None, self._loaded())
 
     def run(self):
         backoff = 1.0
@@ -169,7 +198,7 @@ class PingProbe(threading.Thread):
                 self._consume(line)
             # ping exited: whatever was outstanding never arrived.
             for seq, t in self._pending.items():
-                self.series.add(t, None)
+                self.series.add(t, None, self._loaded())
             self._pending.clear()
         finally:
             proc, self._proc = self._proc, None
@@ -185,7 +214,7 @@ class PingProbe(threading.Thread):
         if m:
             t, seq, rtt = float(m.group(1)), int(m.group(2)), float(m.group(3))
             self._pending.pop(seq, None)
-            self.series.add(t, rtt)
+            self.series.add(t, rtt, self._loaded())
             self._expire(t)
             return
 
@@ -193,7 +222,7 @@ class PingProbe(threading.Thread):
         if m:
             t, seq = float(m.group(1)), int(m.group(2))
             self._pending.pop(seq, None)
-            self.series.add(t, None)
+            self.series.add(t, None, self._loaded())
             self._expire(t)
             return
 

@@ -111,6 +111,90 @@ class Stats(unittest.TestCase):
         self.assertEqual(len(s.all()), 1)
 
 
+class LoadTagging(unittest.TestCase):
+    """Idle vs loaded latency, from the same probe stream.
+
+    The gap between them is bufferbloat — the failure a plain latency
+    number misses, where a line answers in 15 ms at rest and 300 ms
+    whenever anyone uses it.
+    """
+
+    def test_samples_carry_the_link_state_they_saw(self):
+        s = Series()
+        now = time.time()
+        s.add(now, 12.0)                 # default: idle
+        s.add(now + 1, 250.0, True)      # under load
+        idle, loaded = Series.split_by_load(s.all())
+        self.assertEqual(len(idle), 1)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(idle[0][1], 12.0)
+        self.assertEqual(loaded[0][1], 250.0)
+
+    def test_two_element_samples_still_read_as_idle(self):
+        # Anything holding the old sample shape must not raise.
+        idle, loaded = Series.split_by_load([(0.0, 10.0), (1.0, None)])
+        self.assertEqual(len(idle), 2)
+        self.assertEqual(loaded, [])
+        self.assertEqual(Series.stats([(0.0, 10.0), (1.0, 30.0)])["p50"], 20.0)
+
+    def test_bufferbloat_shows_as_inflation_between_the_two(self):
+        idle = [(float(i), 15.0, False) for i in range(20)]
+        loaded = [(float(i + 20), 300.0, True) for i in range(20)]
+        i_lag = score.lag_ms(Series.stats(idle))
+        l_lag = score.lag_ms(Series.stats(loaded))
+        self.assertLess(i_lag, 20)
+        self.assertGreater(l_lag, 250)
+        self.assertGreater(l_lag / i_lag, 10)
+
+    def test_loss_is_still_counted_per_load_state(self):
+        samples = [(0.0, 10.0, False), (1.0, None, False),
+                   (2.0, 40.0, True), (3.0, None, True), (4.0, None, True)]
+        idle, loaded = Series.split_by_load(samples)
+        self.assertAlmostEqual(Series.stats(idle)["loss"], 0.5)
+        self.assertAlmostEqual(Series.stats(loaded)["loss"], 2 / 3)
+
+    def test_inflation_needs_enough_samples_on_both_sides(self):
+        import os as _os
+        from nexthopd.daemon import Daemon, MIN_LOAD_SPLIT_SAMPLES
+        with tempfile.TemporaryDirectory() as d:
+            _os.environ["XDG_STATE_HOME"] = d
+            try:
+                dm = Daemon()
+                try:
+                    now = time.time()
+                    # Plenty idle, only a couple loaded: no ratio yet.
+                    for i in range(30):
+                        dm.total.add(now - 60 + i, 15.0, False)
+                    for i in range(MIN_LOAD_SPLIT_SAMPLES - 1):
+                        dm.total.add(now - 5 + i * 0.1, 300.0, True)
+                    b = dm.bufferbloat(300.0)
+                    self.assertIsNotNone(b["idle"])
+                    self.assertIsNotNone(b["loaded"])
+                    self.assertIsNone(b["inflation"])
+                    # One more loaded sample and the comparison is allowed.
+                    dm.total.add(now, 300.0, True)
+                    b = dm.bufferbloat(300.0)
+                    self.assertIsNotNone(b["inflation"])
+                    self.assertGreater(b["inflation"], 5)
+                finally:
+                    dm.store.close()
+            finally:
+                del _os.environ["XDG_STATE_HOME"]
+
+    def test_probe_tags_from_its_predicate_and_never_raises(self):
+        from nexthopd.probes import PingProbe
+        s = Series()
+        state = {"busy": False}
+        p = PingProbe("192.0.2.1", s, 500, "t", loaded_fn=lambda: state["busy"])
+        self.assertFalse(p._loaded())
+        state["busy"] = True
+        self.assertTrue(p._loaded())
+        # A predicate that blows up must not take the probe with it.
+        broken = PingProbe("192.0.2.1", s, 500, "t",
+                           loaded_fn=lambda: 1 / 0)
+        self.assertFalse(broken._loaded())
+
+
 class Scoring(unittest.TestCase):
     def test_lag_charges_for_loss(self):
         clean = {"count": 100, "loss": 0.0, "p75": 10.0, "jitter": 1.0}
