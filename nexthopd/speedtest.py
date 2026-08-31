@@ -14,11 +14,14 @@ Loaded latency is sampled during the peak download by the daemon's existing
 probes, not here — the test just records the window it ran in.
 """
 
+import ipaddress
 import json
 import shutil
+import socket
 import subprocess
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 CLOUDFLARE_DOWN = "https://speed.cloudflare.com/__down?bytes={n}"
 CLOUDFLARE_UP = "https://speed.cloudflare.com/__up"
@@ -28,20 +31,78 @@ FAST_API = ("https://api.fast.com/netflix/speedtest/v2"
             "?https=true&token=YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm&urlCount=3")
 
 
+def vet_target(url: str):
+    """(url, --resolve argument) for a target we will fetch, else None.
+
+    Only for URLs WE DID NOT CHOOSE. fast.com nominates its own download
+    hosts, so that JSON decides what this daemon connects to, and it has
+    to be treated as hostile input rather than as a list of Netflix
+    servers. Three things must hold:
+
+    1. the scheme is https, so a nominated target cannot downgrade the
+       transfer to plaintext or hand curl a `file://` path;
+    2. EVERY address the host resolves to is public, so a speed test can
+       never be aimed at a router's admin page, a service on loopback,
+       or a link-local metadata address;
+    3. the address that passed (2) is the one curl actually connects to.
+
+    The third is the point most of this class gets wrong: resolving here
+    and letting curl resolve again is a check-then-use race, and a DNS
+    answer that returns a public address to us and a private one to curl
+    wins it. Pinning the vetted addresses with --resolve closes that
+    window, the same way every other read in this daemon is enforced on
+    the thing actually used rather than on a name looked up earlier.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    port = parsed.port or 443
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    addrs = []
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return None
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        # Spelled out rather than leaning on is_global alone, whose range
+        # table has been corrected across Python versions we may run on.
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return None
+        addrs.append(str(ip))
+    if not addrs:
+        return None
+    return url, "%s:%d:%s" % (parsed.hostname, port, ",".join(addrs))
+
+
 def _curl(args, timeout) -> Optional[subprocess.CompletedProcess]:
     if not shutil.which("curl"):
         return None
     try:
-        return subprocess.run(["curl", "-fsS", "--max-time", str(int(timeout))] + args,
+        # --proto =https refuses anything but TLS even if a target or a
+        # server tries something else; we never pass -L, so there is no
+        # redirect for it to follow either.
+        return subprocess.run(["curl", "-fsS", "--proto", "=https",
+                               "--max-time", str(int(timeout))] + args,
                               capture_output=True, text=True, timeout=timeout + 5,
                               check=False)
     except (subprocess.TimeoutExpired, OSError):
         return None
 
 
-def _curl_timed_download(url: str, timeout: float):
+def _curl_timed_download(url: str, timeout: float, resolve: str = None):
     """(mbps, bytes) using curl's own transfer accounting."""
-    r = _curl(["-o", "/dev/null", "-w", "%{speed_download} %{size_download}", url],
+    pin = ["--resolve", resolve] if resolve else []
+    r = _curl(pin + ["-o", "/dev/null",
+                     "-w", "%{speed_download} %{size_download}", url],
               timeout)
     if not r or r.returncode != 0:
         return None, 0
@@ -58,7 +119,7 @@ def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
     /dev/zero does not have."""
     if not shutil.which("curl"):
         return None, 0
-    cmd = ["curl", "-fsS", "--max-time", str(int(timeout)),
+    cmd = ["curl", "-fsS", "--proto", "=https", "--max-time", str(int(timeout)),
            "-o", "/dev/null", "-X", "POST", "--data-binary", "@-",
            "-H", "Content-Type: application/octet-stream",
            "-w", "%{speed_upload} %{size_upload}", url]
@@ -90,7 +151,8 @@ def _parallel_download(url: str, streams: int, timeout: float):
     for _ in range(streams):
         try:
             procs.append(subprocess.Popen(
-                ["curl", "-fsS", "--max-time", str(int(timeout)), "-o", "/dev/null",
+                ["curl", "-fsS", "--proto", "=https",
+                 "--max-time", str(int(timeout)), "-o", "/dev/null",
                  "-w", "%{speed_download} %{size_download}", url],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True))
         except OSError:
@@ -230,7 +292,13 @@ def _peak_cloudflare() -> Optional[dict]:
 
 
 def _peak_fast() -> Optional[dict]:
-    """Download-only, via the Netflix OCA endpoints fast.com hands out."""
+    """Download-only, via the Netflix OCA endpoints fast.com hands out.
+
+    The API picks the hosts, so each one is vetted before it is fetched
+    (see vet_target) and a target that does not pass is skipped rather
+    than failing the test — a bad entry in someone else's JSON should
+    cost us one candidate, not the measurement.
+    """
     r = _curl([FAST_API], timeout=15)
     if not r or r.returncode != 0:
         return None
@@ -238,10 +306,11 @@ def _peak_fast() -> Optional[dict]:
         targets = [t["url"] for t in json.loads(r.stdout).get("targets", []) if t.get("url")]
     except (ValueError, KeyError):
         return None
+    vetted = [v for v in (vet_target(u) for u in targets if isinstance(u, str)) if v]
     best = 0.0
     total = 0
-    for url in targets[:3]:
-        mbps, size = _curl_timed_download(url, timeout=30)
+    for url, resolve in vetted[:3]:
+        mbps, size = _curl_timed_download(url, timeout=30, resolve=resolve)
         total += size
         if mbps:
             best = max(best, mbps)

@@ -697,7 +697,7 @@ class Daemon:
                                 "at": time.time()}
             return
         proto = ["--http3"] if self._curl_has_http3() else ["--http2"]
-        cmd = (["curl", "-sS", "-I", "-o", "/dev/null",
+        cmd = (["curl", "-sS", "-I", "-o", "/dev/null", "--proto", "=https",
                 "--max-time", str(int(H3_TIMEOUT_S))]
                + proto
                + ["-w", "%{http_version} %{time_appconnect} "

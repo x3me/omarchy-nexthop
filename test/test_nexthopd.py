@@ -111,6 +111,82 @@ class Stats(unittest.TestCase):
         self.assertEqual(len(s.all()), 1)
 
 
+class UntrustedTargets(unittest.TestCase):
+    """fast.com nominates its own download hosts, so that JSON decides
+    what this daemon connects to and is hostile input, not a server list.
+
+    Literal addresses throughout, so nothing here touches DNS.
+    """
+
+    def setUp(self):
+        from nexthopd.speedtest import vet_target
+        self.vet = vet_target
+
+    def test_plaintext_is_refused(self):
+        self.assertIsNone(self.vet("http://93.184.216.34/download"))
+
+    def test_non_http_schemes_are_refused(self):
+        for url in ("file:///etc/passwd", "ftp://93.184.216.34/x",
+                    "gopher://93.184.216.34/x", "scp://93.184.216.34/x",
+                    "dict://93.184.216.34/x"):
+            self.assertIsNone(self.vet(url), url)
+
+    def test_loopback_is_refused(self):
+        for url in ("https://127.0.0.1/x", "https://127.1.2.3/x",
+                    "https://[::1]/x"):
+            self.assertIsNone(self.vet(url), url)
+
+    def test_private_ranges_are_refused(self):
+        for url in ("https://192.168.1.1/x", "https://10.0.0.1/x",
+                    "https://172.16.4.2/x", "https://[fd00::1]/x"):
+            self.assertIsNone(self.vet(url), url)
+
+    def test_cloud_metadata_address_is_refused(self):
+        # The link-local address every SSRF write-up ends at.
+        self.assertIsNone(self.vet("https://169.254.169.254/latest/meta-data/"))
+
+    def test_ipv4_mapped_private_address_is_refused(self):
+        # ::ffff:192.168.1.1 is a private address wearing an IPv6 coat.
+        self.assertIsNone(self.vet("https://[::ffff:192.168.1.1]/x"))
+
+    def test_unspecified_and_broadcast_refused(self):
+        self.assertIsNone(self.vet("https://0.0.0.0/x"))
+        self.assertIsNone(self.vet("https://255.255.255.255/x"))
+
+    def test_garbage_is_refused_without_raising(self):
+        for url in ("", "not a url", "https://", "https:///x", "https://:443/x"):
+            self.assertIsNone(self.vet(url), repr(url))
+
+    def test_public_https_is_accepted_and_pinned(self):
+        got = self.vet("https://8.8.8.8/download?size=25000000")
+        self.assertIsNotNone(got)
+        url, resolve = got
+        self.assertEqual(url, "https://8.8.8.8/download?size=25000000")
+        # The vetted address is pinned, so curl cannot resolve the name
+        # again and be handed a different one.
+        self.assertEqual(resolve, "8.8.8.8:443:8.8.8.8")
+
+    def test_explicit_port_is_carried_into_the_pin(self):
+        got = self.vet("https://8.8.8.8:8443/x")
+        self.assertIsNotNone(got)
+        self.assertEqual(got[1], "8.8.8.8:8443:8.8.8.8")
+
+    def test_a_bad_target_costs_one_candidate_not_the_test(self):
+        urls = ["http://93.184.216.34/a", "https://169.254.169.254/b",
+                "https://8.8.8.8/c"]
+        vetted = [v for v in (self.vet(u) for u in urls) if v]
+        self.assertEqual(len(vetted), 1)
+        self.assertEqual(vetted[0][0], "https://8.8.8.8/c")
+
+    def test_curl_is_invoked_with_a_scheme_floor(self):
+        # Belt and braces beside the vetting: curl itself refuses
+        # anything but TLS, whatever it is handed.
+        import inspect
+        from nexthopd import speedtest
+        src = inspect.getsource(speedtest._curl)
+        self.assertIn('"--proto", "=https"', src)
+
+
 class LoadTagging(unittest.TestCase):
     """Idle vs loaded latency, from the same probe stream.
 
