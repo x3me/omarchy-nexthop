@@ -43,8 +43,11 @@ call anyone.
 - **Wi-Fi health**: signal against a labelled scale, band/channel/rates,
   and the airtime counters (retries, failures, beacon loss) that explain
   why Wi-Fi feels slow when the signal bar looks full.
-- **Link events**: roams (with channel and signal delta), associations,
-  and sustained Wi-Fi rate drops, logged with durations.
+- **Link events**: every change of access point says who ended the
+  previous association — a *roam* (this machine chose to move), a *kick*
+  (the access point deauthenticated us, with its 802.11 reason code) or a
+  *drop* (the link fell over) — plus channel and signal deltas,
+  associations, and sustained Wi-Fi rate drops, logged with durations.
 - **Per-application traffic** — top apps by TCP connection counters
   (`ss -tinp`, no root, no packet capture), each with a one-minute history
   strip and session totals. What Linux won't attribute without privileges

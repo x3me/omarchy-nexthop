@@ -1,0 +1,11 @@
+1788278079.141547: wlo1: del station 02:11:22:33:44:01
+1788278079.142551: wlo1 (phy #0): deauth 02:11:22:33:44:01 -> 02:aa:bb:cc:dd:ee reason 8: Disassociated because sending station is leaving (or has left) the BSS
+1788278079.142608: wlo1 (phy #0): disconnected (by AP) reason: 8: Disassociated because sending station is leaving (or has left) the BSS
+1788278079.250838: wlo1 (phy #0): scan started
+1788278082.019194: wlo1 (phy #0): scan finished: 2412 2417 2422 2427 2432 2437 2442 2447 2452 2457 2462 2467 2472 5180 5200 5220 5240 5260 5280 5300 5320 5500 5520 5540 5560 5580 5600 5620 5640 5660 5680 5700 5720 5745 5765 5785 5805 5825 5845 5865 5955 5975 5995 6015 6035 6055 6075 6095 6115 6135 6155 6175 6195 6215 6235 6255 6275 6295 6315 6335 6355 6375 6395 6415, "x3me" ""
+1788278082.068166: wlo1: new station 02:11:22:33:44:05
+1788278082.070230: wlo1 (phy #0): auth 02:11:22:33:44:05 -> 02:aa:bb:cc:dd:ee status: 0: Successful
+1788278082.079172: wlo1 (phy #0): assoc 02:11:22:33:44:05 -> 02:aa:bb:cc:dd:ee status: 0: Successful
+1788278082.079235: wlo1 (phy #0): connected to 02:11:22:33:44:05
+1788278082.101842: wlo1 (phy #0): ctrl. port TX status (cookie 70f): acked
+1788278082.104043: wlo1 (phy #0): ctrl. port TX status (cookie 710): acked

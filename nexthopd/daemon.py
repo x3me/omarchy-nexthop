@@ -19,7 +19,7 @@ import threading
 import time
 from collections import deque
 
-from . import __version__, apps, net, score, speedtest
+from . import __version__, apps, linkevents, net, score, speedtest
 from .paths import (ensure_state_dir, live_path, recent_path, db_path,
                     lock_path, state_dir)
 from .probes import Series, PingProbe, TcpProbe
@@ -204,9 +204,15 @@ Config.SCHEMA["throughputWindowS"] = (3, Config._int(1, 30))
 
 class LinkWatch:
     """Watches the Wi-Fi link state and writes events worth remembering:
-    roams, associations, sustained rate drops. Instant events are stored
-    closed; a rate drop stays open until the rate recovers, so its row
-    carries a duration.
+    roams, kicks, drops, associations, sustained rate drops. Instant events
+    are stored closed; a rate drop stays open until the rate recovers, so
+    its row carries a duration.
+
+    A BSSID change is attributed when `events` (an NlEvents) knows who
+    ended the previous association: the AP (a kick, with its 802.11
+    reason), this machine with the next authentication already under way
+    (a roam), or this machine after a scan (a drop — the link was lost).
+    Without that knowledge every change is a roam, as it always was.
     """
 
     # A drop only counts when the rate stays below this fraction of the
@@ -224,10 +230,18 @@ class LinkWatch:
     # gone. A single failed `iw` call is a hiccup, not a disassociation —
     # and its recovery must not be logged as a fresh association.
     GAP_SAMPLES = 5
+    # A local deauth followed by a new authentication within this long is
+    # the client roaming: mac80211 emits that deauth from inside the call
+    # that starts the new authentication, so a roam's gap is milliseconds.
+    # A lost link is followed by a scan first, and its gap is seconds. The
+    # threshold sits between the two by orders of magnitude.
+    ROAM_FOLLOW_S = 1.0
 
-    def __init__(self, store):
+    def __init__(self, store, events=None):
         self.store = store
+        self.events = events      # NlEvents, or anything with cause_for()
         self.prev = None          # last non-empty link, None until first seen
+        self.last_link_t = None   # when the link was last seen up
         self.gap_count = 0
         self.disassociated = False
         self.rate_ceiling = 0.0
@@ -239,6 +253,36 @@ class LinkWatch:
     def _instant(self, ts, kind, detail):
         eid = self.store.open_event(int(ts), kind, "info", "local", detail)
         self.store.close_event(eid, int(ts))
+
+    def _cause(self, bssid, since, now):
+        """Who ended our association with `bssid`, if anything was seen
+        since we last saw that link up."""
+        if not self.events or not bssid or since is None:
+            return None
+        try:
+            return self.events.cause_for(bssid, now, now - since + 2.0)
+        except Exception:
+            return None       # an attribution failure must not cost the event
+
+    def _blame(self, cause, old, new, gap_s=None):
+        """(kind, text) for a change away from `old` with a known cause.
+
+        gap_s is how long the link was down when that is known (a confirmed
+        gap); otherwise the deauth-to-reauth delay stands in for it.
+        """
+        why = linkevents.reason_text(cause["reason"], cause["by_ap"])
+        follow = cause.get("gap_s")
+        if cause["by_ap"]:
+            kind, lead = "kick", "Kicked by AP %s (%s)" % (old, why)
+        elif gap_s is None and follow is not None and follow < self.ROAM_FOLLOW_S:
+            return "roam", "Roamed to " + new
+        else:
+            kind, lead = "drop", "Dropped by this machine (%s)" % why
+        down = gap_s if gap_s is not None else follow
+        text = lead + ", rejoined" + ("" if new == old else " via " + new)
+        if down is not None and down >= 0.5:
+            text += " after " + _short_duration(down)
+        return kind, text
 
     def sample(self, now, link, traffic_bps=0.0):
         # The caller runs twice a second; once a second is plenty here.
@@ -258,6 +302,7 @@ class LinkWatch:
             return
         self.gap_count = 0
 
+        since, self.last_link_t = self.last_link_t, now
         prev, self.prev = self.prev, dict(link)
         bssid = link.get("bssid", "")
         prev_bssid = prev.get("bssid", "") if prev else ""
@@ -272,15 +317,26 @@ class LinkWatch:
 
         if self.disassociated:
             self.disassociated = False
-            self._instant(now, "associate", "Associated with " + (ssid or bssid))
+            cause = self._cause(prev_bssid, since, now)
+            if cause:
+                # One row for the whole incident: who ended it, how long it
+                # took to come back, and where. The plain association is
+                # for gaps nobody claimed — suspend, or no `iw event`.
+                kind, text = self._blame(cause, prev_bssid, bssid, gap_s=now - since)
+                self._instant(now, kind, text)
+            else:
+                self._instant(now, "associate", "Associated with " + (ssid or bssid))
         elif bssid and prev_bssid and bssid != prev_bssid:
-            parts = ["Roamed to " + bssid]
+            cause = self._cause(prev_bssid, since, now)
+            kind, lead = self._blame(cause, prev_bssid, bssid) if cause \
+                else ("roam", "Roamed to " + bssid)
+            parts = [lead]
             if prev.get("channel") and link.get("channel") \
                     and prev["channel"] != link["channel"]:
                 parts.append("channel %s \u2192 %s" % (prev["channel"], link["channel"]))
             if prev.get("signal_dbm") is not None and link.get("signal_dbm") is not None:
                 parts.append("%s \u2192 %s dBm" % (prev["signal_dbm"], link["signal_dbm"]))
-            self._instant(now, "roam", ", ".join(parts))
+            self._instant(now, kind, ", ".join(parts))
             # A different AP has a different honest ceiling.
             self.rate_ceiling = 0.0
             self._close_rate_event(now)
@@ -324,6 +380,15 @@ class LinkWatch:
             self.rate_event_id = None
         self.low_since = None
         self.low_floor = None
+
+
+def _short_duration(seconds):
+    s = int(round(seconds))
+    if s < 60:
+        return "%d s" % max(1, s)
+    if s < 3600:
+        return "%d min" % (s // 60)
+    return "%d h %d min" % (s // 3600, (s % 3600) // 60)
 
 
 class LegWatch:
@@ -387,7 +452,11 @@ class Daemon:
         self.last_signal = None
         self.watch_local = LegWatch("local")
         self.watch_wan = LegWatch("wan")
-        self.link_watch = LinkWatch(self.store)
+        # Who ended each Wi-Fi association — read from nl80211 via `iw
+        # event`, unprivileged. Without it the link log still works; it
+        # just cannot tell a kick from a roam.
+        self.nl_events = linkevents.NlEvents()
+        self.link_watch = LinkWatch(self.store, self.nl_events)
         self.app_traffic = apps.AppTraffic()
         self.last_apps_poll = 0.0
         self.last_content_test = 0.0
@@ -1025,12 +1094,14 @@ class Daemon:
         # SIGUSR1 is the "run a peak test" doorbell — file-free, and safe to
         # send from a QML Process one-liner.
         signal.signal(signal.SIGUSR1, lambda *_: self.peak_requested.set())
+        self.nl_events.start()
         self.start_probes()
         try:
             self.loop()
         finally:
             for p in self.probes:
                 p.stop()
+            self.nl_events.stop()
             self.store.close()
         return 0
 

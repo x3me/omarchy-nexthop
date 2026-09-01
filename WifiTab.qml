@@ -16,7 +16,8 @@ Column {
   readonly property var linkEvents: {
     var all = panel.eventsData && panel.eventsData.events
       ? panel.eventsData.events : []
-    var kinds = {"roam": 1, "associate": 1, "rate-drop": 1, "channel-change": 1}
+    var kinds = {"roam": 1, "kick": 1, "drop": 1, "associate": 1,
+                 "rate-drop": 1, "channel-change": 1}
     var cut = Date.now() / 1000 - 86400
     var out = []
     for (var i = 0; i < all.length && out.length < 6; i++)
@@ -24,13 +25,18 @@ Column {
     return out
   }
 
+  // Every change of access point inside the chart window, with who ended
+  // the previous association: a roam was this machine's choice, a kick the
+  // access point's, a drop a link that fell over.
   readonly property var roamMarks: {
     var all = panel.eventsData && panel.eventsData.events
       ? panel.eventsData.events : []
+    var kinds = {"roam": 1, "kick": 1, "drop": 1}
     var cut = Date.now() / 1000 - 1800
     var out = []
     for (var i = 0; i < all.length; i++)
-      if (all[i].kind === "roam" && all[i].ts >= cut) out.push(all[i].ts)
+      if (kinds[all[i].kind] && all[i].ts >= cut)
+        out.push({ts: all[i].ts, kind: all[i].kind})
     return out
   }
 
@@ -183,8 +189,13 @@ Column {
         textFormat: Text.PlainText
         anchors.right: parent.right
         text: {
-          var n = tab.roamMarks.length
-          return n === 0 ? "" : n === 1 ? "one roam" : n + " roams"
+          var marks = tab.roamMarks, n = {roam: 0, kick: 0, drop: 0}
+          for (var i = 0; i < marks.length; i++) n[marks[i].kind] += 1
+          var parts = []
+          if (n.roam) parts.push(n.roam === 1 ? "one roam" : n.roam + " roams")
+          if (n.kick) parts.push(n.kick === 1 ? "kicked once" : "kicked " + n.kick + "\u00d7")
+          if (n.drop) parts.push(n.drop === 1 ? "one drop" : n.drop + " drops")
+          return parts.join(" \u00b7 ")
         }
         color: tab.panel.dim
         font.family: tab.panel.fontFamily
@@ -229,12 +240,15 @@ Column {
         var t0 = p[0].t, span = Math.max(1, p[p.length - 1].t - t0)
         function xAt(t) { return (t - t0) * (width - 1) / span }
 
-        // Roam markers first, dashed, under the series.
-        ctx.strokeStyle = Qt.rgba(0.73, 0.6, 0.97, 0.55)
+        // Access-point changes first, dashed, under the series: purple
+        // when this machine chose to move, amber when it was kicked or
+        // the link dropped.
         ctx.setLineDash([2, 3])
         for (var m = 0; m < roams.length; m++) {
-          var rx = xAt(roams[m])
+          var rx = xAt(roams[m].ts)
           if (rx < 0 || rx > width) continue
+          ctx.strokeStyle = roams[m].kind === "roam"
+            ? Qt.rgba(0.73, 0.6, 0.97, 0.55) : Qt.rgba(0.88, 0.69, 0.41, 0.7)
           ctx.beginPath()
           ctx.moveTo(rx, 0)
           ctx.lineTo(rx, height)
@@ -370,6 +384,7 @@ Column {
       ChartKey { tint: tab.panel.okTone; label: "signal" }
       ChartKey { tint: tab.panel.dim; label: "local lag" }
       ChartKey { tint: "#bb9af7"; label: "roam"; dashed: true }
+      ChartKey { tint: tab.panel.warnTone; label: "kicked / dropped"; dashed: true }
     }
 
     PanelSeparator { width: parent.width }
@@ -559,6 +574,7 @@ Column {
           readonly property color tone: {
             var k = linkRow.modelData.kind
             if (k === "roam") return "#bb9af7"
+            if (k === "kick" || k === "drop") return tab.panel.warnTone
             if (k === "rate-drop") return tab.panel.warnTone
             if (k === "associate") return tab.panel.okTone
             return Color.accent

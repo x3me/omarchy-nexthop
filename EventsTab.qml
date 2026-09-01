@@ -113,7 +113,8 @@ Column {
 
   // Outages and associations are never folded: each one is its own fact.
   function groupable(kind) {
-    return kind === "roam" || kind === "rate-drop" || kind === "disruption"
+    return kind === "roam" || kind === "kick" || kind === "drop"
+      || kind === "rate-drop" || kind === "disruption"
   }
 
   function foldEvents(list) {
@@ -153,6 +154,20 @@ Column {
     return seen
   }
 
+  // Which access points did the kicking, and every distinct reason given.
+  function kickSources(members) {
+    var aps = [], whys = []
+    for (var i = 0; i < members.length; i++) {
+      var m = /Kicked by AP ([0-9a-fA-F:]{17}) \((reason [^)]*)\)/
+        .exec(members[i].detail || "")
+      if (!m) continue
+      var short = shortMac(m[1])
+      if (aps.indexOf(short) < 0) aps.push(short)
+      if (whys.indexOf(m[2]) < 0) whys.push(m[2])
+    }
+    return {aps: aps, why: whys.length ? whys.join("; ") : null}
+  }
+
   function lowestRate(members) {
     var low = null
     for (var i = 0; i < members.length; i++) {
@@ -170,6 +185,14 @@ Column {
         + (aps.length > 1 ? " between " + aps.join(" ↔ ")
            : aps.length === 1 ? " to " + aps[0] : "")
     }
+    if (g.kind === "kick") {
+      var k = kickSources(g.members)
+      return "Kicked by AP " + g.count + "\u00d7"
+        + (k.aps.length ? " \u2014 " + k.aps.join(", ") : "")
+        + (k.why ? " (" + k.why + ")" : "")
+    }
+    if (g.kind === "drop")
+      return "Dropped by this machine " + g.count + "\u00d7"
     if (g.kind === "rate-drop") {
       var low = lowestRate(g.members)
       return "Tx rate dropped " + g.count + "×"
@@ -426,6 +449,7 @@ Column {
           if (k === "outage") return Color.urgent
           if (k === "disruption" || k === "rate-drop") return tab.panel.warnTone
           if (k === "roam") return "#bb9af7"
+          if (k === "kick" || k === "drop") return tab.panel.warnTone
           if (k === "associate") return tab.panel.okTone
           return Color.accent
         }
