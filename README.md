@@ -67,6 +67,10 @@ tests.
 |---|---|
 | ![Wi-Fi tab](docs/wifi.png) | ![Apps tab](docs/apps.png) |
 
+The event log, naming who did what — including the router that kicks:
+
+![Events tab](docs/events.png)
+
 ## Using it
 
 - **Bar widget**: the index (or lag, or a sparkline — pick in Setup >
