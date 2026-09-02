@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nexthopd import net, score  # noqa: E402
-from nexthopd.daemon import Config, LinkWatch  # noqa: E402
+from nexthopd.daemon import Config, LinkWatch, WanEventArbiter  # noqa: E402
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
 from nexthopd.apps import AppTraffic, parse_ss  # noqa: E402
 from nexthopd.probes import Series, PingProbe, RE_REPLY, RE_PENDING, RE_UNREACH  # noqa: E402
@@ -1311,3 +1311,88 @@ class NlEventRecording(unittest.TestCase):
             "Kicked by AP 02:11:22:33:44:01 (reason 8: the AP is leaving the "
             "BSS), rejoined via 02:11:22:33:44:05 after 3 s, "
             "channel 1 \u2192 149, -30 \u2192 -40 dBm")
+
+
+class TraceParsing(unittest.TestCase):
+    """The cdn-cgi/trace response yields one validated address or nothing."""
+
+    def test_recorded_response(self):
+        # Recorded from a real fetch of speed.cloudflare.com/cdn-cgi/trace
+        # (address substituted): sixteen key=value lines, ip= among them.
+        text = (FIXTURES / "cf-trace.txt").read_text()
+        self.assertEqual(net.parse_trace(text),
+                         {"ip": "198.51.100.7", "family": "v4"})
+
+    def test_v6_is_labelled(self):
+        self.assertEqual(net.parse_trace("h=x\nip=2001:db8::7\nts=1\n"),
+                         {"ip": "2001:db8::7", "family": "v6"})
+
+    def test_only_a_real_address_gets_out(self):
+        # Whatever else the response holds must never reach the shell.
+        self.assertIsNone(net.parse_trace("ip=<b>not-an-ip</b>\n"))
+        self.assertIsNone(net.parse_trace("ip=1.2.3.4.5\n"))
+        self.assertIsNone(net.parse_trace("h=x\nts=1\n"))
+        self.assertIsNone(net.parse_trace(""))
+
+    def test_input_is_bounded_before_parsing(self):
+        # An ip= line beyond the size cap is as good as absent.
+        self.assertIsNone(net.parse_trace("x=" + "a" * 5000 + "\nip=1.2.3.4\n"))
+        self.assertIsNone(net.parse_trace("k=v\n" * 100 + "ip=1.2.3.4\n"))
+
+
+class WanArbitration(unittest.TestCase):
+    """Eight lost pings say the anchor went quiet; only both probes
+    failing say the internet did."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.notices = []
+        self.arb = WanEventArbiter(
+            self.store, lambda *a, **k: self.notices.append(a))
+
+    def tearDown(self):
+        self.store.close()
+        self.dir.cleanup()
+
+    def test_quiet_when_tcp_still_answers(self):
+        t = time.time()
+        self.arb.down(t, app_ok=True)
+        self.assertFalse(self.arb.real_outage)
+        self.assertEqual(self.notices, [])       # the user's internet works
+        self.arb.up(t + 30)
+        evs = self.store.events()
+        self.assertEqual([e["kind"] for e in evs], ["icmp-quiet"])
+        self.assertIsNotNone(evs[0]["ended_ts"])
+        self.assertEqual(self.notices, [])
+
+    def test_outage_when_both_probes_fail(self):
+        t = time.time()
+        self.arb.down(t, app_ok=False)
+        self.assertTrue(self.arb.real_outage)
+        self.assertEqual(len(self.notices), 1)
+        self.arb.up(t + 30)
+        self.assertEqual([e["kind"] for e in self.store.events()], ["outage"])
+        self.assertEqual(len(self.notices), 2)   # down + recovered
+
+    def test_escalates_one_way_when_tcp_stops_too(self):
+        t = time.time()
+        self.arb.down(t, app_ok=True)
+        self.arb.tick(t + 2, app_ok=True)        # still quiet, still no alarm
+        self.assertEqual(self.notices, [])
+        self.arb.tick(t + 5, app_ok=False)       # now it is an outage
+        self.assertTrue(self.arb.real_outage)
+        self.assertEqual(len(self.notices), 1)
+        self.arb.up(t + 60)
+        evs = self.store.events()
+        self.assertEqual(sorted(e["kind"] for e in evs),
+                         ["icmp-quiet", "outage"])
+        for e in evs:
+            self.assertIsNotNone(e["ended_ts"])
+
+    def test_quiet_never_charges_reliability(self):
+        t = time.time()
+        self.arb.down(t, app_ok=True)
+        self.arb.up(t + 600)
+        self.assertEqual(self.store.outage_stats(3600, now=t + 700),
+                         (0.0, 0, 0.0))

@@ -47,6 +47,8 @@ TCP_PROBE_PORT = 443
 # so the sample costs only the handshake — a few KB, about 1 MB a day
 # against the ~11 MB a day the continuous probing already spends.
 H3_SAMPLE_INTERVAL_S = 300.0
+# How often to re-ask which address this connection appears from.
+WAN_IP_REFRESH_S = 3600.0
 H3_TIMEOUT_S = 10.0
 
 # TLS needs a name the certificate covers, and a bare IP has none. These
@@ -416,6 +418,64 @@ class LegWatch:
         return None
 
 
+class WanEventArbiter:
+    """What a wan-leg "down" means, given the second probe's testimony.
+
+    Eight lost pings say the anchor went quiet; only both probes failing
+    say the internet did. An ISP or middlebox that stops answering ICMP
+    while TCP still flows used to be recorded — notified, and charged to
+    Reliability — as an outage the user never experienced.
+
+    A down with the TCP probe still answering opens an `icmp-quiet` event
+    instead: in the log, excluded from outage_stats, no notification.
+    Escalation is one-way — if TCP stops answering during a quiet spell,
+    the quiet event closes and a real outage opens, because an outage that
+    begins mid-spell must still alarm. Nothing downgrades the other way:
+    flapping between verdicts would teach people to ignore both.
+    """
+
+    QUIET_DETAIL = ("Anchor stopped answering pings; TCP on the same "
+                    "path kept working")
+
+    def __init__(self, store, notify):
+        self.store = store
+        self.notify = notify
+        self.event_id = None
+        self.kind = None          # "outage" | "icmp-quiet" while down
+
+    @property
+    def real_outage(self) -> bool:
+        return self.kind == "outage"
+
+    def down(self, now, app_ok: bool):
+        if app_ok:
+            self.kind = "icmp-quiet"
+            self.event_id = self.store.open_event(
+                int(now), "icmp-quiet", "warn", "wan", self.QUIET_DETAIL)
+            return
+        self.kind = "outage"
+        self.event_id = self.store.open_event(
+            int(now), "outage", "critical", "wan",
+            "router answers, nothing past it does")
+        self.notify("No internet",
+                    "The router answers but nothing past it does — "
+                    "the fault is on the ISP side.", True)
+
+    def tick(self, now, app_ok: bool):
+        if self.kind == "icmp-quiet" and not app_ok:
+            self.store.close_event(self.event_id, int(now))
+            self.down(now, False)
+
+    def up(self, now):
+        if self.event_id is not None:
+            self.store.close_event(self.event_id, int(now))
+            if self.kind == "outage":
+                self.notify("Internet recovered",
+                            "Replies from the internet again.")
+        self.event_id = None
+        self.kind = None
+
+
 class Daemon:
     def __init__(self):
         self.state_dir = ensure_state_dir()
@@ -452,6 +512,11 @@ class Daemon:
         self.last_signal = None
         self.watch_local = LegWatch("local")
         self.watch_wan = LegWatch("wan")
+        self.wan_events = WanEventArbiter(self.store, self.notify)
+        # The address this connection appears from — live.json only, never
+        # recent.json or history: shown, not archived.
+        self.wan_ip = None
+        self._wan_ip_at = 0.0
         # Who ended each Wi-Fi association — read from nl80211 via `iw
         # event`, unprivileged. Without it the link log still works; it
         # just cannot tell a kick from a roam.
@@ -537,6 +602,10 @@ class Daemon:
         self.app = Series()
         self.route = fresh
         self.counter_samples = []
+        # A new route means a new apparent address; drop the stale one now
+        # rather than display it wrong for up to an hour.
+        self.wan_ip = None
+        self._wan_ip_at = 0.0
         self.start_probes()
 
     def stop(self, *_):
@@ -619,16 +688,28 @@ class Daemon:
         if total_ok is not None and local_ok is not False:
             move = self.watch_wan.sample(total_ok, now)
             if move == "down":
-                self.watch_wan.event_id = self.store.open_event(
-                    int(now), "outage", "critical", "wan",
-                    "router answers, nothing past it does")
-                self.notify("No internet",
-                            "The router answers but nothing past it does — "
-                            "the fault is on the ISP side.", True)
-            elif move == "up" and self.watch_wan.event_id:
-                self.store.close_event(self.watch_wan.event_id, int(now))
-                self.watch_wan.event_id = None
-                self.notify("Internet recovered", "Replies from the internet again.")
+                # Did TCP keep answering while the pings failed? Samples
+                # are stamped at send time, so a handshake that merely
+                # straddled the moment the line died cannot vouch for the
+                # window after it.
+                self.wan_events.down(now, self._app_alive(4.5))
+            elif move == "up":
+                self.wan_events.up(now)
+            elif self.watch_wan.down_since is not None:
+                self.wan_events.tick(now, self._app_alive(5.0))
+
+    def _app_alive(self, window_s: float) -> bool:
+        """A TCP handshake succeeded this recently — the wan leg carries."""
+        return any(s[1] is not None for s in self.app.since(window_s))
+
+    def refresh_wan_ip(self):
+        """Off the loop: a curl with a timeout, and the bar must not wait
+        on it. A failed fetch keeps the last answer — the route is the
+        thing that invalidates it, and the route path clears it."""
+        info = net.wan_ip()
+        if info:
+            info["checked_ts"] = int(time.time())
+            self.wan_ip = info
 
     def maybe_content_test(self, now: float):
         if not self.config["contentSpeed"]:
@@ -898,7 +979,10 @@ class Daemon:
         state = "online"
         if self.watch_local.down_since:
             state = "local-down"
-        elif self.watch_wan.down_since:
+        elif self.watch_wan.down_since and self.wan_events.real_outage:
+            # Pings alone cannot declare this; see WanEventArbiter. During
+            # an icmp-quiet spell the bar stays its ordinary colour — the
+            # user's internet is working, and the log holds the anomaly.
             state = "wan-down"
         elif idx is not None and idx < 70:
             state = "degraded"
@@ -917,6 +1001,7 @@ class Daemon:
                     "inflation": bloat["inflation"],
                     "loaded_samples": bloat["loaded_samples"]},
             "local": ls, "total": ts, "wan": ws,
+            "wan_ip": self.wan_ip,
             "app": self.app_path(300.0),
             "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1],
                       "rx_total": self.counter_samples[-1][1] if self.counter_samples else None,
@@ -1063,6 +1148,11 @@ class Daemon:
                                  now=now)
 
             self.maybe_content_test(now)
+
+            if now - self._wan_ip_at >= WAN_IP_REFRESH_S:
+                self._wan_ip_at = now
+                threading.Thread(target=self.refresh_wan_ip,
+                                 name="wan-ip", daemon=True).start()
 
             if now - self.last_app_request >= H3_SAMPLE_INTERVAL_S:
                 self.last_app_request = now

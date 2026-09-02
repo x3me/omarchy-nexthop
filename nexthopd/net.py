@@ -7,6 +7,7 @@ that just suspended will fail all of them at once.
 """
 
 import json
+import ipaddress
 import re
 import shutil
 import subprocess
@@ -193,3 +194,39 @@ def snapshot(anchor: str = "1.1.1.1") -> dict:
         snap.update(wifi_link(iface))
         snap["station"] = wifi_station(iface)
     return snap
+
+
+# ------------------------------------------------------------- wan address
+
+TRACE_URL = "https://speed.cloudflare.com/cdn-cgi/trace"
+
+
+def parse_trace(text: str) -> Optional[dict]:
+    """The `ip=` line of a cdn-cgi/trace response, validated or nothing.
+
+    Only a value that `ipaddress` accepts ever leaves this function —
+    whatever else the response carries is discarded unread. Input is
+    bounded before it is split, so an oversized body costs one slice.
+    """
+    for line in text[:4096].splitlines()[:64]:
+        if not line.startswith("ip="):
+            continue
+        try:
+            addr = ipaddress.ip_address(line[3:].strip())
+        except ValueError:
+            return None
+        return {"ip": str(addr), "family": "v6" if addr.version == 6 else "v4"}
+    return None
+
+
+def wan_ip() -> Optional[dict]:
+    """The address this connection appears from.
+
+    Asked of a host the daemon already fetches from every hour — no new
+    destination learns the user's address, which is the reason this is not
+    an ifconfig-style third-party lookup. The URL is our constant, never
+    anything a response handed us.
+    """
+    raw = _run(["curl", "-sf", "--proto", "=https", "--max-time", "5",
+                "--max-filesize", "4096", TRACE_URL], timeout=8.0)
+    return parse_trace(raw) if raw else None

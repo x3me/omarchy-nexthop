@@ -1,0 +1,16 @@
+fl=00f000
+h=speed.cloudflare.com
+ip=198.51.100.7
+ts=1788316831.000
+visit_scheme=https
+uag=curl/8.21.0
+colo=XXX
+sliver=005-tier3
+http=http/1.1
+loc=XX
+tls=TLSv1.3
+sni=plaintext
+warp=off
+gateway=off
+rbi=off
+kex=X25519MLKEM768

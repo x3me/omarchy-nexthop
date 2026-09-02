@@ -48,12 +48,20 @@ call anyone.
   (the access point deauthenticated us, with its 802.11 reason code) or a
   *drop* (the link fell over) — plus channel and signal deltas,
   associations, and sustained Wi-Fi rate drops, logged with durations.
+- **WAN address**: the IP this connection appears from, on the Overview
+  path — masked (`103.87.…`) with tap-to-reveal, because panel screenshots
+  end up on forums. Asked of `speed.cloudflare.com`, a host the daemon
+  already talks to; shown live, never written to history.
 - **Per-application traffic** — top apps by TCP connection counters
   (`ss -tinp`, no root, no packet capture), each with a one-minute history
   strip and session totals. What Linux won't attribute without privileges
   (QUIC/UDP, overhead) is shown as its own bucket rather than hidden.
 - **Outage detection** with one notification when a disruption starts and
   one when it clears — naming the leg that failed.
+  A wan outage needs both probes to agree: if TCP handshakes to the
+  anchor keep succeeding while its pings go unanswered, the log records
+  an “ICMP went quiet” event instead — reported, never charged to
+  Reliability, no alarm for downtime you are not having.
 - **History**: per-minute for 7 days (configurable), hourly for a year,
   every test and event kept. A month of monitoring stays under ~12 MB.
 - **Copy report** — a plain-text summary of the window you are looking at,

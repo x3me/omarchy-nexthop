@@ -17,6 +17,22 @@ Item {
   readonly property bool localDown: live && live.state === "local-down"
   readonly property bool wanDown: live && live.state === "wan-down"
 
+  // The address this connection appears from, published by the daemon.
+  // Shown masked: Overview screenshots end up on forums, and a screenshot
+  // must not carry the poster's IP. Tapping the node reveals it; the
+  // reveal is never persisted anywhere.
+  readonly property var wanIp: live && live.wan_ip ? live.wan_ip : null
+  property bool revealIp: false
+
+  function maskedIp(w) {
+    if (!w || !w.ip) return ""
+    var full = String(w.ip)
+    if (revealIp) return full
+    if (w.family === "v6")
+      return full.split(":").slice(0, 2).join(":") + ":\u2026"
+    return full.split(".").slice(0, 2).join(".") + ".\u2026"
+  }
+
   function legColor(ms, down) {
     if (down) return Color.urgent
     if (ms === null || ms === undefined) return dimColor
@@ -127,6 +143,19 @@ Item {
       icon: "󰖟"   // nf-md-web
       title: "Internet"
       detail: root.anchor
+
+      Text {
+        textFormat: Text.PlainText
+        visible: root.wanIp !== null
+        text: root.maskedIp(root.wanIp)
+        color: root.dimColor
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideMiddle
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+      }
+      TapHandler { onTapped: root.revealIp = !root.revealIp }
     }
   }
 }

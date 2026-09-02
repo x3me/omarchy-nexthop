@@ -115,6 +115,7 @@ Column {
   function groupable(kind) {
     return kind === "roam" || kind === "kick" || kind === "drop"
       || kind === "rate-drop" || kind === "disruption"
+      || kind === "icmp-quiet"
   }
 
   function foldEvents(list) {
@@ -447,7 +448,8 @@ Column {
         readonly property color tone: {
           var k = modelData.kind
           if (k === "outage") return Color.urgent
-          if (k === "disruption" || k === "rate-drop") return tab.panel.warnTone
+          if (k === "disruption" || k === "rate-drop"
+              || k === "icmp-quiet") return tab.panel.warnTone
           if (k === "roam") return "#bb9af7"
           if (k === "kick" || k === "drop") return tab.panel.warnTone
           if (k === "associate") return tab.panel.okTone
