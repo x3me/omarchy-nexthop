@@ -1,14 +1,63 @@
 # Nexthop
 
-**Splits your Wi-Fi from your ISP, hop by hop.**
+**Is it your Wi-Fi, or your ISP? Know before you reboot anything.**
 
-An internet quality monitor for [Omarchy](https://omarchy.org). Nexthop
-continuously measures both legs of your connection — this machine to the
-router, and the router to the internet — so when things feel slow you know
-*which side of the router* owns the problem before you reboot anything or
-call anyone.
+Nexthop sits in your [Omarchy](https://omarchy.org) bar and watches both
+halves of your connection — this machine to the router, and the router to
+the internet. When things feel slow, one glance tells you which side of
+the router owns the problem.
 
 ![Nexthop panel](preview.png)
+
+## Why you'd want it
+
+- **An answer, not a graph.** One 0–100 score in the bar, colour-coded.
+  Green means stop worrying. When it drops, the panel says why — in the
+  words you'd use to a person: responsiveness, reliability, speed.
+- **"Is it me or is it them", settled.** The Overview draws your laptop,
+  your router and the internet with a live latency number on each leg.
+  The slow leg is the guilty one.
+- **Proof your ISP can't wave away.** Every outage is logged with its
+  start, duration and which side failed. *Copy report* produces the
+  plain-text summary a support desk actually asks for.
+- **It sees what you can't.** A router silently kicking your laptop off
+  Wi-Fi, an access point renegotiating to a crawl, the 3 a.m. outage that
+  was over before breakfast — all in the log, with timestamps and
+  durations.
+- **Speed answers without speed tests.** Small hourly checks keep the
+  speed score honest; the big saturating test runs only when you ask.
+
+## It won't get in your way
+
+- **No root, ever.** No sudo, no capabilities, no packet capture. It runs
+  as your user and reads what any process may read.
+- **You won't feel it.** About 3 % of one CPU core and ~30 MB of memory —
+  no fan, no stutter, nothing competing with your work.
+- **It doesn't clog your line.** The probes are pings and payload-free
+  handshakes; background checks are a few MB an hour and can be turned
+  off. Nothing saturates your connection unless you press the button.
+- **Private by construction.** Everything stays on your machine — no
+  account, no cloud, no telemetry. Even your own IP is shown masked, so a
+  screenshot of the panel is safe to post.
+
+## Made for Omarchy
+
+Nexthop is not a ported app — it is built for this desktop. It follows
+your theme automatically, uses the shell's own type and spacing, and
+opens instantly from the bar like every other panel. It is MIT-licensed,
+built in the open, and shaped by community feedback — the masked WAN
+address on the Overview came from a reader's suggestion the day after
+launch.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/x3me/omarchy-nexthop.git --enable
+```
+
+Requirements: `python3`, `ping`, `curl`, `ss` (all present on a stock
+Omarchy), `iw` for Wi-Fi detail, optionally `speedtest` (Ookla) for peak
+tests.
 
 | Latency, by leg | Speed |
 |---|---|
@@ -18,15 +67,29 @@ call anyone.
 |---|---|
 | ![Wi-Fi tab](docs/wifi.png) | ![Apps tab](docs/apps.png) |
 
+## Using it
+
+- **Bar widget**: the index (or lag, or a sparkline — pick in Setup >
+  Plugins). Colour is the verdict; during an outage it shows how long
+  you've been down. Click opens the panel, middle-click runs a peak test.
+- **Panel tabs**: Overview (is it me or is it them), Latency (window picker,
+  per-leg stats, latency under load), Speed (content history + last peak),
+  Wi-Fi (the local leg in detail, airtime, link events), Apps (who is using
+  the connection), Events (what happened + Copy report). Arrow keys or 1–6
+  switch tabs.
+- **CLI**: `bin/nexthop live | query --window 24h | events | tests | report`
+  — all JSON except `report`.
+- **IPC**: `omarchy-shell io.github.x3me.nexthop toggle | speedTest |
+  showTab Latency`
+
 ## What it measures
 
-- **Two-leg latency, twice a second.** One persistent ping to your gateway,
-  one to an internet anchor. The difference between them is your ISP;
-  the gateway leg is your Wi-Fi.
+- **Two-leg latency, twice a second.** One persistent probe to your
+  gateway, others to the internet. The difference between the legs is
+  your ISP; the gateway leg is your Wi-Fi.
 - **Lag** — one number for how the connection feels, folding latency, jitter
   (RFC 3550 IPDV) and packet loss, reported as best / typical / worst.
-- **An experience index (0–100)** from three equally weighted components,
-  in the shape [Orb](https://orb.net) established:
+- **An experience index (0–100)** from three equally weighted components:
   - *Responsiveness* — scored from lag
   - *Reliability* — uptime; it only bites during true outages
   - *Speed* — scored from small periodic **content checks** (~14 MB,
@@ -57,50 +120,20 @@ call anyone.
   strip and session totals. What Linux won't attribute without privileges
   (QUIC/UDP, overhead) is shown as its own bucket rather than hidden.
 - **Outage detection** with one notification when a disruption starts and
-  one when it clears — naming the leg that failed.
-  A wan outage needs both probes to agree: if TCP handshakes to the
-  anchor keep succeeding while its pings go unanswered, the log records
-  an “ICMP went quiet” event instead — reported, never charged to
-  Reliability, no alarm for downtime you are not having.
+  one when it clears — naming the leg that failed. A wan outage needs the
+  probes to agree: if TCP handshakes keep succeeding while pings go
+  unanswered, the log records an "ICMP went quiet" event instead — no
+  alarm for downtime you are not having.
 - **History**: per-minute for 7 days (configurable), hourly for a year,
   every test and event kept. A month of monitoring stays under ~12 MB.
 - **Copy report** — a plain-text summary of the window you are looking at,
   with timestamps, both legs and loss. The thing an ISP actually asks for.
 
-## Install
-
-```bash
-omarchy plugin add https://github.com/x3me/omarchy-nexthop.git --enable
-```
-
-Requirements: `python3`, `ping`, `curl`, `ss` (all present on a stock
-Omarchy), `iw` for Wi-Fi detail, optionally `speedtest` (Ookla) for peak
-tests.
-
-**Privileges: none.** No sudo, no capabilities, no packet capture. The
-daemon runs as your user; everything it reads is world-readable (`/sys`
-counters, `ping`, `iw`, `ss`). Outbound traffic is limited to what a
-measurement inherently is: ICMP to your gateway and the configured anchor,
-payload-free TCP handshakes to the instrument pool (the anchor,
-`speed.cloudflare.com`, `dns.google`), and HTTPS to the speed-test
-endpoints (Cloudflare, fast.com, or the Ookla CLI when you installed it).
-
-## Remove
-
-```bash
-omarchy plugin remove io.github.x3me.nexthop
-```
-
-Measurement history stays in `~/.local/state/nexthop/`; delete that
-directory too if you want nothing left behind. If you installed the
-optional systemd unit: `systemctl --user disable --now nexthopd` and
-remove `~/.config/systemd/user/nexthopd.service`.
-
 ## How it works
 
 The QML plugin is a thin reader. All measurement lives in **nexthopd**, a
 Python 3 daemon (standard library only, no pip), spawned and supervised by
-the plugin's shell service. Three files are the whole contract:
+the plugin's shell service. Four files are the whole contract:
 
 | file | cadence | consumer |
 |---|---|---|
@@ -151,25 +184,25 @@ Peak tests size themselves to saturate the line for ~10 s each way — far
 less on a slow one — and run only from the panel, by middle-clicking the
 bar widget, or via IPC.
 
-## Using it
+**Privileges: none.** No sudo, no capabilities, no packet capture. The
+daemon runs as your user; everything it reads is world-readable (`/sys`
+counters, `ping`, `iw`, `ss`).
 
-- **Bar widget**: the index (or lag, or a sparkline — pick in Setup >
-  Plugins). Colour is the verdict; during an outage it shows how long
-  you've been down. Click opens the panel, middle-click runs a peak test.
-- **Panel tabs**: Overview (is it me or is it them), Latency (window picker,
-  per-leg stats, latency under load), Speed (content history + last peak),
-  Wi-Fi (the local leg in detail, airtime, link events), Apps (who is using
-  the connection), Events (what happened + Copy report). Arrow keys or 1–6
-  switch tabs.
-- **CLI**: `bin/nexthop live | query --window 24h | events | tests | report`
-  — all JSON except `report`.
-- **IPC**: `omarchy-shell io.github.x3me.nexthop toggle | speedTest |
-  showTab Latency`
+## Remove
+
+```bash
+omarchy plugin remove io.github.x3me.nexthop
+```
+
+Measurement history stays in `~/.local/state/nexthop/`; delete that
+directory too if you want nothing left behind. If you installed the
+optional systemd unit: `systemctl --user disable --now nexthopd` and
+remove `~/.config/systemd/user/nexthopd.service`.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s test    # 19 tests, fixtures from real hardware
+python3 -m unittest discover -s test    # 145 tests, fixtures from real hardware
 python3 -m nexthopd                     # run the daemon in the foreground
 ```
 
