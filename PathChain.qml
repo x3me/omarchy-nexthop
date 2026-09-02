@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
 
 // laptop — router — internet, with per-leg latency on the connecting lines.
 // The answer to "is it me or is it them", drawn rather than written.
@@ -22,12 +23,29 @@ Item {
   // must not carry the poster's IP. Tapping the node reveals it; the
   // reveal is never persisted anywhere.
   readonly property var wanIp: live && live.wan_ip ? live.wan_ip : null
-  readonly property int probeCount: {
-    if (!live || !live.instruments) return 0
-    var n = 0
-    for (var i = 0; i < live.instruments.length; i++)
-      if (live.instruments[i].active) n += 1
-    return n
+  readonly property var seated: {
+    if (!live || !live.instruments) return []
+    return live.instruments.filter(function(i) { return i.active })
+  }
+
+  // What the info glyph on the Internet node explains on hover: which
+  // instruments hold the scored seats right now. A caption line said
+  // "2 probes live" here once — permanent height for a once-read fact.
+  function benchTip() {
+    var lines = []
+    for (var i = 0; i < seated.length; i++) {
+      var ins = seated[i]
+      lines.push(ins.kind + " \u00b7 " + ins.target
+        + (ins.p50 !== null && ins.p50 !== undefined
+           ? "  \u2014  " + ins.p50.toFixed(1) + " ms" : ""))
+    }
+    var standby = live && live.instruments
+      ? live.instruments.length - seated.length : 0
+    if (standby > 0)
+      lines.push(standby + " on standby \u2014 full bench on the Latency tab")
+    lines.push(revealIp ? "tap to mask your address"
+                        : "tap to reveal your address")
+    return lines.join("\n")
   }
   property bool revealIp: false
 
@@ -153,19 +171,15 @@ Item {
       // instruments there is no single anchor to name, and naming one
       // read as "this monitors Cloudflare". Masked — screenshots end up
       // on forums; tap to reveal, never persisted.
-      detail: root.wanIp ? root.maskedIp(root.wanIp) : root.anchor
+      detail: (root.wanIp ? root.maskedIp(root.wanIp) : root.anchor)
+        + (root.seated.length > 0 ? "  󰋽" : "")
 
-      Text {
-        textFormat: Text.PlainText
-        visible: root.probeCount > 0
-        text: root.probeCount === 1 ? "1 probe live" : root.probeCount + " probes live"
-        color: root.dimColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-      }
       TapHandler { onTapped: root.revealIp = !root.revealIp }
+      HoverHandler { id: inetHover }
+      PanelToolTip {
+        visible: inetHover.hovered && root.seated.length > 0
+        text: root.benchTip()
+      }
     }
   }
 }
