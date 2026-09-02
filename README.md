@@ -81,8 +81,9 @@ tests.
 daemon runs as your user; everything it reads is world-readable (`/sys`
 counters, `ping`, `iw`, `ss`). Outbound traffic is limited to what a
 measurement inherently is: ICMP to your gateway and the configured anchor,
-and HTTPS to the speed-test endpoints (Cloudflare, fast.com, or the Ookla
-CLI when you installed it).
+payload-free TCP handshakes to the instrument pool (the anchor,
+`speed.cloudflare.com`, `dns.google`), and HTTPS to the speed-test
+endpoints (Cloudflare, fast.com, or the Ookla CLI when you installed it).
 
 ## Remove
 
@@ -117,14 +118,20 @@ the daemon holds a lock, so the shell service simply attaches.
 
 ### What it talks to, and what that costs
 
-Everything below goes to your own gateway and to the internet anchor you
-configure (`1.1.1.1` by default) — nowhere else, apart from the speed-test
-hosts named at the end.
+The internet leg is measured by a small pool of instruments: ICMP and a
+TCP handshake to the anchor you configure (`1.1.1.1` by default), plus TCP
+handshakes to `speed.cloudflare.com` and `dns.google` — one probe target
+outside Cloudflare, so a Cloudflare incident cannot silence the whole
+pool. The **two best** instruments — fewest losses, steadiest tails,
+re-ranked every five minutes with flap damping — feed the score; the rest
+idle at a tenth of the rate. One anchor having a bad day stops being your
+connection's bad day. Beyond the pool, nothing is contacted except the
+speed-test hosts named at the end.
 
 | Probe | Where | Cost |
 | --- | --- | --- |
-| ICMP, both legs | your gateway and the anchor | ~11 MB/day at the default 500 ms interval |
-| TCP handshake | the anchor, port 443, once a second | negligible — a connection opened and closed, no payload |
+| ICMP | your gateway, and the anchor while seated | ~11 MB/day at the default 500 ms interval |
+| TCP handshakes | the instrument pool, port 443, ~1/s while seated | ~20 MB/day per seated instrument — connections opened and closed, no payload |
 | One HTTPS request | the anchor, by its TLS name, every 5 min | ~1 MB/day — a HEAD request, so no body is transferred |
 | Content check | speed.cloudflare.com | ~14 MB each, hourly, and can be turned off |
 | Peak test | Ookla / Cloudflare / fast.com | up to ~600 MB, **only ever when you ask** |

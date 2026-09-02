@@ -19,13 +19,16 @@ SAMPLE_COLUMNS = [
     # them is bufferbloat, and it only accumulates into something worth
     # scoring if it is recorded minute by minute first.
     "lag_idle", "lag_loaded",
+    # 0.2.0: what ICMP alone would have scored, beside the instrument-
+    # scored lag — the basis switch stays auditable per minute.
+    "lag_icmp",
 ]
 
 _COLS_SQL = ", ".join(f"{c} REAL" for c in SAMPLE_COLUMNS)
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS minute (
-  ts INTEGER PRIMARY KEY, {_COLS_SQL}, iface TEXT, network TEXT
+  ts INTEGER PRIMARY KEY, {_COLS_SQL}, iface TEXT, network TEXT, probes TEXT
 );
 CREATE TABLE IF NOT EXISTS hour (
   ts INTEGER PRIMARY KEY, {_COLS_SQL}, iface TEXT, network TEXT
@@ -68,11 +71,13 @@ class Store:
         """Additive migrations for databases created by older versions."""
         for table, column in (("tests", "network"),
                               ("minute", "lag_idle"), ("minute", "lag_loaded"),
-                              ("hour", "lag_idle"), ("hour", "lag_loaded")):
+                              ("hour", "lag_idle"), ("hour", "lag_loaded"),
+                              ("minute", "lag_icmp"), ("hour", "lag_icmp"),
+                              ("minute", "probes")):
             try:
                 self.db.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} "
-                    f"{'TEXT' if column == 'network' else 'REAL'}")
+                    f"{'TEXT' if column in ('network', 'probes') else 'REAL'}")
             except sqlite3.OperationalError:
                 pass  # column already there
 
@@ -84,9 +89,11 @@ class Store:
 
     # ---------------------------------------------------------------- writes
 
-    def put_minute(self, ts: int, values: dict, iface: str = "", network: str = ""):
-        cols = ["ts"] + SAMPLE_COLUMNS + ["iface", "network"]
-        row = [int(ts)] + [values.get(c) for c in SAMPLE_COLUMNS] + [iface, network]
+    def put_minute(self, ts: int, values: dict, iface: str = "",
+                   network: str = "", probes: str = ""):
+        cols = ["ts"] + SAMPLE_COLUMNS + ["iface", "network", "probes"]
+        row = ([int(ts)] + [values.get(c) for c in SAMPLE_COLUMNS]
+               + [iface, network, probes])
         placeholders = ", ".join("?" * len(cols))
         self.db.execute(
             f"INSERT OR REPLACE INTO minute ({', '.join(cols)}) VALUES ({placeholders})",

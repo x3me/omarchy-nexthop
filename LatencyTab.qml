@@ -229,6 +229,97 @@ Column {
 
   PanelSeparator { width: parent.width }
 
+  Text {
+    textFormat: Text.PlainText
+    text: "INSTRUMENTS \u00b7 WHAT MEASURES THE INTERNET LEG"
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+    font.letterSpacing: 1
+  }
+
+  // The bench: the two with the fewest losses and steadiest tails hold
+  // the seats and feed the score; the rest idle at a tenth of the rate.
+  Column {
+    width: parent.width
+    spacing: Style.space(6)
+
+    Repeater {
+      model: tab.panel.live && tab.panel.live.instruments
+        ? tab.panel.live.instruments : []
+
+      Row {
+        id: instRow
+        required property var modelData
+        width: parent.width
+        spacing: Style.space(8)
+
+        Rectangle {
+          width: Style.space(5)
+          height: Style.space(5)
+          color: instRow.modelData.active ? tab.panel.okTone : tab.panel.dim
+          anchors.verticalCenter: parent.verticalCenter
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width - Style.space(5) - Style.space(60)
+            - Style.space(56) - Style.space(74) - Style.space(8) * 4
+          text: instRow.modelData.kind + " \u00b7 " + instRow.modelData.target
+          color: tab.panel.fg
+          font.family: tab.panel.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideMiddle
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: Style.space(60)
+          horizontalAlignment: Text.AlignRight
+          text: instRow.modelData.p50 !== null && instRow.modelData.p50 !== undefined
+            ? instRow.modelData.p50.toFixed(1) + " ms" : "--"
+          color: tab.panel.fg
+          font.family: tab.panel.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: Style.space(56)
+          horizontalAlignment: Text.AlignRight
+          text: {
+            var l = instRow.modelData.loss
+            return l !== null && l !== undefined ? (l * 100).toFixed(1) + "%" : "--"
+          }
+          color: instRow.modelData.loss ? tab.panel.warnTone : tab.panel.dim
+          font.family: tab.panel.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: Style.space(74)
+          horizontalAlignment: Text.AlignRight
+          text: instRow.modelData.active ? "scored"
+            : instRow.modelData.quarantined ? "quarantined" : "standby"
+          color: instRow.modelData.active ? tab.panel.okTone : tab.panel.dim
+          font.family: tab.panel.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+    }
+  }
+
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    text: "Two instruments feed the score at a time, re-ranked every five "
+      + "minutes on loss and tail stability \u2014 one bad anchor cannot "
+      + "poison the number."
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+    wrapMode: Text.WordWrap
+  }
+
+  PanelSeparator { width: parent.width }
+
   // ---- latency under load (bufferbloat) -----------------------------------
   Item {
     width: parent.width
@@ -252,6 +343,8 @@ Column {
       font.pixelSize: Style.font.caption
     }
   }
+
+  PanelSeparator { width: parent.width }
 
   Text {
     textFormat: Text.PlainText

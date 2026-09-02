@@ -22,6 +22,7 @@ from collections import deque
 from . import __version__, apps, linkevents, net, score, speedtest
 from .paths import (ensure_state_dir, live_path, recent_path, db_path,
                     lock_path, state_dir)
+from .instruments import Bench, MergedSeries
 from .probes import Series, PingProbe, TcpProbe
 from .state import write_atomic
 from .store import Store
@@ -41,6 +42,16 @@ MIN_LOAD_SPLIT_SAMPLES = 10
 # real connection to someone else's server every time it runs.
 TCP_PROBE_INTERVAL_S = 1.0
 TCP_PROBE_PORT = 443
+# The rest of the instrument pool (see instruments.py). Cloudflare edge
+# is a host the daemon already fetches from; dns.google is the one
+# probe target outside Cloudflare, so a Cloudflare incident cannot
+# silence the whole pool. TCP handshakes only — no payload.
+CF_EDGE_HOST = "speed.cloudflare.com"
+DIVERSITY_HOST = "dns.google"
+# A benched instrument idles at a tenth of its seated cadence: enough
+# to stay rankable, cheap enough to keep around.
+STANDBY_FACTOR = 10.0
+BENCH_EVAL_EVERY_S = 60.0
 
 # One real HTTP/3 request every five minutes, as ground truth for what a
 # request actually costs end to end. A HEAD request returns no body at all,
@@ -434,8 +445,8 @@ class WanEventArbiter:
     flapping between verdicts would teach people to ignore both.
     """
 
-    QUIET_DETAIL = ("Anchor stopped answering pings; TCP on the same "
-                    "path kept working")
+    QUIET_DETAIL = ("Scored probes went quiet; another instrument on "
+                    "the same path kept answering")
 
     def __init__(self, store, notify):
         self.store = store
@@ -483,11 +494,18 @@ class Daemon:
         self.config.refresh()
         self.store = Store(db_path())
         self.local = Series()
-        self.total = Series()
-        # TCP-handshake RTT to the same anchor, on 443. Same host, same
-        # path, different protocol — so the gap against the ICMP series is
-        # attributable to the protocol rather than to the target.
-        self.app = Series()
+        # The internet leg is measured by a bench of instruments — see
+        # instruments.py. Each instrument feeds its own Series; the scored
+        # series (self.total) is a merged view over whichever two hold the
+        # seats, so every consumer downstream keeps reading one "internet
+        # leg". self.app stays the anchor's TCP series: its gap against
+        # the anchor's ICMP series is the protocol comparison it always was.
+        self.bench = Bench(self._instrument_pool())
+        self._instrument_series = {}
+        self._instrument_probes = {}
+        self._new_instrument_series()
+        self.total = MergedSeries(self._active_series)
+        self._last_bench_eval = 0.0
         self.app_request = None          # last HTTP/3 request sample
         self._curl_h3 = None             # cached curl capability
         self.last_app_request = 0.0
@@ -565,6 +583,38 @@ class Daemon:
         self._lock_fh = os.fdopen(fd, "r+")
         return True
 
+    def _instrument_pool(self):
+        anchor = self.config["internetAnchor"]
+        return [("icmp-anchor", "icmp", anchor),
+                ("tcp-anchor", "tcp", "%s:443" % anchor),
+                ("tcp-cf", "tcp", CF_EDGE_HOST + ":443"),
+                ("tcp-google", "tcp", DIVERSITY_HOST + ":443")]
+
+    def _new_instrument_series(self):
+        self._instrument_series = {
+            key: Series() for key, _, _ in self._instrument_pool()}
+        # The names the rest of the daemon has always read.
+        self.icmp_anchor = self._instrument_series["icmp-anchor"]
+        self.app = self._instrument_series["tcp-anchor"]
+
+    def _active_series(self):
+        return [self._instrument_series[i.key] for i in self.bench.actives()
+                if i.key in self._instrument_series]
+
+    def _instrument_stats(self, window_s: float = Bench.WINDOW_S):
+        return {k: Series.stats(v.since(window_s))
+                for k, v in self._instrument_series.items()}
+
+    def _apply_seats(self, changes):
+        interval = int(self.config["probeIntervalMs"]) / 1000.0
+        for key, active in changes:
+            probe = self._instrument_probes.get(key)
+            if not probe:
+                continue
+            kind = self.bench.instruments[key].kind
+            base = interval if kind == "icmp" else TCP_PROBE_INTERVAL_S
+            probe.set_interval(base if active else base * STANDBY_FACTOR)
+
     def start_probes(self):
         anchor = self.config["internetAnchor"]
         self.route = net.route_to(anchor)
@@ -575,14 +625,24 @@ class Daemon:
                           loaded_fn=lambda: self.link_loaded)
             p.start()
             self.probes.append(p)
-        p = PingProbe(anchor, self.total, interval, "total",
-                      loaded_fn=lambda: self.link_loaded)
-        p.start()
-        self.probes.append(p)
-        p = TcpProbe(anchor, self.app, TCP_PROBE_INTERVAL_S, "app",
-                     loaded_fn=lambda: self.link_loaded, port=TCP_PROBE_PORT)
-        p.start()
-        self.probes.append(p)
+        for key, kind, target in self._instrument_pool():
+            series = self._instrument_series[key]
+            host = target.rsplit(":", 1)[0] if kind == "tcp" else target
+            if kind == "icmp":
+                p = PingProbe(host, series, interval, key,
+                              loaded_fn=lambda: self.link_loaded)
+                base = interval / 1000.0
+            else:
+                p = TcpProbe(host, series, TCP_PROBE_INTERVAL_S, key,
+                             loaded_fn=lambda: self.link_loaded,
+                             port=TCP_PROBE_PORT)
+                base = TCP_PROBE_INTERVAL_S
+            self.bench.instruments[key].target = target
+            if not self.bench.instruments[key].active:
+                p.set_interval(base * STANDBY_FACTOR)
+            p.start()
+            self.probes.append(p)
+            self._instrument_probes[key] = p
 
     def restart_probes_if_route_changed(self):
         """New default route (roamed networks, docked, VPN up) — new targets."""
@@ -594,12 +654,12 @@ class Daemon:
         for p in self.probes:
             p.stop()
         self.probes.clear()
+        self._instrument_probes = {}
         self.local = Series()
-        self.total = Series()
-        # TCP-handshake RTT to the same anchor, on 443. Same host, same
-        # path, different protocol — so the gap against the ICMP series is
-        # attributable to the protocol rather than to the target.
-        self.app = Series()
+        # Fresh network, fresh distributions: every instrument starts
+        # over. The bench keeps its seats — continuity until the new
+        # windows hold enough samples to argue about.
+        self._new_instrument_series()
         self.route = fresh
         self.counter_samples = []
         # A new route means a new apparent address; drop the stale one now
@@ -692,15 +752,19 @@ class Daemon:
                 # are stamped at send time, so a handshake that merely
                 # straddled the moment the line died cannot vouch for the
                 # window after it.
-                self.wan_events.down(now, self._app_alive(4.5))
+                self.wan_events.down(now, self._any_instrument_alive(4.5))
             elif move == "up":
                 self.wan_events.up(now)
             elif self.watch_wan.down_since is not None:
-                self.wan_events.tick(now, self._app_alive(5.0))
+                self.wan_events.tick(now, self._any_instrument_alive(5.0))
 
-    def _app_alive(self, window_s: float) -> bool:
-        """A TCP handshake succeeded this recently — the wan leg carries."""
-        return any(s[1] is not None for s in self.app.since(window_s))
+    def _any_instrument_alive(self, window_s: float) -> bool:
+        """Some instrument — seated or benched — heard the internet this
+        recently. The outage arbiter treats that as proof the leg carries."""
+        for series in self._instrument_series.values():
+            if any(s[1] is not None for s in series.since(window_s)):
+                return True
+        return False
 
     def refresh_wan_ip(self):
         """Off the loop: a curl with a timeout, and the bar must not wait
@@ -895,7 +959,7 @@ class Daemon:
         built on it — is flattering the connection.
         """
         app_stats = Series.stats(self.app.since(window_s))
-        icmp_stats = Series.stats(self.total.since(window_s))
+        icmp_stats = Series.stats(self.icmp_anchor.since(window_s))
         out = {"rtt": app_stats, "request": self.app_request}
         # Every sample failing means the anchor does not answer on this
         # port: a fact about the target, not a fault in the connection.
@@ -1003,6 +1067,7 @@ class Daemon:
             "local": ls, "total": ts, "wan": ws,
             "wan_ip": self.wan_ip,
             "app": self.app_path(300.0),
+            "instruments": self.bench.snapshot(now, self._instrument_stats()),
             "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1],
                       "rx_total": self.counter_samples[-1][1] if self.counter_samples else None,
                       "tx_total": self.counter_samples[-1][2] if self.counter_samples else None},
@@ -1064,6 +1129,12 @@ class Daemon:
         ws = score.wan_from(ts, ls)
         lag = score.lag_ms(ts)
         resp = score.responsiveness(lag) if ts["count"] else None
+        # The old basis kept beside the new: the 0.2.0 switch to
+        # instrument-scored lag must stay auditable against what ICMP
+        # alone would have said — the 0.1.10 discipline, applied to
+        # ourselves.
+        icmp_stats = Series.stats(self.icmp_anchor.since(60))
+        icmp_lag = score.lag_ms(icmp_stats) if icmp_stats["count"] else None
 
         out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
         rel = score.reliability(out_frac, disruptions,
@@ -1085,9 +1156,11 @@ class Daemon:
                 "signal_dbm": snap_link.get("signal_dbm"),
                 "resp": resp, "rel": rel, "spd": spd, "idx": idx,
                 "lag_idle": bloat["idle"], "lag_loaded": bloat["loaded"],
+                "lag_icmp": icmp_lag,
             },
             iface=self.route.get("iface", ""),
             network=snap_link.get("ssid", ""),
+            probes="+".join(sorted(i.key for i in self.bench.actives())),
         )
 
     def flush_apps(self, now: float):
@@ -1148,6 +1221,11 @@ class Daemon:
                                  now=now)
 
             self.maybe_content_test(now)
+
+            if now - self._last_bench_eval >= BENCH_EVAL_EVERY_S:
+                self._last_bench_eval = now
+                self._apply_seats(
+                    self.bench.evaluate(now, self._instrument_stats()))
 
             if now - self._wan_ip_at >= WAN_IP_REFRESH_S:
                 self._wan_ip_at = now

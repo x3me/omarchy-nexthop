@@ -156,6 +156,22 @@ class PingProbe(threading.Thread):
             except OSError:
                 pass
 
+    def set_interval(self, seconds: float):
+        """Change cadence in place — a benched instrument idles, a seated
+        one probes at full rate, without tearing the thread down. `ping`
+        takes its interval on the command line, so the running process is
+        retired and the run loop respawns it with the new one."""
+        seconds = max(0.2, float(seconds))
+        if abs(seconds - self.interval) < 1e-9:
+            return
+        self.interval = seconds
+        proc = self._proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
     def _expire(self, now: float):
         """A packet still unanswered after the grace period is a lost packet.
 
@@ -270,6 +286,10 @@ class TcpProbe(threading.Thread):
 
     def stop(self):
         self._stop.set()
+
+    def set_interval(self, seconds: float):
+        """Picked up on the next cycle; nothing to tear down here."""
+        self.interval = max(0.25, float(seconds))
 
     def _loaded(self) -> bool:
         try:

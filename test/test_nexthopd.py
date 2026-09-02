@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nexthopd import net, score  # noqa: E402
 from nexthopd.daemon import Config, LinkWatch, WanEventArbiter  # noqa: E402
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
+from nexthopd.instruments import Bench, MergedSeries, penalty  # noqa: E402
 from nexthopd.apps import AppTraffic, parse_ss  # noqa: E402
 from nexthopd.probes import Series, PingProbe, RE_REPLY, RE_PENDING, RE_UNREACH  # noqa: E402
 from nexthopd.store import Store  # noqa: E402
@@ -241,15 +242,15 @@ class LoadTagging(unittest.TestCase):
                     now = time.time()
                     # Plenty idle, only a couple loaded: no ratio yet.
                     for i in range(30):
-                        dm.total.add(now - 60 + i, 15.0, False)
+                        dm.icmp_anchor.add(now - 60 + i, 15.0, False)
                     for i in range(MIN_LOAD_SPLIT_SAMPLES - 1):
-                        dm.total.add(now - 5 + i * 0.1, 300.0, True)
+                        dm.icmp_anchor.add(now - 5 + i * 0.1, 300.0, True)
                     b = dm.bufferbloat(300.0)
                     self.assertIsNotNone(b["idle"])
                     self.assertIsNotNone(b["loaded"])
                     self.assertIsNone(b["inflation"])
                     # One more loaded sample and the comparison is allowed.
-                    dm.total.add(now, 300.0, True)
+                    dm.icmp_anchor.add(now, 300.0, True)
                     b = dm.bufferbloat(300.0)
                     self.assertIsNotNone(b["inflation"])
                     self.assertGreater(b["inflation"], 5)
@@ -296,7 +297,7 @@ class ApplicationPath(unittest.TestCase):
     def test_reports_the_gap_against_icmp(self):
         now = time.time()
         for i in range(30):
-            self.daemon.total.add(now - 30 + i, 7.0)     # ICMP: fast-pathed
+            self.daemon.icmp_anchor.add(now - 30 + i, 7.0)     # ICMP: fast-pathed
             self.daemon.app.add(now - 30 + i, 12.0)      # handshake: honest
         ap = self.daemon.app_path(300.0)
         self.assertTrue(ap["available"])
@@ -307,7 +308,7 @@ class ApplicationPath(unittest.TestCase):
         # the connection — it must not surface as 100% packet loss.
         now = time.time()
         for i in range(20):
-            self.daemon.total.add(now - 20 + i, 8.0)
+            self.daemon.icmp_anchor.add(now - 20 + i, 8.0)
             self.daemon.app.add(now - 20 + i, None)
         ap = self.daemon.app_path(300.0)
         self.assertFalse(ap["available"])
@@ -1396,3 +1397,150 @@ class WanArbitration(unittest.TestCase):
         self.arb.up(t + 600)
         self.assertEqual(self.store.outage_stats(3600, now=t + 700),
                          (0.0, 0, 0.0))
+
+
+def _st(count=60, loss=0.0, p50=20.0, p95=30.0):
+    return {"count": count, "loss": loss, "p50": p50, "p95": p95}
+
+
+class InstrumentRanking(unittest.TestCase):
+    def test_loss_dominates_then_spread_then_median(self):
+        clean = penalty(_st(loss=0.0, p50=20, p95=30))
+        lossy = penalty(_st(loss=0.05, p50=10, p95=12))
+        wobbly = penalty(_st(loss=0.0, p50=20, p95=200))
+        slower = penalty(_st(loss=0.0, p50=60, p95=70))
+        self.assertLess(clean, lossy)      # 5% loss loses to 10 ms spread
+        self.assertLess(clean, wobbly)     # tail spread beats nothing
+        self.assertLess(clean, slower)     # median only as tiebreak
+        self.assertLess(slower, wobbly)    # 40 ms slower < 170 ms wobblier
+
+    def test_too_few_samples_judge_nothing(self):
+        self.assertIsNone(penalty(_st(count=Bench.MIN_SAMPLES - 1)))
+        self.assertIsNone(penalty(None))
+        self.assertIsNone(penalty({}))
+
+    def test_full_loss_is_dead_not_slow(self):
+        dead = penalty({"count": 60, "loss": 1.0, "p50": None, "p95": None})
+        self.assertGreaterEqual(dead, Bench.DEAD_AT)
+
+
+class BenchSeats(unittest.TestCase):
+    POOL = [("icmp-a", "icmp", "1.1.1.1"), ("tcp-a", "tcp", "1.1.1.1:443"),
+            ("tcp-b", "tcp", "cf:443"), ("tcp-c", "tcp", "google:443")]
+
+    def bench(self):
+        return Bench(self.POOL)
+
+    def keys(self, b):
+        return sorted(i.key for i in b.actives())
+
+    def test_first_two_start_seated(self):
+        self.assertEqual(self.keys(self.bench()), ["icmp-a", "tcp-a"])
+
+    def test_dead_seat_is_replaced_immediately(self):
+        b = self.bench()
+        stats = {"icmp-a": _st(), "tcp-a": _st(loss=1.0, p50=None, p95=None),
+                 "tcp-b": _st(p50=25, p95=35), "tcp-c": _st(p50=40, p95=60)}
+        changes = b.evaluate(1000.0, stats)
+        self.assertEqual(sorted(changes), [("tcp-a", False), ("tcp-b", True)])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-b"])
+
+    def test_no_churn_during_a_full_outage(self):
+        b = self.bench()
+        dead = _st(loss=1.0, p50=None, p95=None)
+        stats = {k: dict(dead) for k in ("icmp-a", "tcp-a", "tcp-b", "tcp-c")}
+        self.assertEqual(b.evaluate(1000.0, stats), [])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
+
+    def test_challenger_needs_two_consecutive_clear_wins(self):
+        b = self.bench()
+        # tcp-b is 20%+ better than the worst seat; one win is not enough.
+        stats = {"icmp-a": _st(p50=10, p95=14), "tcp-a": _st(p50=100, p95=160),
+                 "tcp-b": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
+        self.assertEqual(b.evaluate(1000.0, stats), [])
+        changes = b.evaluate(1000.0 + Bench.RESELECT_EVERY_S, stats)
+        self.assertEqual(sorted(changes), [("tcp-a", False), ("tcp-b", True)])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-b"])
+
+    def test_a_win_streak_broken_starts_over(self):
+        b = self.bench()
+        better = {"icmp-a": _st(p50=10, p95=14), "tcp-a": _st(p50=100, p95=160),
+                  "tcp-b": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
+        level = {"icmp-a": _st(p50=10, p95=14), "tcp-a": _st(p50=19, p95=24),
+                 "tcp-b": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
+        t = 1000.0
+        self.assertEqual(b.evaluate(t, better), [])
+        self.assertEqual(b.evaluate(t + 300, level), [])   # streak broken
+        self.assertEqual(b.evaluate(t + 600, better), [])  # back to one win
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
+
+    def test_flapping_instrument_is_quarantined(self):
+        b = self.bench()
+        inst = b.instruments["tcp-b"]
+        t = 1000.0
+        # Three seat changes inside an hour is a flap.
+        for k, active in (("tcp-b", True), ("tcp-b", False), ("tcp-b", True)):
+            b._seat(inst, t, active)
+            t += 60
+        self.assertGreater(inst.quarantined_until, t)
+        # While quarantined it cannot be promoted, even over a corpse.
+        b._seat(inst, t, False)
+        stats = {"icmp-a": _st(), "tcp-a": _st(loss=1.0, p50=None, p95=None),
+                 "tcp-b": _st(p50=5, p95=6), "tcp-c": _st(p50=40, p95=60)}
+        b.evaluate(t + 60, stats)
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-c"])
+
+    def test_snapshot_names_the_seats(self):
+        b = self.bench()
+        snap = b.snapshot(1000.0, {"icmp-a": _st(p50=7)})
+        by_key = {row["key"]: row for row in snap}
+        self.assertTrue(by_key["icmp-a"]["active"])
+        self.assertEqual(by_key["icmp-a"]["p50"], 7)
+        self.assertFalse(by_key["tcp-c"]["active"])
+        self.assertEqual(len(snap), 4)
+
+
+class MergedView(unittest.TestCase):
+    def test_merges_and_orders_the_seated_series(self):
+        from nexthopd.probes import Series
+        a, c = Series(), Series()
+        now = time.time()
+        a.add(now - 3, 10.0)
+        c.add(now - 2, None)
+        a.add(now - 1, 12.0)
+        m = MergedSeries(lambda: [a, c])
+        self.assertEqual([s[1] for s in m.since(10)], [10.0, None, 12.0])
+        self.assertEqual(len(m.all()), 3)
+        m2 = MergedSeries(lambda: [a])
+        self.assertEqual(len(m2.since(10)), 2)
+
+
+class MinuteProvenance(unittest.TestCase):
+    def test_minute_rows_carry_basis_and_seats(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        store = Store(Path(d.name) / "t.db")
+        self.addCleanup(store.close)
+        ts = int(time.time() // 60) * 60
+        store.put_minute(ts, {"lag": 30.0, "lag_icmp": 24.0},
+                         iface="wlo1", network="x", probes="icmp-anchor+tcp-cf")
+        rows, _ = store.series(3600)
+        row = rows[-1]
+        self.assertEqual(row["lag_icmp"], 24.0)
+        self.assertEqual(row["probes"], "icmp-anchor+tcp-cf")
+
+    def test_old_databases_gain_the_columns(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = Path(d.name) / "t.db"
+        import sqlite3 as sq
+        from nexthopd.store import SAMPLE_COLUMNS
+        old_cols = ", ".join(f"{c} REAL" for c in SAMPLE_COLUMNS
+                             if c != "lag_icmp")
+        db = sq.connect(path)
+        db.execute(f"CREATE TABLE minute (ts INTEGER PRIMARY KEY, {old_cols}, "
+                   "iface TEXT, network TEXT)")
+        db.commit(); db.close()
+        store = Store(path)
+        self.addCleanup(store.close)
+        store.put_minute(60, {"lag": 1.0}, probes="a+b")   # must not raise

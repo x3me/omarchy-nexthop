@@ -22,6 +22,13 @@ Item {
   // must not carry the poster's IP. Tapping the node reveals it; the
   // reveal is never persisted anywhere.
   readonly property var wanIp: live && live.wan_ip ? live.wan_ip : null
+  readonly property int probeCount: {
+    if (!live || !live.instruments) return 0
+    var n = 0
+    for (var i = 0; i < live.instruments.length; i++)
+      if (live.instruments[i].active) n += 1
+    return n
+  }
   property bool revealIp: false
 
   function maskedIp(w) {
@@ -142,16 +149,19 @@ Item {
     Node {
       icon: "󰖟"   // nf-md-web
       title: "Internet"
-      detail: root.anchor
+      // Your address out there, not the probe target: with a bench of
+      // instruments there is no single anchor to name, and naming one
+      // read as "this monitors Cloudflare". Masked — screenshots end up
+      // on forums; tap to reveal, never persisted.
+      detail: root.wanIp ? root.maskedIp(root.wanIp) : root.anchor
 
       Text {
         textFormat: Text.PlainText
-        visible: root.wanIp !== null
-        text: root.maskedIp(root.wanIp)
+        visible: root.probeCount > 0
+        text: root.probeCount === 1 ? "1 probe live" : root.probeCount + " probes live"
         color: root.dimColor
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
-        elide: Text.ElideMiddle
         width: parent.width
         horizontalAlignment: Text.AlignHCenter
       }
