@@ -15,7 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nexthopd import net, score  # noqa: E402
-from nexthopd.daemon import (CaptiveWatch, Config, LinkWatch,  # noqa: E402
+from nexthopd.daemon import (MIN_PLAUSIBLE_INFLATION,  # noqa: E402
+                             NOTIFY_AFTER_S, CaptiveWatch,
+                             Config, LegWatch, LinkWatch,
                              LocalEventArbiter, WanEventArbiter)
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
 from nexthopd.net import trace_verdict  # noqa: E402
@@ -1489,10 +1491,29 @@ class WanArbitration(unittest.TestCase):
         t = time.time()
         self.arb.down(t, app_ok=False)
         self.assertTrue(self.arb.real_outage)
+        # Logged at once; alarmed only once it has lasted — an outage the
+        # user could do nothing about should not interrupt them.
+        self.assertEqual(self.notices, [])
+        self.arb.tick(t + NOTIFY_AFTER_S + 0.1, app_ok=False)
         self.assertEqual(len(self.notices), 1)
         self.arb.up(t + 30)
         self.assertEqual([e["kind"] for e in self.store.events()], ["outage"])
         self.assertEqual(len(self.notices), 2)   # down + recovered
+
+    def test_a_brief_outage_is_logged_and_never_alarms(self):
+        t = time.time()
+        self.arb.down(t, app_ok=False)
+        self.arb.tick(t + 1, app_ok=False)
+        self.arb.up(t + 2)                       # healed inside the window
+        self.assertEqual(self.notices, [])       # neither alarm nor recovery
+        self.assertEqual([e["kind"] for e in self.store.events()], ["outage"])
+
+    def test_the_alarm_fires_once_not_every_tick(self):
+        t = time.time()
+        self.arb.down(t, app_ok=False)
+        for i in range(10):
+            self.arb.tick(t + NOTIFY_AFTER_S + i, app_ok=False)
+        self.assertEqual(len(self.notices), 1)
 
     def test_escalates_one_way_when_tcp_stops_too(self):
         t = time.time()
@@ -1501,6 +1522,8 @@ class WanArbitration(unittest.TestCase):
         self.assertEqual(self.notices, [])
         self.arb.tick(t + 5, app_ok=False)       # now it is an outage
         self.assertTrue(self.arb.real_outage)
+        self.assertEqual(self.notices, [])       # still inside the delay
+        self.arb.tick(t + 5 + NOTIFY_AFTER_S + 0.1, app_ok=False)
         self.assertEqual(len(self.notices), 1)
         self.arb.up(t + 60)
         evs = self.store.events()
@@ -1873,6 +1896,9 @@ class LocalArbitration(unittest.TestCase):
         self.assertTrue(self.arb.real_outage)
         self.assertEqual(self.store.opened[0][0:3],
                          ("outage", "critical", "local"))
+        # Logged at once, alarmed only after NOTIFY_AFTER_S.
+        self.assertEqual(self.notes, [])
+        self.arb.tick(100.0 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.assertEqual(len(self.notes), 1)
 
     def test_escalation_is_one_way(self):
@@ -1880,10 +1906,12 @@ class LocalArbitration(unittest.TestCase):
         # The far side goes quiet too: an outage starting mid-spell must alarm.
         self.arb.tick(110.0, beyond_ok=False)
         self.assertTrue(self.arb.real_outage)
+        self.assertEqual(self.notes, [])         # inside the alarm delay
+        self.arb.tick(110.0 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.assertEqual(len(self.notes), 1)
         # Nothing walks it back down again — flapping teaches people to
         # ignore both verdicts.
-        self.arb.tick(120.0, beyond_ok=True)
+        self.arb.tick(140.0, beyond_ok=True)
         self.assertTrue(self.arb.real_outage)
 
     def test_recovery_only_notifies_for_a_real_outage(self):
@@ -1892,6 +1920,7 @@ class LocalArbitration(unittest.TestCase):
         self.assertEqual(self.notes, [])
         self.assertIsNone(self.arb.kind)
         self.arb.down(200.0, beyond_ok=False)
+        self.arb.tick(200.0 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.arb.up(230.0)
         self.assertEqual(len(self.notes), 2)   # down + recovered
 
@@ -2100,3 +2129,135 @@ class RouteChangeKeepsHistoryThroughAnOutage(unittest.TestCase):
             self.assertIsNone(d.wan_ip)
         finally:
             dmod.net.route_to = original
+
+
+class DisruptionProducer(unittest.TestCase):
+    """A run of losses that recovers before it becomes an outage.
+
+    Until now nothing opened a `disruption` event, so half the reliability
+    formula — a half-weight on duration, a 300 s recovery charge, a 25-point
+    cap, all designed against real history in 0.1.10 — could never fire, and
+    a blip the user felt cost the score nothing.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.dir.name) / "t.db")
+
+    def tearDown(self):
+        self.store.close()
+        self.dir.cleanup()
+
+    def run_losses(self, n, cadence=0.5, t0=None):
+        t0 = time.time() if t0 is None else t0
+        w = LegWatch("local")
+        moves = []
+        for i in range(n):
+            moves.append(w.sample(False, t0 + i * cadence))
+        moves.append(w.sample(True, t0 + n * cadence))
+        return w, moves
+
+    def test_a_single_loss_is_noise(self):
+        w, moves = self.run_losses(1)
+        self.assertEqual(moves, [None, None])
+        self.assertIsNone(w.blip)
+
+    def test_below_the_threshold_stays_silent(self):
+        w, moves = self.run_losses(2)
+        self.assertIsNone(moves[-1])
+        self.assertIsNone(w.blip)
+
+    def test_three_losses_that_recover_are_a_disruption(self):
+        t0 = time.time()
+        w, moves = self.run_losses(3, t0=t0)
+        self.assertEqual(moves[-1], "disruption")
+        began, ended = w.blip
+        # Timed from the FIRST loss, not from the threshold being crossed:
+        # the interruption started when the packets started going missing.
+        self.assertEqual(began, t0)
+        self.assertEqual(ended, t0 + 1.5)
+
+    def test_reaching_the_outage_threshold_is_an_outage_not_a_disruption(self):
+        w, moves = self.run_losses(8)
+        self.assertIn("down", moves)
+        self.assertEqual(moves[-1], "up")
+        self.assertIsNone(w.blip)
+
+    def test_recorded_closed_with_a_duration_and_charged(self):
+        w, _ = self.run_losses(4)
+        d = _FakeDaemonForDisruption(self.store)
+        d.record_disruption("local", w, beyond_ok=False)
+        evs = self.store.events()
+        self.assertEqual([e["kind"] for e in evs], ["disruption"])
+        self.assertIsNotNone(evs[0]["ended_ts"])
+        # And it now actually reaches Reliability, which was the point.
+        frac, count, disrupted = self.store.outage_stats(
+            3600, now=time.time() + 10)
+        self.assertEqual(count, 1)
+        self.assertGreater(disrupted, 0.0)
+        self.assertEqual(frac, 0.0)          # a blip is not downtime
+        self.assertLess(score.reliability(frac, count,
+                                          disruption_fraction=disrupted),
+                        100.0)
+
+    def test_arbitrated_like_an_outage(self):
+        w, _ = self.run_losses(4)
+        d = _FakeDaemonForDisruption(self.store)
+        # Something past this leg kept answering, so the leg interrupted
+        # nothing — a gateway dropping pings while traffic crosses it.
+        d.record_disruption("local", w, beyond_ok=True)
+        self.assertEqual(self.store.events(), [])
+        self.assertIsNone(w.blip)            # consumed either way
+
+    def test_never_stored_with_a_zero_span(self):
+        # outage_stats drops any row whose end is not after its start, so a
+        # blip must never round away to nothing.
+        base = time.time()
+        w = LegWatch("local")
+        w.blip = (base + 0.4, base + 0.6)
+        d = _FakeDaemonForDisruption(self.store)
+        d.record_disruption("wan", w, beyond_ok=False)
+        e = self.store.events()[0]
+        self.assertGreater(e["ended_ts"], e["ts"])
+        _, count, disrupted = self.store.outage_stats(3600, now=base + 10)
+        self.assertEqual(count, 1)
+        self.assertGreater(disrupted, 0.0)
+
+
+class _FakeDaemonForDisruption:
+    """Just enough of Daemon to exercise record_disruption."""
+
+    def __init__(self, store):
+        self.store = store
+
+    from nexthopd.daemon import Daemon as _D
+    record_disruption = _D.record_disruption
+    del _D
+
+
+class InflationPlausibility(unittest.TestCase):
+    """Queueing can only add delay, so a ratio below 1 is not a reading."""
+
+    @staticmethod
+    def ratio(loaded, idle):
+        """The published value for a given pair, with the floor applied."""
+        r = loaded / idle
+        if r < MIN_PLAUSIBLE_INFLATION:
+            return None
+        return round(max(1.0, r), 2)
+
+    def test_the_case_seen_live_is_withheld(self):
+        # 0.87 was published on 716 samples per side: the sample floor
+        # cannot catch a wrong-direction result, only a thin one.
+        self.assertIsNone(self.ratio(20.3, 23.4))
+
+    def test_indistinguishable_reads_as_no_inflation(self):
+        # Within noise of 1, the honest statement is "no inflation", not
+        # "faster under load".
+        self.assertEqual(self.ratio(9.8, 10.0), 1.0)
+        self.assertEqual(self.ratio(10.0, 10.0), 1.0)
+
+    def test_real_inflation_still_reported(self):
+        self.assertEqual(self.ratio(13.0, 10.0), 1.3)
+        # A badly queued link is not implausible, however large.
+        self.assertEqual(self.ratio(250.0, 10.0), 25.0)

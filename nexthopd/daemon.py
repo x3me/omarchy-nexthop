@@ -32,10 +32,27 @@ from .update import UpdateWatch
 # eight of them is four seconds — long enough to skip a Wi-Fi roam, short
 # enough that the notification still feels immediate.
 OUTAGE_AFTER_LOSSES = 8
+# A run of losses shorter than an outage but longer than noise: an
+# interruption the user may well have felt — a call breaking up, a stream
+# rebuffering — that used to leave no trace at all and cost Reliability
+# nothing, because only runs reaching OUTAGE_AFTER_LOSSES were ever
+# recorded. At the default 500 ms cadence three losses is 1.5 s: past a
+# single dropped ICMP, well short of the 4 s that makes an outage. Argue
+# with the number, not the rule.
+DISRUPTION_AFTER_LOSSES = 3
 
 # Probes needed on each side of the idle/loaded split before their ratio is
 # reported. Below this the comparison is sampling noise.
 MIN_LOAD_SPLIT_SAMPLES = 10
+# Queueing can only ADD delay, so a loaded/idle ratio below 1 says the link
+# answered faster while busy, which is not a measurement. The sample floor
+# above does not catch it: 0.87 was published live on 716 samples per side.
+# Within a few percent of 1 the two populations are simply indistinguishable
+# and the honest reading is "no inflation"; further below, the split itself
+# is untrustworthy — the loaded samples likely landed in a quiet moment — so
+# withhold rather than report. A plausibility floor, distinct from a sample
+# floor, and the guard the socket metric already has.
+MIN_PLAUSIBLE_INFLATION = 0.95
 
 # The application-path probe: a TCP handshake to the anchor's TLS port,
 # once a second. Slower than the ICMP cadence on purpose — this exists to
@@ -99,7 +116,11 @@ def proc_start_ticks(pid):
         return int(rest[19])
     except (OSError, ValueError, IndexError):
         return None
-# A disruption that self-heals in under this is recorded but not notified.
+# An interruption that self-heals in under this is recorded but not
+# notified. The constant was written with 0.1.0 and never read: outages
+# alarmed the instant they were declared, so a four-second blip on a flaky
+# link fired a desktop notification the user could do nothing about. The
+# event is always logged; only the interruption goes quiet.
 NOTIFY_AFTER_S = 5.0
 
 
@@ -416,15 +437,30 @@ class LegWatch:
         self.losses = 0
         self.down_since = None
         self.event_id = None
+        self.run_since = None      # when the current run of losses began
+        self.blip = None           # (from, to) of a run that just recovered
 
     def sample(self, ok: bool, now: float):
-        """Returns 'down' / 'up' on a transition, else None."""
+        """Returns 'down' / 'up' / 'disruption' on a transition, else None.
+
+        `disruption` is a run that recovered before reaching the outage
+        threshold. It is reported at recovery rather than at onset because
+        that is the first moment its length is known, and its length is what
+        Reliability charges.
+        """
         if ok:
+            run, began = self.losses, self.run_since
             self.losses = 0
+            self.run_since = None
             if self.down_since is not None:
                 self.down_since = None
                 return "up"
+            if run >= DISRUPTION_AFTER_LOSSES and began is not None:
+                self.blip = (began, now)
+                return "disruption"
             return None
+        if self.losses == 0:
+            self.run_since = now
         self.losses += 1
         if self.losses == OUTAGE_AFTER_LOSSES and self.down_since is None:
             self.down_since = now
@@ -456,6 +492,8 @@ class WanEventArbiter:
         self.notify = notify
         self.event_id = None
         self.kind = None          # "outage" | "icmp-quiet" while down
+        self._notify_at = None    # when the alarm becomes due
+        self._notified = False    # whether it actually fired
 
     @property
     def real_outage(self) -> bool:
@@ -471,23 +509,33 @@ class WanEventArbiter:
         self.event_id = self.store.open_event(
             int(now), "outage", "critical", "wan",
             "router answers, nothing past it does")
-        self.notify("No internet",
-                    "The router answers but nothing past it does — "
-                    "the fault is on the ISP side.", True)
+        # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
+        self._notify_at = now + NOTIFY_AFTER_S
+        self._notified = False
 
     def tick(self, now, app_ok: bool):
         if self.kind == "icmp-quiet" and not app_ok:
             self.store.close_event(self.event_id, int(now))
             self.down(now, False)
+            return
+        if (self.kind == "outage" and not self._notified
+                and self._notify_at is not None and now >= self._notify_at):
+            self._notified = True
+            self.notify("No internet",
+                        "The router answers but nothing past it does — "
+                        "the fault is on the ISP side.", True)
 
     def up(self, now):
         if self.event_id is not None:
             self.store.close_event(self.event_id, int(now))
-            if self.kind == "outage":
+            # Only say it came back if we said it went away.
+            if self.kind == "outage" and self._notified:
                 self.notify("Internet recovered",
                             "Replies from the internet again.")
         self.event_id = None
         self.kind = None
+        self._notify_at = None
+        self._notified = False
 
 
 class CaptiveWatch:
@@ -595,6 +643,8 @@ class LocalEventArbiter:
         self.notify = notify
         self.event_id = None
         self.kind = None          # "outage" | "gateway-quiet" while down
+        self._notify_at = None    # when the alarm becomes due
+        self._notified = False    # whether it actually fired
 
     @property
     def real_outage(self) -> bool:
@@ -609,22 +659,33 @@ class LocalEventArbiter:
         self.kind = "outage"
         self.event_id = self.store.open_event(
             int(now), "outage", "critical", "local", "router unreachable")
-        self.notify("Router unreachable",
-                    "Nothing on the local network is answering.", True)
+        # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
+        self._notify_at = now + NOTIFY_AFTER_S
+        self._notified = False
 
     def tick(self, now, beyond_ok: bool):
         if self.kind == "gateway-quiet" and not beyond_ok:
             self.store.close_event(self.event_id, int(now))
             self.down(now, False)
+            return
+        if (self.kind == "outage" and not self._notified
+                and self._notify_at is not None and now >= self._notify_at):
+            self._notified = True
+            self.notify("Router unreachable",
+                        "Nothing on the local network is answering.", True)
 
     def up(self, now):
         if self.event_id is not None:
             self.store.close_event(self.event_id, int(now))
-            if self.kind == "outage":
+            # Only say it came back if we said it went away. A recovery
+            # notice with no matching alarm is a message about nothing.
+            if self.kind == "outage" and self._notified:
                 self.notify("Local network recovered",
                             "The router is answering again.")
         self.event_id = None
         self.kind = None
+        self._notify_at = None
+        self._notified = False
 
 
 class Daemon:
@@ -895,6 +956,9 @@ class Daemon:
                 self.local_events.down(now, self._any_instrument_alive(4.5))
             elif move == "up":
                 self.local_events.up(now)
+            elif move == "disruption":
+                self.record_disruption("local", self.watch_local,
+                                       self._any_instrument_alive(4.5))
             elif self.watch_local.down_since is not None:
                 self.local_events.tick(now, self._any_instrument_alive(5.0))
 
@@ -916,8 +980,35 @@ class Daemon:
                 self.wan_events.down(now, self._any_instrument_alive(4.5))
             elif move == "up":
                 self.wan_events.up(now)
+            elif move == "disruption":
+                self.record_disruption("wan", self.watch_wan,
+                                       self._any_instrument_alive(4.5))
             elif self.watch_wan.down_since is not None:
                 self.wan_events.tick(now, self._any_instrument_alive(5.0))
+
+    def record_disruption(self, leg: str, watch, beyond_ok: bool):
+        """A run that recovered before it became an outage.
+
+        Arbitrated exactly like an outage: if something past this leg kept
+        answering, the leg did not interrupt anything — a gateway dropping
+        three pings while traffic crosses it is not a disruption, and
+        logging it would fill the log with noise the user never felt.
+        """
+        if not watch.blip:
+            return
+        began, ended = watch.blip
+        watch.blip = None
+        if beyond_ok:
+            return
+        # Stored closed, with its duration, because Reliability charges
+        # interruptions in time. Integer seconds are what the table holds,
+        # so guarantee a non-zero span: outage_stats drops any row whose
+        # end is not after its start, and a blip that vanished from the
+        # score would be worse than one rounded up by a second.
+        eid = self.store.open_event(
+            int(began), "disruption", "warn", leg,
+            "brief interruption, recovered on its own")
+        self.store.close_event(eid, max(int(ended), int(began) + 1))
 
     def _any_instrument_alive(self, window_s: float) -> bool:
         """Some instrument — seated or benched — heard the internet this
@@ -1155,7 +1246,11 @@ class Daemon:
         if (idle_lag and loaded_lag and idle_lag > 0
                 and len(idle_s) >= MIN_LOAD_SPLIT_SAMPLES
                 and len(loaded_s) >= MIN_LOAD_SPLIT_SAMPLES):
-            inflation = round(loaded_lag / idle_lag, 2)
+            ratio = loaded_lag / idle_lag
+            if ratio >= MIN_PLAUSIBLE_INFLATION:
+                # Clamped at 1: a ratio a hair under it means the two are
+                # indistinguishable, not that load made the link quicker.
+                inflation = round(max(1.0, ratio), 2)
         return {"idle": idle_lag, "loaded": loaded_lag,
                 "inflation": inflation, "loaded_samples": len(loaded_s)}
 
