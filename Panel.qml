@@ -31,6 +31,24 @@ Panel {
   readonly property color okTone: "#9ece6a"
   readonly property color warnTone: "#e0af68"
 
+  // A newer version is published. The daemon only ever reports this; the
+  // panel only ever mentions it. Updating stays with `omarchy plugin update`,
+  // which shows the diff and asks.
+  // Disclosure state for the panel's optional detail blocks. Lives here, not
+  // on the tab, so moving between tabs does not fold them shut again. Resets
+  // with the shell, which is the right lifetime for a view preference.
+  property bool instrumentsExpanded: false
+
+  readonly property bool updateAvailable:
+    !!(live && live.update && live.update.available)
+
+  function updateTip() {
+    return "A newer version of Nexthop is published.\n\n"
+      + "omarchy plugin update io.github.x3me.nexthop\n\n"
+      + "That shows you what changed before applying it. "
+      + "These checks can be turned off in Setup \u203a Plugins."
+  }
+
   function bandColor(idx) {
     if (idx === null || idx === undefined) return dim
     if (idx >= 80) return okTone
@@ -82,6 +100,7 @@ Panel {
       planDownMbps: setting("planDownMbps", 0),
       planUpMbps: setting("planUpMbps", 0),
       notifyOutage: setting("notifyOutage", true),
+      updateCheck: setting("updateCheck", true),
       historyDays: setting("historyDays", 7),
       throughputWindowS: setting("throughputWindowS", 3),
     }
@@ -310,20 +329,44 @@ Panel {
                 font.pixelSize: Style.font.heading
                 font.weight: Font.Bold
               }
-              Text {
-                textFormat: Text.PlainText
-                text: {
-                  var l = root.live
-                  if (!l) return "WAITING FOR DAEMON"
-                  if (l.state === "local-down") return "ROUTER UNREACHABLE"
-                  if (l.state === "wan-down") return "NO INTERNET · ROUTER OK"
-                  return (l.band || "").toUpperCase()
+              Row {
+                spacing: Style.space(6)
+
+                Text {
+                  textFormat: Text.PlainText
+                  text: {
+                    var l = root.live
+                    if (!l) return "WAITING FOR DAEMON"
+                    if (l.state === "local-down") return "ROUTER UNREACHABLE"
+                    if (l.state === "wan-down") return "NO INTERNET · ROUTER OK"
+                    return (l.band || "").toUpperCase()
+                  }
+                  color: root.live && root.live.state !== "online"
+                    ? Color.urgent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.letterSpacing: 1
                 }
-                color: root.live && root.live.state !== "online"
-                  ? Color.urgent : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.letterSpacing: 1
+
+                // A newer version exists. Deliberately the quietest thing
+                // that can still be found: one dim glyph beside the verdict,
+                // the command on hover, and nothing that acts on its own.
+                // Same grammar as the bench glyph on the Overview.
+                Text {
+                  visible: root.updateAvailable
+                  textFormat: Text.PlainText
+                  text: "󰚰"   // nf-md-update
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  HoverHandler { id: updateHover }
+                  PanelToolTip {
+                    visible: updateHover.hovered && root.updateAvailable
+                    text: root.updateTip()
+                  }
+                }
               }
             }
           }

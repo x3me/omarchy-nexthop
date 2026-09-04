@@ -36,9 +36,12 @@ the router owns the problem.
 - **It doesn't clog your line.** The probes are pings and payload-free
   handshakes; background checks are a few MB an hour and can be turned
   off. Nothing saturates your connection unless you press the button.
-- **Private by construction.** Everything stays on your machine — no
-  account, no cloud, no telemetry. Even your own IP is shown masked, so a
-  screenshot of the panel is safe to post.
+- **Private by construction.** Everything it measures stays on your machine
+  — no account, no cloud, no telemetry. Even your own IP is shown masked, so
+  a screenshot of the panel is safe to post. The one thing it asks the
+  outside world is whether a newer version exists: once a day it asks the
+  repository you installed from, sends nothing about you, and shows a small
+  marker if so. Turn that off in Setup > Plugins and it asks nothing.
 
 ## Made for Omarchy
 
@@ -54,6 +57,11 @@ launch.
 ```bash
 omarchy plugin add https://github.com/x3me/omarchy-nexthop.git --enable
 ```
+
+Updating is Omarchy's own `omarchy plugin update`, which shows you
+what changed before applying it. Nexthop checks once a day whether a newer
+version is published and marks the panel header if so; it never installs
+anything itself.
 
 Requirements: `python3`, `ping`, `curl`, `ss` (all present on a stock
 Omarchy), `iw` for Wi-Fi detail, optionally `speedtest` (Ookla) for peak

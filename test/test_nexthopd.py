@@ -4,6 +4,8 @@
 Run: python3 -m unittest discover -s test
 """
 
+import json
+import subprocess
 import sys
 import tempfile
 import time
@@ -16,9 +18,11 @@ from nexthopd import net, score  # noqa: E402
 from nexthopd.daemon import Config, LinkWatch, WanEventArbiter  # noqa: E402
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
 from nexthopd.instruments import Bench, MergedSeries, penalty  # noqa: E402
-from nexthopd.apps import AppTraffic, parse_ss  # noqa: E402
+from nexthopd.apps import (AppTraffic, Sock, latency_stats,  # noqa: E402
+                           parse_ss, socket_timing)
 from nexthopd.probes import Series, PingProbe, RE_REPLY, RE_PENDING, RE_UNREACH  # noqa: E402
 from nexthopd.store import Store  # noqa: E402
+from nexthopd.update import RE_SHA, UpdateWatch, verdict  # noqa: E402
 from nexthopd.state import write_atomic, read_json  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -938,12 +942,124 @@ class AppAttribution(unittest.TestCase):
         t._fold(base, 100.0)
         # Baseline sample must not count connection lifetimes as traffic.
         self.assertEqual(t.rates, [])
-        grown = {k: (a, p, s + 1000, r + 3000) for k, (a, p, s, r) in base.items()}
+        grown = {k: v._replace(sent=v.sent + 1000, recv=v.recv + 3000)
+                 for k, v in base.items()}
         t._fold(grown, 103.0)
         by_name = {a["name"]: a for a in t.rates}
         self.assertAlmostEqual(by_name["chrome"]["rx_bps"], 2 * 3000 / 3, delta=1)
         self.assertEqual(by_name["chrome"]["conns"], 2)
         self.assertEqual(by_name["slack"]["rx_total"], 3000)
+
+    # ------------------------------------------------- kernel socket timing
+
+    def guards(self):
+        return (FIXTURES / "ss-rtt-guards.txt").read_text()
+
+    def test_parse_ss_reads_kernel_timing(self):
+        socks = parse_ss(self.fixture())
+        slack = next(v for v in socks.values() if v.app == "slack")
+        self.assertEqual(slack.srtt, 31.2)
+        self.assertEqual(slack.minrtt, 29.004)
+        self.assertEqual(slack.retrans, 108)
+        # A socket the kernel has not timed reports None, never zero — zero
+        # would read as "instant", which is the opposite of "unknown".
+        untimed = parse_ss(
+            'ESTAB 0 0 192.0.2.10:1 198.51.100.7:443 users:(("x",pid=9,fd=1))\n'
+            '\t cubic bytes_sent:99999 bytes_received:99999\n')
+        self.assertIsNone(next(iter(untimed.values())).srtt)
+        self.assertIsNone(next(iter(untimed.values())).minrtt)
+
+    def test_latency_stats_from_fixture(self):
+        st = latency_stats(parse_ss(self.fixture()))
+        self.assertEqual(st["sockets"], 3)
+        self.assertEqual(st["rejected"], 0)
+        self.assertEqual(st["rtt_p50"], 15.0)
+        self.assertEqual(st["floor_p50"], 8.41)
+        # Queueing is the median of 12.8-8.412, 31.2-29.004, 15.0-6.55.
+        self.assertEqual(st["queue_p50"], 4.39)
+        self.assertEqual(st["retrans_sockets"], 1)
+
+    def test_queueing_divides_out_distance(self):
+        """The point of the metric: a far socket and a near one with the
+        same queueing must report the same queueing."""
+        near = Sock("near", 1, 50_000, 50_000, srtt=15.0, minrtt=5.0)
+        far = Sock("far", 2, 50_000, 50_000, srtt=310.0, minrtt=300.0)
+        self.assertEqual(socket_timing(near)[2], socket_timing(far)[2])
+        st = latency_stats({"a": near, "b": far,
+                            "c": Sock("mid", 3, 50_000, 50_000,
+                                      srtt=60.0, minrtt=50.0)})
+        self.assertEqual(st["queue_p50"], 10.0)
+        # ...while the raw round trips stay far apart, as they should.
+        self.assertEqual(st["rtt_p50"], 60.0)
+        self.assertEqual(st["floor_p50"], 50.0)
+
+    def test_guards_reject_implausible_and_thin_sockets(self):
+        socks = parse_ss(self.guards())
+        self.assertEqual(len(socks), 7)
+        st = latency_stats(socks)
+        # good-a, good-b, good-c qualify.
+        self.assertEqual(st["sockets"], 3)
+        # tiny (under the byte floor), implausible (past the ceiling) and
+        # inverted (floor above the average) are rejected...
+        self.assertEqual(st["rejected"], 3)
+        # ...but the socket the kernel simply has not timed is NOT counted as
+        # a rejection: absent evidence is not bad evidence.
+        untimed = [v for v in socks.values() if v.srtt is None]
+        self.assertEqual(len(untimed), 1)
+        self.assertEqual(st["retrans_sockets"], 1)
+
+    def test_each_guard_individually(self):
+        ok = Sock("ok", 1, 50_000, 50_000, srtt=20.0, minrtt=10.0)
+        self.assertIsNotNone(socket_timing(ok))
+        # Below the byte floor the path's own minimum is not trustworthy.
+        self.assertIsNone(socket_timing(ok._replace(sent=100, recv=100)))
+        # Plausibility ceiling: a broken measurement, not a slow link.
+        self.assertIsNone(socket_timing(ok._replace(srtt=99_999.0)))
+        # A floor above the average cannot happen; the field is stale.
+        self.assertIsNone(socket_timing(ok._replace(minrtt=40.0)))
+        # Rounding in `ss` output must not trip the inversion check.
+        self.assertIsNotNone(socket_timing(ok._replace(srtt=20.0, minrtt=20.02)))
+        # Zero or missing timing yields nothing rather than a zero RTT.
+        self.assertIsNone(socket_timing(ok._replace(srtt=0.0)))
+        self.assertIsNone(socket_timing(ok._replace(minrtt=None)))
+
+    def test_under_sampled_publishes_nothing(self):
+        two = {"a": Sock("a", 1, 50_000, 50_000, srtt=20.0, minrtt=10.0),
+               "b": Sock("b", 2, 50_000, 50_000, srtt=22.0, minrtt=11.0)}
+        # Two qualifying sockets is not a distribution.
+        self.assertIsNone(latency_stats(two))
+        three = dict(two, c=Sock("c", 3, 50_000, 50_000, srtt=24.0, minrtt=12.0))
+        self.assertIsNotNone(latency_stats(three))
+        self.assertIsNone(latency_stats({}))
+
+    def test_per_app_timing_medians(self):
+        t = AppTraffic()
+        base = parse_ss(self.guards())
+        t._fold(base, 100.0)
+        t._fold({k: v._replace(sent=v.sent + 500, recv=v.recv + 500)
+                 for k, v in base.items()}, 103.0)
+        by_name = {a["name"]: a for a in t.rates}
+        self.assertEqual(by_name["good-a"]["rtt_ms"], 20.0)
+        self.assertEqual(by_name["good-a"]["queue_ms"], 10.0)
+        self.assertEqual(by_name["good-c"]["queue_ms"], 20.0)
+        # An app whose sockets all failed the guard reports no timing at all
+        # rather than a fabricated zero.
+        self.assertIsNone(by_name["tiny"]["rtt_ms"])
+        self.assertIsNone(by_name["no-timing"]["rtt_ms"])
+        self.assertIsNone(by_name["inverted"]["queue_ms"])
+        # The aggregate rides along on the same fold.
+        self.assertEqual(t.latency["sockets"], 3)
+
+    def test_idle_apps_report_no_timing(self):
+        t = AppTraffic()
+        base = parse_ss(self.fixture())
+        t._fold(base, 100.0)
+        t._fold(base, 103.0)
+        t._fold({}, 106.0)
+        idle = {a["name"]: a for a in t.top()}
+        # No live socket means no measurement, not a stale one.
+        self.assertIsNone(idle["chrome"]["rtt_ms"])
+        self.assertIsNone(idle["chrome"]["queue_ms"])
 
     def test_socket_cap_bounds_parsing(self):
         # Thousands of distinct sockets parse to at most the cap.
@@ -1544,3 +1660,171 @@ class MinuteProvenance(unittest.TestCase):
         store = Store(path)
         self.addCleanup(store.close)
         store.put_minute(60, {"lag": 1.0}, probes="a+b")   # must not raise
+
+
+class UpdateNotice(unittest.TestCase):
+    """The update check reports; it must never act, and never trust a remote
+    string far enough to hand it to a subprocess unchecked."""
+
+    A = "a" * 40
+    B = "b" * 40
+
+    def test_verdict_states(self):
+        self.assertEqual(verdict(self.A, self.A, True, False, False), "current")
+        # Origin holds a commit we have never seen.
+        self.assertEqual(verdict(self.A, self.B, False, False, False), "behind")
+        # THE CASE THAT MATTERS: `omarchy plugin update` fetches before it
+        # shows its diff, so a user who looked and declined already holds
+        # origin's commit while still being behind it. Deciding from "we have
+        # never seen that object" alone would show that user nothing.
+        self.assertEqual(verdict(self.A, self.B, True, True, False), "behind")
+        # A developer checkout ahead of origin must not be nagged.
+        self.assertEqual(verdict(self.A, self.B, True, False, True), "ahead")
+        self.assertEqual(verdict(self.A, self.B, True, False, False), "diverged")
+        # Not knowing is its own answer, not a guess in either direction.
+        self.assertEqual(verdict("", self.B, False, False, False), "unknown")
+        self.assertEqual(verdict(self.A, "", False, False, False), "unknown")
+
+    def test_remote_sha_must_be_an_object_id(self):
+        # This is the guard that matters: the value arrives from the network
+        # and is then passed as an argument to git.
+        for bad in ("", "HEAD", "a" * 39, "a" * 41, "A" * 40, "g" * 40,
+                    "../../etc/passwd", "a" * 40 + " --upload-pack=sh",
+                    "--upload-pack=evil", "a" * 40 + "\n" + "b" * 40):
+            self.assertIsNone(RE_SHA.match(bad), bad)
+        self.assertIsNotNone(RE_SHA.match(self.A))
+
+    def test_junk_from_the_remote_yields_unknown_not_a_crash(self):
+        w = UpdateWatch(repo=REPO)
+        calls = []
+
+        def fake(*args, capture=True):
+            calls.append(args)
+            if args[0] == "rev-parse":
+                return 0, self.A
+            if args[0] == "ls-remote":
+                return 0, "not-a-sha\tHEAD"
+            return 0, ""
+
+        w._git = fake
+        self.assertEqual(w.check(), "unknown")
+        # Having refused the answer, it must not go on to use it.
+        self.assertNotIn("cat-file", [c[0] for c in calls])
+
+    def test_behind_is_reported_without_any_write(self):
+        w = UpdateWatch(repo=REPO)
+        seen = []
+
+        def fake(*args, capture=True):
+            seen.append(args[0])
+            if args[0] == "rev-parse":
+                return 0, self.A
+            if args[0] == "ls-remote":
+                return 0, self.B + "\tHEAD"
+            if args[0] == "cat-file":
+                return 1, ""          # we do not hold origin's commit
+            return 0, ""
+
+        w._git = fake
+        self.assertEqual(w.check(), "behind")
+        # Every git verb used must be read-only. A fetch, pull, merge or
+        # checkout here would make this self-updating code.
+        self.assertTrue(set(seen) <= {"rev-parse", "ls-remote", "cat-file",
+                                      "merge-base"}, seen)
+
+    def test_cadence_delays_the_first_check_and_then_spaces_them(self):
+        w = UpdateWatch(repo=REPO)
+        w.check = lambda: "behind"
+        w.tick(1000.0)
+        # Nothing on the first tick: the daemon restarts with the shell, and
+        # a check on every restart would be noise.
+        self.assertIsNone(w.checked_ts)
+        w.tick(1000.0 + 299)
+        self.assertIsNone(w.checked_ts)
+        w.tick(1000.0 + 301)
+        self.assertEqual(w.state, "behind")
+        self.assertTrue(w.snapshot()["available"])
+        # ...and then not again for a day.
+        first = w.checked_ts
+        w.check = lambda: "current"
+        w.tick(1000.0 + 3600)
+        self.assertEqual(w.checked_ts, first)
+        w.tick(1000.0 + 301 + 24 * 3600 + 1)
+        self.assertEqual(w.state, "current")
+        self.assertFalse(w.snapshot()["available"])
+
+    def test_disabled_makes_no_check_and_clears_any_notice(self):
+        w = UpdateWatch(repo=REPO)
+        w.check = lambda: "behind"
+        w.tick(1000.0)
+        w.tick(1000.0 + 301)
+        self.assertTrue(w.snapshot()["available"])
+        # Turning the setting off must retract the notice, not leave a stale
+        # one on screen.
+        w.enabled = False
+        called = []
+        w.check = lambda: called.append(1) or "behind"
+        w.tick(1000.0 + 301 + 24 * 3600 + 1)
+        self.assertEqual(called, [])
+        self.assertIsNone(w.snapshot())
+
+    def test_nothing_published_until_something_is_known(self):
+        w = UpdateWatch(repo=REPO)
+        self.assertIsNone(w.snapshot())
+
+    def test_real_checkout_is_read_only_and_answers(self):
+        """Against this actual repository: a real answer, and the working
+        tree and refs are untouched afterwards."""
+        before = subprocess.run(["git", "-C", str(REPO), "status",
+                                 "--porcelain"], capture_output=True, text=True)
+        head_before = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True).stdout
+        w = UpdateWatch(repo=REPO)
+        self.assertIn(w.check(), ("current", "behind", "ahead", "diverged",
+                                  "unknown"))
+        after = subprocess.run(["git", "-C", str(REPO), "status",
+                                "--porcelain"], capture_output=True, text=True)
+        head_after = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True).stdout
+        self.assertEqual(before.stdout, after.stdout)
+        self.assertEqual(head_before, head_after)
+
+    def test_real_clone_one_commit_behind_reports_behind(self):
+        """End to end against real git: a checkout that already holds
+        origin's commit but sits one behind it must offer the update."""
+        with tempfile.TemporaryDirectory() as tmp:
+            clone = Path(tmp) / "c"
+            r = subprocess.run(["git", "clone", "--quiet", str(REPO), str(clone)],
+                               capture_output=True)
+            if r.returncode != 0:
+                self.skipTest("git clone unavailable")
+            head = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD~1"],
+                                  capture_output=True, text=True)
+            if head.returncode != 0:
+                self.skipTest("shallow history")
+            subprocess.run(["git", "-C", str(clone), "reset", "--quiet",
+                            "--hard", "HEAD~1"], check=True,
+                           capture_output=True)
+            w = UpdateWatch(repo=clone)
+            self.assertEqual(w.check(), "behind")
+            self.assertTrue(w.snapshot() is None)   # nothing until tick() runs
+            w.tick(1000.0)
+            w.tick(1000.0 + 301)
+            self.assertTrue(w.snapshot()["available"])
+
+    def test_config_default_is_on_and_validates_as_a_boolean(self):
+        cfg = Config.SCHEMA["updateCheck"]
+        self.assertTrue(cfg[0])
+        self.assertIs(cfg[1](True), True)
+        self.assertIs(cfg[1](False), False)
+        # A wrong type falls back to the default rather than being coerced,
+        # the same rule every other setting follows.
+        self.assertIsNone(cfg[1]("yes"))
+
+    def test_manifest_exposes_the_setting(self):
+        m = json.loads((REPO / "manifest.json").read_text())
+        entry = next(e for e in m["barWidget"]["schema"]
+                     if e["key"] == "updateCheck")
+        self.assertEqual(entry["type"], "boolean")
+        self.assertIs(entry["defaultValue"], True)
+        self.assertIn("never installs", entry["description"])

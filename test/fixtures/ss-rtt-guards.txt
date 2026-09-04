@@ -1,0 +1,14 @@
+ESTAB    0      0      192.0.2.10:36900    198.51.100.7:443  users:(("good-a",pid=1001,fd=10))
+	 cubic rto:213 rtt:20.0/5.0 mss:1238 bytes_sent:40000 bytes_acked:40001 bytes_received:120000 minrtt:10.0
+ESTAB    0      0      192.0.2.10:36901    198.51.100.7:443  users:(("good-b",pid=1002,fd=11))
+	 cubic rto:213 rtt:34.0/6.0 mss:1238 bytes_sent:9000 bytes_acked:9001 bytes_received:31000 minrtt:14.0
+ESTAB    0      0      192.0.2.10:36902    198.51.100.7:443  users:(("good-c",pid=1003,fd=12))
+	 cubic rto:213 rtt:120.5/9.0 mss:1238 bytes_sent:8000 bytes_retrans:2400 bytes_acked:7600 bytes_received:90000 minrtt:100.5
+ESTAB    0      0      192.0.2.10:36903    198.51.100.7:443  users:(("tiny",pid=1004,fd=13))
+	 cubic rto:213 rtt:9.0/2.0 mss:1238 bytes_sent:500 bytes_acked:501 bytes_received:900 minrtt:5.0
+ESTAB    0      0      192.0.2.10:36904    198.51.100.7:443  users:(("no-timing",pid=1005,fd=14))
+	 cubic rto:213 mss:1238 bytes_sent:50000 bytes_acked:50001 bytes_received:70000
+ESTAB    0      0      192.0.2.10:36905    198.51.100.7:443  users:(("implausible",pid=1006,fd=15))
+	 cubic rto:213 rtt:99999.0/500.0 mss:1238 bytes_sent:60000 bytes_acked:60001 bytes_received:80000 minrtt:12000.0
+ESTAB    0      0      192.0.2.10:36906    198.51.100.7:443  users:(("inverted",pid=1007,fd=16))
+	 cubic rto:213 rtt:11.0/3.0 mss:1238 bytes_sent:70000 bytes_acked:70001 bytes_received:90000 minrtt:40.0

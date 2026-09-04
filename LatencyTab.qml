@@ -43,6 +43,48 @@ Column {
     return Color.urgent
   }
 
+  // The kernel's timing for the machine's own TCP connections, or null while
+  // too few qualify — the daemon publishes nothing rather than a
+  // distribution drawn from a handful of sockets.
+  readonly property var sockets: panel.live ? panel.live.sockets : null
+
+  readonly property string socketsNote: {
+    if (!sockets) return ""
+    var q = sockets.queue_p50
+    var head = "Measured from your own traffic, no probe. "
+    if (q === null || q === undefined) return head
+    // Deliberately a claim about the ABSOLUTE delay, not its share of the
+    // round trip: a socket to another continent is mostly distance, and
+    // saying "almost none of it is queueing" there would be false.
+    if (q < 10) return head + "Queueing is a few milliseconds at most, so "
+      + "nothing on the path is holding your traffic up. The rest of each "
+      + "round trip is distance to the servers themselves."
+    if (q < 30) return head + "There is real queueing on the path now \u2014 "
+      + "enough for a video call to start feeling it while something else "
+      + "is downloading."
+    return head + "Queueing dominates what your apps feel. Something on the "
+      + "path is holding packets \u2014 the legs above say which side of the "
+      + "router it is on."
+  }
+
+  // What the instruments line says when folded shut. A count is worth more
+  // than the word "instruments" on its own, so the collapsed state still
+  // carries the fact most worth knowing: how many are feeding the score.
+  readonly property string instrumentSummary: {
+    var ins = panel.live && panel.live.instruments ? panel.live.instruments : []
+    if (!ins.length) return "NOT YET MEASURED"
+    var scored = 0, quarantined = 0
+    for (var i = 0; i < ins.length; i++) {
+      if (ins[i].active) scored++
+      else if (ins[i].quarantined) quarantined++
+    }
+    var parts = [scored + " SCORED"]
+    var standby = ins.length - scored - quarantined
+    if (standby > 0) parts.push(standby + " STANDBY")
+    if (quarantined > 0) parts.push(quarantined + " QUARANTINED")
+    return parts.join(" \u00b7 ")
+  }
+
   readonly property var windows: ["5m", "30m", "6h", "24h", "7d"]
   property string window: "30m"
 
@@ -229,19 +271,149 @@ Column {
 
   PanelSeparator { width: parent.width }
 
+  // ---- what the machine's own connections are experiencing ----------------
+  // The table above is our probe. This is the kernel's own timing for the
+  // user's real TCP traffic to their real destinations: no probe, no
+  // privilege. `floor` is the lowest round trip each path has ever shown, so
+  // "queueing" is the delay left once distance is divided out — which is the
+  // only figure that compares a socket next door with one on another
+  // continent.
   Text {
     textFormat: Text.PlainText
-    text: "INSTRUMENTS \u00b7 WHAT MEASURES THE INTERNET LEG"
+    text: "AS YOUR APPS SEE IT"
+      + (tab.sockets ? " \u00b7 " + tab.sockets.sockets + " CONNECTIONS" : "")
     color: tab.panel.dim
     font.family: tab.panel.fontFamily
     font.pixelSize: Style.font.caption
     font.letterSpacing: 1
   }
 
+  Text {
+    textFormat: Text.PlainText
+    visible: !tab.sockets
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: "Not enough measured connections yet. This fills in once a few "
+      + "apps are talking over TCP."
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  Grid {
+    width: parent.width
+    visible: !!tab.sockets
+    columns: 3
+    columnSpacing: Style.space(14)
+    rowSpacing: Style.space(6)
+
+    readonly property real cell: (width - Style.space(14) * 2) / 3
+    readonly property var s: tab.sockets
+
+    component HeadCell2: Text {
+      textFormat: Text.PlainText
+      color: tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+      horizontalAlignment: Text.AlignRight
+    }
+    component NameCell2: Text {
+      textFormat: Text.PlainText
+      color: tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    component ValCell2: Text {
+      textFormat: Text.PlainText
+      color: tab.panel.fg
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      horizontalAlignment: Text.AlignRight
+    }
+
+    function ms2(v) { return v === null || v === undefined ? "--" : v.toFixed(1) + " ms" }
+
+    HeadCell2 { width: parent.cell; text: "TCP, LIVE"; horizontalAlignment: Text.AlignLeft }
+    HeadCell2 { width: parent.cell; text: "TYPICAL" }
+    HeadCell2 { width: parent.cell; text: "WORST" }
+
+    NameCell2 { width: parent.cell; text: "round trip" }
+    ValCell2 { width: parent.cell; text: parent.ms2(parent.s ? parent.s.rtt_p50 : null) }
+    ValCell2 { width: parent.cell; text: parent.ms2(parent.s ? parent.s.rtt_p95 : null) }
+
+    NameCell2 { width: parent.cell; text: "path floor" }
+    ValCell2 { width: parent.cell; text: parent.ms2(parent.s ? parent.s.floor_p50 : null) }
+    ValCell2 { width: parent.cell; text: "\u2014" }
+
+    NameCell2 { width: parent.cell; text: "queueing" }
+    ValCell2 {
+      width: parent.cell
+      text: parent.ms2(parent.s ? parent.s.queue_p50 : null)
+      color: parent.s && parent.s.queue_p50 > 30 ? tab.panel.warnTone : tab.panel.fg
+    }
+    ValCell2 {
+      width: parent.cell
+      text: parent.ms2(parent.s ? parent.s.queue_p95 : null)
+      color: parent.s && parent.s.queue_p95 > 60 ? tab.panel.warnTone : tab.panel.fg
+    }
+  }
+
+  Text {
+    textFormat: Text.PlainText
+    visible: !!tab.sockets
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: tab.socketsNote
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  PanelSeparator { width: parent.width }
+
+  // Folded shut by default: four rows and a paragraph is a lot of the tab's
+  // height for something that only matters when you are asking which probe
+  // produced the number. The header still reports the count, and the whole
+  // row is the control — no separate button, no extra line.
+  Item {
+    width: parent.width
+    height: instHeader.implicitHeight
+
+    Text {
+      id: instHeader
+      textFormat: Text.PlainText
+      text: "INSTRUMENTS \u00b7 " + (tab.panel.instrumentsExpanded
+        ? "WHAT MEASURES THE INTERNET LEG" : tab.instrumentSummary)
+      color: instHover.hovered ? tab.panel.fg : tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      anchors.right: parent.right
+      anchors.verticalCenter: instHeader.verticalCenter
+      // nf-md-chevron_down / nf-md-chevron_right
+      text: tab.panel.instrumentsExpanded ? "\u{f0140}" : "\u{f0142}"
+      color: instHover.hovered ? tab.panel.fg : tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    HoverHandler { id: instHover }
+    TapHandler {
+      onTapped: tab.panel.instrumentsExpanded = !tab.panel.instrumentsExpanded
+    }
+  }
+
   // The bench: the two with the fewest losses and steadiest tails hold
   // the seats and feed the score; the rest idle at a tenth of the rate.
   Column {
     width: parent.width
+    visible: tab.panel.instrumentsExpanded
+    height: visible ? implicitHeight : 0
     spacing: Style.space(6)
 
     Repeater {
@@ -308,6 +480,8 @@ Column {
 
   Text {
     textFormat: Text.PlainText
+    visible: tab.panel.instrumentsExpanded
+    height: visible ? implicitHeight : 0
     width: parent.width
     text: "Two instruments feed the score at a time, re-ranked every five "
       + "minutes on loss and tail stability \u2014 one bad anchor cannot "

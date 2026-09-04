@@ -99,6 +99,12 @@ Column {
                  ? "  ·  " + appRow.modelData.conns
                    + (appRow.modelData.conns === 1 ? " conn" : " conns")
                  : "")
+              // The kernel's round trip for this app's own sockets. Absent
+              // for an app the kernel has not timed — QUIC-only traffic
+              // shows no figure rather than a misleading zero.
+              + (appRow.modelData.rtt_ms
+                 ? "  ·  " + appRow.modelData.rtt_ms.toFixed(0) + " ms"
+                 : "")
             color: tab.panel.fg
             font.family: tab.panel.fontFamily
             font.pixelSize: Style.font.bodySmall

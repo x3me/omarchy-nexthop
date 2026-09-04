@@ -26,6 +26,7 @@ from .instruments import Bench, MergedSeries
 from .probes import Series, PingProbe, TcpProbe
 from .state import write_atomic
 from .store import Store
+from .update import UpdateWatch
 
 # Consecutive losses on a leg before we call it down. At 500 ms per probe,
 # eight of them is four seconds — long enough to skip a Wi-Fi roam, short
@@ -141,6 +142,7 @@ class Config:
         "planDownMbps": (0, None),
         "planUpMbps": (0, None),
         "notifyOutage": (True, None),
+        "updateCheck": (True, None),
         "historyDays": (7, None),
         "throughputWindowS": (3, None),
     }
@@ -211,6 +213,7 @@ Config.SCHEMA["contentSpeedIntervalMin"] = (60, Config._int(15, 1440))
 Config.SCHEMA["planDownMbps"] = (0, Config._int(0, 10000))
 Config.SCHEMA["planUpMbps"] = (0, Config._int(0, 10000))
 Config.SCHEMA["notifyOutage"] = (True, Config._bool)
+Config.SCHEMA["updateCheck"] = (True, Config._bool)
 Config.SCHEMA["historyDays"] = (7, Config._int(1, 90))
 Config.SCHEMA["throughputWindowS"] = (3, Config._int(1, 30))
 
@@ -540,6 +543,9 @@ class Daemon:
         # just cannot tell a kick from a roam.
         self.nl_events = linkevents.NlEvents()
         self.link_watch = LinkWatch(self.store, self.nl_events)
+        # Notify-only: asks origin whether this checkout is behind and
+        # never touches it. Off when the user turns updateCheck off.
+        self.update_watch = UpdateWatch(enabled=bool(self.config["updateCheck"]))
         self.app_traffic = apps.AppTraffic()
         self.last_apps_poll = 0.0
         self.last_content_test = 0.0
@@ -1067,6 +1073,13 @@ class Daemon:
             "local": ls, "total": ts, "wan": ws,
             "wan_ip": self.wan_ip,
             "app": self.app_path(300.0),
+            # What the user's own TCP connections are experiencing, straight
+            # from the kernel. `app` above is our anchor probe; this is their
+            # real traffic to their real destinations.
+            "sockets": self.app_traffic.latency,
+            # Whether a newer version is published. A notice, not an
+            # action: nothing here updates anything.
+            "update": self.update_watch.snapshot(),
             "instruments": self.bench.snapshot(now, self._instrument_stats()),
             "rates": {"rx_bps": self.rates[0], "tx_bps": self.rates[1],
                       "rx_total": self.counter_samples[-1][1] if self.counter_samples else None,
@@ -1219,6 +1232,9 @@ class Daemon:
                 self.store.rollup_hours(now)
                 self.store.prune(minute_days=int(self.config["historyDays"]),
                                  now=now)
+
+            self.update_watch.enabled = bool(self.config["updateCheck"])
+            self.update_watch.tick(now)
 
             self.maybe_content_test(now)
 
