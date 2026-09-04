@@ -2261,3 +2261,84 @@ class InflationPlausibility(unittest.TestCase):
         self.assertEqual(self.ratio(13.0, 10.0), 1.3)
         # A badly queued link is not implausible, however large.
         self.assertEqual(self.ratio(250.0, 10.0), 25.0)
+
+
+class DrainAfterLoad(unittest.TestCase):
+    """Depth is what everyone reports; duration is what you feel after the
+    download has finished."""
+
+    def test_measures_from_the_last_loaded_sample(self):
+        sm = [(1, 10, False), (2, 10, False), (3, 60, True), (4, 80, True),
+              (5, 70, True), (5.4, 40, False), (6.2, 12, False),
+              (7, 10, False)]
+        d = score.drain_after_load(sm, 10.0)
+        # Load ended at t=5; latency was back inside tolerance at t=6.2.
+        self.assertEqual(d["ms"], 1200.0)
+        self.assertTrue(d["settled"])
+
+    def test_tolerance_not_exactness(self):
+        # A queue does not empty to the exact millisecond it started from.
+        sm = [(1, 10, True), (2, 12.4, False)]
+        self.assertTrue(score.drain_after_load(sm, 10.0)["settled"])
+        sm = [(1, 10, True), (2, 20.0, False)]
+        self.assertFalse(score.drain_after_load(sm, 10.0)["settled"])
+
+    def test_still_under_load_says_nothing(self):
+        sm = [(1, 10, False), (2, 80, True)]
+        self.assertIsNone(score.drain_after_load(sm, 10.0)["ms"])
+
+    def test_no_burst_says_nothing(self):
+        sm = [(1, 10, False), (2, 11, False)]
+        self.assertIsNone(score.drain_after_load(sm, 10.0)["ms"])
+
+    def test_unrecovered_reports_a_floor_not_a_recovery(self):
+        sm = [(1, 10, True), (2, 90, False), (3, 88, False), (4, 86, False)]
+        d = score.drain_after_load(sm, 10.0)
+        self.assertEqual(d["ms"], 3000.0)
+        self.assertFalse(d["settled"])   # never came back
+
+    def test_beyond_the_cap_is_not_a_drain(self):
+        sm = [(0, 10, True), (score.DRAIN_MAX_S + 5, 10, False)]
+        self.assertIsNone(score.drain_after_load(sm, 10.0)["ms"])
+
+    def test_lost_probes_are_skipped_not_treated_as_recovery(self):
+        sm = [(1, 90, True), (2, None, False), (3, None, False),
+              (4, 11, False)]
+        d = score.drain_after_load(sm, 10.0)
+        self.assertEqual(d["ms"], 3000.0)
+        self.assertTrue(d["settled"])
+
+    def test_no_baseline_no_claim(self):
+        sm = [(1, 90, True), (2, 10, False)]
+        self.assertIsNone(score.drain_after_load(sm, None)["ms"])
+        self.assertIsNone(score.drain_after_load(sm, 0)["ms"])
+
+
+class Pressure(unittest.TestCase):
+    """The fast channel the index cannot be."""
+
+    def test_bands(self):
+        self.assertEqual(score.pressure(socket_queue_ms=5.1)["state"], "clear")
+        self.assertEqual(score.pressure(socket_queue_ms=18.4)["state"], "busy")
+        self.assertEqual(score.pressure(socket_queue_ms=64.0)["state"],
+                         "congested")
+
+    def test_real_traffic_beats_an_inference_from_probes(self):
+        p = score.pressure(socket_queue_ms=3.0, loaded_ms=99.0, idle_ms=10.0)
+        self.assertEqual(p["source"], "sockets")
+        self.assertEqual(p["queue_ms"], 3.0)
+
+    def test_probes_are_the_fallback(self):
+        p = score.pressure(loaded_ms=48.0, idle_ms=12.0)
+        self.assertEqual(p["source"], "probes")
+        self.assertEqual(p["queue_ms"], 36.0)
+
+    def test_a_backwards_difference_is_withheld(self):
+        # Queueing cannot be negative; that means the split is unreliable,
+        # not that load made the link quicker. Same rule as the inflation
+        # plausibility floor.
+        self.assertIsNone(score.pressure(loaded_ms=10.0, idle_ms=12.0)["state"])
+
+    def test_nothing_to_say_is_a_valid_answer(self):
+        self.assertIsNone(score.pressure()["state"])
+        self.assertIsNone(score.pressure(loaded_ms=50.0)["state"])

@@ -25,11 +25,21 @@ Column {
     }
     return null
   }
-  readonly property real addedMs: loadTest
+  // A peak test whose loaded latency came out BELOW its idle latency did
+  // not measure the link under load: a queue cannot make packets arrive
+  // sooner. The old code clamped the difference at zero, which graded that
+  // A+ and handed back the best possible verdict on an unusable
+  // measurement. Withhold it instead — the same wrong-direction rule the
+  // daemon applies to the loaded/idle ratio.
+  readonly property bool loadTestUsable: loadTest
+    && loadTest.ping_idle > 0
+    && loadTest.ping_loaded >= loadTest.ping_idle * 0.95
+
+  readonly property real addedMs: loadTestUsable
     ? Math.max(0, loadTest.ping_loaded - loadTest.ping_idle) : 0
   // Waveform's grading of latency added under load.
   readonly property string bloatGrade: {
-    if (!loadTest) return ""
+    if (!loadTestUsable) return ""
     if (addedMs < 5) return "A+"
     if (addedMs < 30) return "A"
     if (addedMs < 60) return "B"
@@ -83,6 +93,49 @@ Column {
     if (standby > 0) parts.push(standby + " STANDBY")
     if (quarantined > 0) parts.push(quarantined + " QUARANTINED")
     return parts.join(" \u00b7 ")
+  }
+
+  // The idle/loaded split, published on `lag`. Null until enough probes have
+  // landed on each side of it to be worth comparing.
+  readonly property var underLoad: {
+    var l = panel.live && panel.live.lag ? panel.live.lag : null
+    if (!l || l.loaded_p50 === null || l.loaded_p50 === undefined) return null
+    return l
+  }
+
+  // Collapsed, this line is the block: typical and worst while the link was
+  // actually carrying traffic, which is the pair the headline 30 s window
+  // averages away.
+  readonly property string underLoadSummary: {
+    var u = underLoad
+    if (!u) return "NOT YET MEASURED"
+    var p50 = u.loaded_p50 !== null && u.loaded_p50 !== undefined
+      ? Math.round(u.loaded_p50) : null
+    var p95 = u.loaded_p95 !== null && u.loaded_p95 !== undefined
+      ? Math.round(u.loaded_p95) : null
+    if (p50 === null) return "NOT YET MEASURED"
+    var out = p50 + " MS TYPICAL"
+    if (p95 !== null) out += " \u00b7 " + p95 + " WORST"
+    return out
+  }
+
+  readonly property string underLoadNote: {
+    var u = underLoad
+    if (!u) return ""
+    var parts = []
+    if (u.loaded_samples !== undefined)
+      parts.push(u.loaded_samples + " of "
+        + (u.loaded_samples + (u.idle_samples || 0)) + " probes landed while "
+        + "the link was carrying traffic")
+    // Depth is what everyone reports. Duration is what you feel after the
+    // download has finished, and it is the half nobody shows.
+    if (u.drain_ms !== null && u.drain_ms !== undefined) {
+      var secs = (u.drain_ms / 1000).toFixed(1)
+      parts.push(u.drain_settled
+        ? "the queue drained " + secs + " s after traffic stopped"
+        : "still above its quiet level " + secs + " s after traffic stopped")
+    }
+    return parts.join(". ") + "."
   }
 
   readonly property var windows: ["5m", "30m", "6h", "24h", "7d"]
@@ -511,7 +564,7 @@ Column {
     Text {
       textFormat: Text.PlainText
       anchors.right: parent.right
-      text: tab.loadTest ? "measured during the last peak test" : ""
+      text: tab.loadTestUsable ? "measured during the last peak test" : ""
       color: tab.panel.dim
       font.family: tab.panel.fontFamily
       font.pixelSize: Style.font.caption
@@ -522,9 +575,13 @@ Column {
 
   Text {
     textFormat: Text.PlainText
-    visible: tab.loadTest === null
+    visible: !tab.loadTestUsable
     width: parent.width
-    text: "No measurement yet — run a peak test and the probes will time the "
+    text: tab.loadTest && !tab.loadTestUsable
+      ? "The last peak test read a lower latency under load than at rest, "
+        + "which is not something a busy link can do — so it is not graded. "
+        + "Run another and it should settle."
+      : "No measurement yet — run a peak test and the probes will time the "
       + "connection while it is saturated."
     color: tab.panel.dim
     font.family: tab.panel.fontFamily
@@ -534,7 +591,7 @@ Column {
 
   Row {
     width: parent.width
-    visible: tab.loadTest !== null
+    visible: tab.loadTestUsable
     spacing: Style.space(12)
 
     Column {
@@ -628,7 +685,7 @@ Column {
 
   Text {
     textFormat: Text.PlainText
-    visible: tab.loadTest !== null
+    visible: tab.loadTestUsable
     width: parent.width
     text: "+" + Math.round(tab.addedMs) + " ms added under full load. Below 30 ms "
       + "a video call stays clean while someone else is downloading."
@@ -636,5 +693,121 @@ Column {
     font.family: tab.panel.fontFamily
     font.pixelSize: Style.font.caption
     wrapMode: Text.WordWrap
+  }
+
+  // ---- under load, from the traffic you were already sending -------------
+  // The block above needs a peak test. This one needs nothing: every probe
+  // carries whether the link was busy when it landed, so the same samples
+  // answer both "how bad does it get while in use" and "how fast does it
+  // recover" without generating a byte.
+  PanelSeparator { width: parent.width; visible: !!tab.underLoad }
+
+  // Folded shut like the bench above it: adding a table and a note pushed
+  // the tab past the panel's height again, and the collapsed line already
+  // carries the two numbers worth reading.
+  Item {
+    width: parent.width
+    visible: !!tab.underLoad
+    height: visible ? ulHeader.implicitHeight : 0
+
+    Text {
+      id: ulHeader
+      textFormat: Text.PlainText
+      text: "WHILE YOU WERE USING IT \u00b7 " + (tab.panel.underLoadExpanded
+        ? "LAST 5 MIN" : tab.underLoadSummary)
+      color: ulHover.hovered ? tab.panel.fg : tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+    Text {
+      textFormat: Text.PlainText
+      anchors.right: parent.right
+      anchors.verticalCenter: ulHeader.verticalCenter
+      text: tab.panel.underLoadExpanded ? "\u{f0140}" : "\u{f0142}"
+      color: ulHover.hovered ? tab.panel.fg : tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    HoverHandler { id: ulHover }
+    TapHandler {
+      onTapped: tab.panel.underLoadExpanded = !tab.panel.underLoadExpanded
+    }
+  }
+
+  Grid {
+    width: parent.width
+    visible: !!tab.underLoad && tab.panel.underLoadExpanded
+    height: visible ? implicitHeight : 0
+    columns: 3
+    columnSpacing: Style.space(14)
+    rowSpacing: Style.space(6)
+
+    readonly property real cell: (width - Style.space(14) * 2) / 3
+    readonly property var u: tab.underLoad
+
+    component H3: Text {
+      textFormat: Text.PlainText
+      color: tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+      horizontalAlignment: Text.AlignRight
+    }
+    component N3: Text {
+      textFormat: Text.PlainText
+      color: tab.panel.dim
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+    component V3: Text {
+      textFormat: Text.PlainText
+      color: tab.panel.fg
+      font.family: tab.panel.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      horizontalAlignment: Text.AlignRight
+    }
+
+    function ms3(v) {
+      return v === null || v === undefined ? "\u2014" : v.toFixed(1) + " ms"
+    }
+
+    H3 { width: parent.cell; text: "PROBES"; horizontalAlignment: Text.AlignLeft }
+    H3 { width: parent.cell; text: "TYPICAL" }
+    H3 { width: parent.cell; text: "WORST" }
+
+    N3 { width: parent.cell; text: "while busy" }
+    V3 {
+      width: parent.cell
+      text: parent.ms3(parent.u ? parent.u.loaded_p50 : null)
+    }
+    // Scoped to the samples taken under load, so a short burst is not
+    // averaged away by the quiet either side of it — which is what the
+    // headline 30 s window does to it.
+    V3 {
+      width: parent.cell
+      text: parent.ms3(parent.u ? parent.u.loaded_p95 : null)
+      color: parent.u && parent.u.loaded_p95 > 100
+        ? tab.panel.warnTone : tab.panel.fg
+    }
+
+    N3 { width: parent.cell; text: "while quiet" }
+    V3 {
+      width: parent.cell
+      text: parent.ms3(parent.u ? parent.u.idle_p50 : null)
+    }
+    V3 { width: parent.cell; text: "\u2014" }
+  }
+
+  Text {
+    textFormat: Text.PlainText
+    visible: !!tab.underLoad && tab.panel.underLoadExpanded
+    height: visible ? implicitHeight : 0
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: tab.underLoadNote
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
   }
 }

@@ -330,3 +330,114 @@ def wan_from(total: dict, local: dict) -> dict:
     tl, ll = total.get("loss"), local.get("loss")
     out["loss"] = None if tl is None else max(0.0, tl - (ll or 0.0))
     return out
+
+
+# How close to the idle baseline counts as drained. A queue does not empty
+# to the exact millisecond it started from, and demanding that would report
+# "never recovered" on a link that plainly had.
+DRAIN_TOLERANCE = 1.25
+# Longest drain worth reporting. Past this the link did not recover from a
+# burst, it is simply in a different state, and calling that a drain time
+# would flatter it.
+DRAIN_MAX_S = 30.0
+
+
+def drain_after_load(samples, baseline_ms: float) -> dict:
+    """How long latency took to fall back to baseline after load stopped.
+
+    Bufferbloat is reported everywhere as a depth — how much delay a busy
+    link adds. Depth alone cannot tell apart two links a user experiences
+    very differently: one whose queue fills and empties the instant traffic
+    stops, and one that stays full for seconds afterwards. The second ruins
+    a call after the download has finished; the first does not.
+
+    Pure, and fed the sample stream it already has: `(t, rtt, loaded)`
+    tuples, where the third element is the load tag added in 0.1.11. No
+    extra traffic, and nothing to schedule — the user's own usage supplies
+    the burst.
+
+    Returns `{"ms": None}` when there is nothing to say, which is most of
+    the time: no burst in the window, or the link never came back inside
+    `DRAIN_MAX_S`, or the baseline is unknown.
+    """
+    out = {"ms": None, "settled": None}
+    if not samples or not baseline_ms or baseline_ms <= 0:
+        return out
+    # The most recent load -> idle transition, which is the only one whose
+    # recovery is still visible in this window.
+    last_loaded = None
+    for i, sm in enumerate(samples):
+        if len(sm) > 2 and sm[2]:
+            last_loaded = i
+    if last_loaded is None or last_loaded == len(samples) - 1:
+        return out                      # no burst, or still under load
+    ended_t = samples[last_loaded][0]
+    target = baseline_ms * DRAIN_TOLERANCE
+    for sm in samples[last_loaded + 1:]:
+        if sm[1] is None:
+            continue                    # a lost probe says nothing either way
+        if sm[1] <= target:
+            span = sm[0] - ended_t
+            if span > DRAIN_MAX_S:
+                return out
+            out["ms"] = round(max(0.0, span) * 1000.0, 0)
+            out["settled"] = True
+            return out
+    # Still above the baseline at the end of the window: report the floor it
+    # has already exceeded rather than a number implying it recovered.
+    span = samples[-1][0] - ended_t
+    if 0 < span <= DRAIN_MAX_S:
+        out["ms"] = round(span * 1000.0, 0)
+        out["settled"] = False
+    return out
+
+
+# Queueing delay, in milliseconds, that separates a link carrying traffic
+# comfortably from one holding packets up. Deliberately the same shape as
+# the bufferbloat grades and the Latency tab's copy, and deliberately about
+# the ABSOLUTE delay rather than its share of the round trip: a socket to
+# another continent is mostly distance, and a proportion would call that
+# congested.
+PRESSURE_BUSY_MS = 10.0
+PRESSURE_CONGESTED_MS = 30.0
+
+
+def pressure(socket_queue_ms=None, loaded_ms=None, idle_ms=None) -> dict:
+    """What the connection is doing RIGHT NOW, as opposed to lately.
+
+    The index cannot answer this and is not meant to. It is a weakest-link
+    score over three components, one of which — Speed — moves at
+    content-check cadence, so when it is the weakest the index barely
+    responds to anything else. Measured live: a saturating test drove
+    Responsiveness down 14.6 points while the index moved from 75.0 to
+    75.0, because Speed sat permanently lowest at 73.1. Both numbers were
+    correct; neither answered "is it bad right now".
+
+    So this is a separate, fast channel rather than a change to the index.
+    It reports queueing delay, which is the thing a user actually feels
+    during a burst, and it prefers the figure taken from their own TCP
+    connections (`sockets.queue_p50`, the kernel's own timing) over our
+    probes' loaded-minus-idle difference, because real traffic to real
+    destinations beats an inference from two sample populations.
+
+    Returns `state: None` when neither source can say, which is honest and
+    common on an idle machine with nothing to measure.
+    """
+    src, q = None, None
+    if socket_queue_ms is not None and socket_queue_ms >= 0:
+        src, q = "sockets", float(socket_queue_ms)
+    elif (loaded_ms is not None and idle_ms is not None
+          and loaded_ms >= idle_ms):
+        # Only when the difference points the right way; queueing cannot be
+        # negative, and a negative difference means the split is unreliable
+        # rather than that load helped.
+        src, q = "probes", float(loaded_ms - idle_ms)
+    if q is None:
+        return {"state": None, "queue_ms": None, "source": None}
+    if q >= PRESSURE_CONGESTED_MS:
+        state = "congested"
+    elif q >= PRESSURE_BUSY_MS:
+        state = "busy"
+    else:
+        state = "clear"
+    return {"state": state, "queue_ms": round(q, 1), "source": src}

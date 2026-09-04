@@ -34,10 +34,19 @@ Panel {
   // A newer version is published. The daemon only ever reports this; the
   // panel only ever mentions it. Updating stays with `omarchy plugin update`,
   // which shows the diff and asks.
+  // Right-now congestion, from score.pressure: the fast channel the index
+  // cannot be. Empty unless it is worth saying.
+  readonly property string pressureSuffix: {
+    var p = live && live.pressure ? live.pressure : null
+    if (!p || !p.state || p.state === "clear") return ""
+    return " \u00b7 " + p.state.toUpperCase()
+  }
+
   // Disclosure state for the panel's optional detail blocks. Lives here, not
   // on the tab, so moving between tabs does not fold them shut again. Resets
   // with the shell, which is the right lifetime for a view preference.
   property bool instrumentsExpanded: false
+  property bool underLoadExpanded: false
 
   readonly property bool updateAvailable:
     !!(live && live.update && live.update.available)
@@ -348,7 +357,14 @@ Panel {
                     if (l.state === "captive") return "SIGN-IN REQUIRED"
                     if (l.state === "local-down") return "ROUTER UNREACHABLE"
                     if (l.state === "wan-down") return "NO INTERNET · ROUTER OK"
-                    return (l.band || "").toUpperCase()
+                    // The index is a weakest-link score whose slowest
+                    // component can pin it, so it answers "how has this
+                    // connection been" and not "is it bad right now".
+                    // Queueing answers the second, and only earns a word
+                    // here when it has one to say — clear adds nothing, so
+                    // the common case costs no space at all.
+                    var band = (l.band || "").toUpperCase()
+                    return band + root.pressureSuffix
                   }
                   color: root.live && root.live.state !== "online"
                     ? Color.urgent : root.dim

@@ -1235,9 +1235,12 @@ class Daemon:
         generated to produce them. That is the whole point of tagging each
         sample as it lands: the user's own usage supplies the load.
         """
-        idle_s, loaded_s = Series.split_by_load(self.total.since(window_s))
-        idle_lag = score.lag_ms(Series.stats(idle_s)) if idle_s else None
-        loaded_lag = score.lag_ms(Series.stats(loaded_s)) if loaded_s else None
+        window = self.total.since(window_s)
+        idle_s, loaded_s = Series.split_by_load(window)
+        idle_st = Series.stats(idle_s) if idle_s else {}
+        loaded_st = Series.stats(loaded_s) if loaded_s else {}
+        idle_lag = score.lag_ms(idle_st) if idle_s else None
+        loaded_lag = score.lag_ms(loaded_st) if loaded_s else None
         # A handful of samples on either side produces noise, not a ratio —
         # observed live, a five-sample loaded window read as 0.59, i.e. the
         # link answering *faster* under load. Both sides need enough
@@ -1251,8 +1254,23 @@ class Daemon:
                 # Clamped at 1: a ratio a hair under it means the two are
                 # indistinguishable, not that load made the link quicker.
                 inflation = round(max(1.0, ratio), 2)
+        # Percentiles over the loaded samples ALONE. The headline stats span
+        # a fixed 30 s window, so a ten-second burst is averaged with twenty
+        # seconds of quiet and reads far milder than it was: measured against
+        # another tool on the same event, 107 ms against its 246. Scoping the
+        # percentile to the samples that were actually taken under load is
+        # the same idea as their per-phase percentile, using the tagging
+        # 0.1.11 already put on every probe.
         return {"idle": idle_lag, "loaded": loaded_lag,
-                "inflation": inflation, "loaded_samples": len(loaded_s)}
+                "inflation": inflation, "loaded_samples": len(loaded_s),
+                "idle_samples": len(idle_s),
+                "loaded_p50": loaded_st.get("p50") if loaded_s else None,
+                "loaded_p95": loaded_st.get("p95") if loaded_s else None,
+                "idle_p50": idle_st.get("p50") if idle_s else None,
+                # How fast the queue emptied once traffic stopped. Depth is
+                # what everyone reports; duration is what a user feels after
+                # the download finishes.
+                "drain": score.drain_after_load(window, idle_st.get("p50"))}
 
     def compose_live(self, now: float) -> dict:
         ls = Series.stats(self.local.since(30))
@@ -1331,7 +1349,13 @@ class Daemon:
                     "typical": band.get("typical"),
                     "idle": bloat["idle"], "loaded": bloat["loaded"],
                     "inflation": bloat["inflation"],
-                    "loaded_samples": bloat["loaded_samples"]},
+                    "loaded_samples": bloat["loaded_samples"],
+                    "idle_samples": bloat["idle_samples"],
+                    "loaded_p50": bloat["loaded_p50"],
+                    "loaded_p95": bloat["loaded_p95"],
+                    "idle_p50": bloat["idle_p50"],
+                    "drain_ms": bloat["drain"]["ms"],
+                    "drain_settled": bloat["drain"]["settled"]},
             "local": ls, "total": ts, "wan": ws,
             "wan_ip": self.wan_ip,
             # Proof the real internet answered, or why it did not.
@@ -1341,6 +1365,12 @@ class Daemon:
             # from the kernel. `app` above is our anchor probe; this is their
             # real traffic to their real destinations.
             "sockets": self.app_traffic.latency,
+            # What the connection is doing right now, as opposed to lately.
+            # The index answers the second question and cannot answer the
+            # first — see score.pressure.
+            "pressure": score.pressure(
+                socket_queue_ms=(self.app_traffic.latency or {}).get("queue_p50"),
+                loaded_ms=bloat["loaded"], idle_ms=bloat["idle"]),
             # Whether a newer version is published. A notice, not an
             # action: nothing here updates anything.
             "update": self.update_watch.snapshot(),
