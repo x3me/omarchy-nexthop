@@ -170,6 +170,11 @@ Column {
           ctx.moveTo(cx + 0.5, 0)
           ctx.lineTo(cx + 0.5, height)
           ctx.stroke()
+          // Same readout box, same centring rule as LegChart: the
+          // alphabetic baseline half a cap-height below the box centre,
+          // because "middle" centres the em box and leaves descender-free
+          // digits sitting high in it.
+          ctx.textBaseline = "alphabetic"
           var label = Qt.formatTime(new Date(best.t * 1000), "HH:mm:ss")
             + "  ·  \u2193 " + fmt(best.rx) + "  ·  \u2191 " + fmt(best.tx)
           var w = ctx.measureText(label).width + 12
@@ -181,7 +186,7 @@ Column {
                                     tab.panel.fg.b, 0.25)
           ctx.strokeRect(bx + 0.5, 2.5, w - 1, 15)
           ctx.fillStyle = tab.panel.fg
-          ctx.fillText(label, bx + 6, 6)
+          ctx.fillText(label, bx + 6, 10 + 3.65)   // half a 7.3 px cap height
         }
       }
     }
