@@ -490,6 +490,143 @@ class WanEventArbiter:
         self.kind = None
 
 
+class CaptiveWatch:
+    """Are we behind a sign-in page rather than on the internet?
+
+    A probe reply proves a packet came back; it does not prove what sent it.
+    So this asks for two things at once and only claims interception when it
+    has both: something IS answering our probes, and the content check
+    cannot prove the real internet answered. Packets going somewhere, but
+    not to the internet, is what a captive portal looks like from here.
+
+    Neither half is enough alone. Probes answering with no content check is
+    the state we were in before, and it read as a healthy internet. A failed
+    content check with nothing answering is simply no internet, which the
+    wan arbiter already handles — calling that "captive" would put a sign-in
+    prompt in front of a user whose line is down.
+
+    Confirmation takes two consecutive checks, because one failed fetch is a
+    failed fetch. The decision itself is pure so it can be argued with and
+    tested; only the fetching is not.
+    """
+
+    # A suspicion is worth re-checking soon, but not on the 2 Hz loop.
+    CHECK_EVERY_S = 30.0
+    CONFIRM_AFTER = 2
+
+    def __init__(self, check):
+        self._check = check        # injected: () -> {"verdict", "proof"}
+        self.verdict = "unknown"
+        self.proof = None
+        self.checked_ts = None
+        self.strikes = 0
+        self._next = 0.0
+
+    @staticmethod
+    def captive(verdict: str, probes_answering: bool, strikes: int) -> bool:
+        """The whole claim, in one place: replies but no proof of internet."""
+        return (probes_answering
+                and verdict in ("intercepted", "silent")
+                and strikes >= CaptiveWatch.CONFIRM_AFTER)
+
+    @property
+    def confirmed(self) -> bool:
+        return self._confirmed
+
+    _confirmed = False
+
+    def tick(self, now: float, probes_answering: bool):
+        if not probes_answering:
+            # Nothing is answering at all: not our verdict to make. Drop the
+            # suspicion rather than carrying it into a real outage.
+            self.strikes = 0
+            self._confirmed = False
+            return
+        if now < self._next:
+            self._confirmed = self.captive(
+                self.verdict, probes_answering, self.strikes)
+            return
+        self._next = now + self.CHECK_EVERY_S
+        result = self._check() or {"verdict": "silent", "proof": None}
+        self.verdict = result.get("verdict") or "silent"
+        self.proof = result.get("proof")
+        if self.verdict == "open":
+            self.strikes = 0
+        else:
+            self.strikes += 1
+        self.checked_ts = round(now)
+        self._confirmed = self.captive(
+            self.verdict, probes_answering, self.strikes)
+
+    def snapshot(self) -> dict:
+        if self.verdict == "unknown":
+            return None
+        return {"verdict": self.verdict, "captive": self._confirmed,
+                "checked_ts": self.checked_ts}
+
+
+class LocalEventArbiter:
+    """What a local "down" means, given that packets may still be crossing.
+
+    The gateway going silent is not the gateway being unreachable. Plenty of
+    networks — hotel and captive ones especially — rate-limit or simply drop
+    ICMP addressed to the router while forwarding everything through it. On
+    such a link every local ping is lost and the panel used to say ROUTER
+    UNREACHABLE, notify, and charge Reliability, while the machine was
+    online the whole time.
+
+    The evidence that settles it is already in hand: if anything past the
+    gateway is answering, packets are crossing the gateway, so it cannot be
+    unreachable. That opens a `gateway-quiet` event instead — logged,
+    warn-toned, excluded from outage_stats, no notification, and the bar
+    stays its ordinary colour.
+
+    This is 0.1.17's wan arbitration applied to the leg it was never applied
+    to. Escalation is one-way for the same reason: if the far side goes quiet
+    too during a quiet spell, this closes and a real local outage opens,
+    because an outage that begins mid-spell must still alarm.
+    """
+
+    QUIET_DETAIL = ("Router stopped answering pings; traffic through it "
+                    "kept working")
+
+    def __init__(self, store, notify):
+        self.store = store
+        self.notify = notify
+        self.event_id = None
+        self.kind = None          # "outage" | "gateway-quiet" while down
+
+    @property
+    def real_outage(self) -> bool:
+        return self.kind == "outage"
+
+    def down(self, now, beyond_ok: bool):
+        if beyond_ok:
+            self.kind = "gateway-quiet"
+            self.event_id = self.store.open_event(
+                int(now), "gateway-quiet", "warn", "local", self.QUIET_DETAIL)
+            return
+        self.kind = "outage"
+        self.event_id = self.store.open_event(
+            int(now), "outage", "critical", "local", "router unreachable")
+        self.notify("Router unreachable",
+                    "Nothing on the local network is answering.", True)
+
+    def tick(self, now, beyond_ok: bool):
+        if self.kind == "gateway-quiet" and not beyond_ok:
+            self.store.close_event(self.event_id, int(now))
+            self.down(now, False)
+
+    def up(self, now):
+        if self.event_id is not None:
+            self.store.close_event(self.event_id, int(now))
+            if self.kind == "outage":
+                self.notify("Local network recovered",
+                            "The router is answering again.")
+        self.event_id = None
+        self.kind = None
+
+
 class Daemon:
     def __init__(self):
         self.state_dir = ensure_state_dir()
@@ -534,6 +671,8 @@ class Daemon:
         self.watch_local = LegWatch("local")
         self.watch_wan = LegWatch("wan")
         self.wan_events = WanEventArbiter(self.store, self.notify)
+        self.local_events = LocalEventArbiter(self.store, self.notify)
+        self.captive = CaptiveWatch(net.reachability)
         # The address this connection appears from — live.json only, never
         # recent.json or history: shown, not archived.
         self.wan_ip = None
@@ -741,17 +880,24 @@ class Daemon:
         if local_ok is not None:
             move = self.watch_local.sample(local_ok, now)
             if move == "down":
-                self.watch_local.event_id = self.store.open_event(
-                    int(now), "outage", "critical", "local",
-                    "router unreachable")
-                self.notify("Router unreachable",
-                            "Nothing on the local network is answering.", True)
-            elif move == "up" and self.watch_local.event_id:
-                self.store.close_event(self.watch_local.event_id, int(now))
-                self.watch_local.event_id = None
-                self.notify("Local network recovered", "The router is answering again.")
+                # Is anything past the gateway answering? If so the gateway
+                # is forwarding and merely refuses pings — see
+                # LocalEventArbiter.
+                self.local_events.down(now, self._any_instrument_alive(4.5))
+            elif move == "up":
+                self.local_events.up(now)
+            elif self.watch_local.down_since is not None:
+                self.local_events.tick(now, self._any_instrument_alive(5.0))
 
-        if total_ok is not None and local_ok is not False:
+        # The wan watch normally ignores any window where the local leg lost
+        # packets: if the router is unreachable, the internet probe's losses
+        # say nothing about the ISP. But a gateway that merely refuses pings
+        # is "lost" forever, and skipping the wan watch on such a link would
+        # mean never noticing a real internet outage there. So the skip
+        # applies to a confirmed local outage, not to a quiet gateway.
+        gateway_quiet = (self.watch_local.down_since is not None
+                         and not self.local_events.real_outage)
+        if total_ok is not None and (local_ok is not False or gateway_quiet):
             move = self.watch_wan.sample(total_ok, now)
             if move == "down":
                 # Did TCP keep answering while the pings failed? Samples
@@ -1044,10 +1190,19 @@ class Daemon:
                     100.0 * (st.get("tx_failed") or 0) / st["tx_packets"], 3)
         spd, speed_ctx = self.speed_score(now, network)
 
+        band = score.lag_band(ts)
+
         idx = score.index(resp, rel, spd)
 
         state = "online"
-        if self.watch_local.down_since:
+        if self.captive.confirmed:
+            # Outranks both leg verdicts because it explains them: on a
+            # portal the gateway often refuses pings and something answers
+            # for the anchor, so "router unreachable" and "internet fine"
+            # are both artefacts of the same interception.
+            state = "captive"
+        elif self.watch_local.down_since and self.local_events.real_outage:
+            # A silent gateway is not an unreachable one; the arbiter decides.
             state = "local-down"
         elif self.watch_wan.down_since and self.wan_events.real_outage:
             # Pings alone cannot declare this; see WanEventArbiter. During
@@ -1065,13 +1220,18 @@ class Daemon:
             "band": score.band(idx),
             "scores": {"responsiveness": resp, "reliability": rel, "speed": spd},
             "speed_ctx": speed_ctx,
+            # best/typical/worst all come from the same fold — see
+            # score.lag_band. `now` stays the scored p75-based figure.
             "lag": {"now": lag,
-                    "best": ts.get("p50"), "worst": ts.get("max"),
+                    "best": band.get("best"), "worst": band.get("worst"),
+                    "typical": band.get("typical"),
                     "idle": bloat["idle"], "loaded": bloat["loaded"],
                     "inflation": bloat["inflation"],
                     "loaded_samples": bloat["loaded_samples"]},
             "local": ls, "total": ts, "wan": ws,
             "wan_ip": self.wan_ip,
+            # Proof the real internet answered, or why it did not.
+            "reach": self.captive.snapshot(),
             "app": self.app_path(300.0),
             # What the user's own TCP connections are experiencing, straight
             # from the kernel. `app` above is our anchor probe; this is their
@@ -1232,6 +1392,8 @@ class Daemon:
                 self.store.rollup_hours(now)
                 self.store.prune(minute_days=int(self.config["historyDays"]),
                                  now=now)
+
+            self.captive.tick(now, self._any_instrument_alive(6.0))
 
             self.update_watch.enabled = bool(self.config["updateCheck"])
             self.update_watch.tick(now)

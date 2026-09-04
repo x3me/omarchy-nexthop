@@ -304,6 +304,7 @@ Panel {
               textFormat: Text.PlainText
               text: {
                 var s = root.live ? root.live.state : ""
+                if (s === "captive") return "󰦝"   // nf-md-shield_lock: a gate, not a fault
                 if (s === "local-down" || s === "wan-down") return "󱚵"
                 return "󰓅"
               }
@@ -337,6 +338,7 @@ Panel {
                   text: {
                     var l = root.live
                     if (!l) return "WAITING FOR DAEMON"
+                    if (l.state === "captive") return "SIGN-IN REQUIRED"
                     if (l.state === "local-down") return "ROUTER UNREACHABLE"
                     if (l.state === "wan-down") return "NO INTERNET · ROUTER OK"
                     return (l.band || "").toUpperCase()

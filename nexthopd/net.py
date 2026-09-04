@@ -230,3 +230,33 @@ def wan_ip() -> Optional[dict]:
     raw = _run(["curl", "-sf", "--proto", "=https", "--max-time", "5",
                 "--max-filesize", "4096", TRACE_URL], timeout=8.0)
     return parse_trace(raw) if raw else None
+
+
+def trace_verdict(raw) -> str:
+    """Did the real internet answer? `open` | `intercepted` | `silent`.
+
+    The same fetch that reads the WAN address is also the only thing here
+    that can tell the real internet from something standing in for it. A
+    probe reply proves a packet came back; it does not prove what sent it.
+    A captive portal, a transparent proxy or any middlebox will happily
+    complete a handshake and answer for an address it does not own — which
+    is how an unauthenticated hotel network produced a healthy-looking
+    internet leg with no internet behind it.
+
+    `open` is the only positive claim, and it needs the response to parse as
+    a trace with an address `ipaddress` accepts. Something that answered with
+    anything else is `intercepted`. Nothing at all is `silent`, which is not
+    the same thing and must not be reported as one.
+    """
+    if not raw:
+        return "silent"
+    return "open" if parse_trace(raw) else "intercepted"
+
+
+def reachability() -> dict:
+    """One reachability check: the verdict, plus the address when proven."""
+    raw = _run(["curl", "-sf", "--proto", "=https", "--max-time", "5",
+                "--max-filesize", "4096", TRACE_URL], timeout=8.0)
+    verdict = trace_verdict(raw)
+    return {"verdict": verdict,
+            "proof": parse_trace(raw) if verdict == "open" else None}

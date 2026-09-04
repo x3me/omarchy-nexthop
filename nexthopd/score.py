@@ -100,6 +100,35 @@ def lag_ms(stats: dict):
     return round(base + 1.5 * jitter + loss * loss_cost_ms(base), 1)
 
 
+def lag_band(stats: dict) -> dict:
+    """Lag at three latency percentiles: best, typical, worst.
+
+    All three go through the same fold, differing only in which percentile
+    they lean on, and that is the whole point. The panel used to pair a
+    loss-charged "typical" with raw millisecond figures either side of it,
+    so a lossy link displayed "best 4 · typical 644 · worst 26" — three
+    numbers that cannot all be true at once, because two were round trips
+    and one was a composite.
+
+    Sharing the fold makes the ordering hold by construction and makes loss
+    move all three together, which is what a reader assumes a range means.
+    """
+    if not stats or stats.get("count", 0) == 0:
+        return {"best": None, "typical": None, "worst": None}
+    out = {}
+    prev = None
+    for name, key in (("best", "p50"), ("typical", "p75"), ("worst", "p95")):
+        v = lag_ms(dict(stats, p75=stats.get(key)))
+        # p95 can equal p75 on a short window, and a percentile can be
+        # missing; neither may let the range read backwards.
+        if v is not None and prev is not None:
+            v = max(v, prev)
+        out[name] = v
+        if v is not None:
+            prev = v
+    return out
+
+
 def responsiveness(lag):
     if lag is None:
         return 0.0
@@ -268,7 +297,13 @@ def wan_from(total: dict, local: dict) -> dict:
     prev = 0.0
     for key in ("p50", "p75", "p95", "max"):
         t, l = total.get(key), local.get(key)
-        if t is None:
+        if t is None or l is None:
+            # Unknown, not zero. Substituting 0 for a local statistic we do
+            # not have made the derived leg equal the whole round trip, so a
+            # silent gateway produced a confident, healthy-looking internet
+            # figure that was really the total wearing the wan leg's label.
+            # We do not know the ISP's share without the router's, and
+            # saying so beats inventing one.
             out[key] = None
             continue
         # Subtracting two independent distributions statistic-by-statistic

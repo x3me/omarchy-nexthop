@@ -74,6 +74,8 @@ BarWidget {
   // State colours resolve through the theme palette: green/yellow/red exist
   // in every Omarchy theme's colors.toml, surfaced via Color singleton.
   readonly property color stateColor: {
+    // A sign-in page is a gate, not a fault: warn, not urgent.
+    if (netState === "captive") return "#e0af68"
     if (netState === "local-down" || netState === "wan-down") return Color.urgent
     if (netState === "degraded") return "#e0af68"
     if (index === null) return okColor
@@ -83,6 +85,7 @@ BarWidget {
   }
 
   readonly property string glyph: {
+    if (netState === "captive") return "󰦝"     // nf-md-shield_lock: a gate
     if (netState === "local-down") return "󱚵"   // nf-md-wifi_strength_alert
     if (netState === "wan-down") return "󰲛"     // nf-md-web_off / broken link
     return "󰓅"                                   // nf-md-speedometer
@@ -90,6 +93,7 @@ BarWidget {
 
   readonly property string barText: {
     if (netState === "no-daemon") return glyph
+    if (netState === "captive") return glyph
     if (netState === "local-down" || netState === "wan-down") {
       var since = live && live.down_since ? live.down_since : 0
       if (!since) return glyph
@@ -158,11 +162,33 @@ BarWidget {
       "' && exec python3 -m nexthopd.cli peak"]
   }
 
+  // Why the width is measured here rather than left to the control:
+  // BarIconButton is an *icon* button — it pins `fixedWidth` to a
+  // single-glyph slot (27 px by default), so its implicitWidth is that slot
+  // no matter what text it holds. Our text is variable ("󰓅 92", "󰓅 1024ms",
+  // "󱚵 1m3s"), so the bar reserved one icon's worth of space and the text
+  // painted straight over the neighbouring widget. Longest during an
+  // outage, which is when it was noticed.
+  //
+  // TextMetrics measures the string against the same font without
+  // rendering it, so the width can drive the slot with no binding loop
+  // back through the glyph that is being laid out.
+  TextMetrics {
+    id: textWidth
+    font.family: button.fontFamily
+    font.pixelSize: button.fontSize
+    text: root.barText
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.barText
+    // Never narrower than a normal icon slot, so an icon-only display mode
+    // still lines up with its neighbours.
+    slotSize: Math.max(Style.bar.iconSlot,
+                       Math.ceil(textWidth.advanceWidth) + Style.space(10))
     foreground: root.stateColor
     useActiveColor: false
     tooltipText: {

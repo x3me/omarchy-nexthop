@@ -15,8 +15,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nexthopd import net, score  # noqa: E402
-from nexthopd.daemon import Config, LinkWatch, WanEventArbiter  # noqa: E402
+from nexthopd.daemon import (CaptiveWatch, Config, LinkWatch,  # noqa: E402
+                             LocalEventArbiter, WanEventArbiter)
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
+from nexthopd.net import trace_verdict  # noqa: E402
 from nexthopd.instruments import Bench, MergedSeries, penalty  # noqa: E402
 from nexthopd.apps import (AppTraffic, Sock, latency_stats,  # noqa: E402
                            parse_ss, socket_timing)
@@ -1828,3 +1830,191 @@ class UpdateNotice(unittest.TestCase):
         self.assertEqual(entry["type"], "boolean")
         self.assertIs(entry["defaultValue"], True)
         self.assertIn("never installs", entry["description"])
+
+
+class FakeStore:
+    def __init__(self):
+        self.opened = []
+        self.closed = []
+
+    def open_event(self, ts, kind, sev, leg, detail):
+        self.opened.append((kind, sev, leg, detail))
+        return len(self.opened)
+
+    def close_event(self, event_id, ts):
+        self.closed.append(event_id)
+
+
+class LocalArbitration(unittest.TestCase):
+    """A gateway that refuses pings is not a gateway that is unreachable.
+
+    This is the hotel case: every local ping lost, ROUTER UNREACHABLE on
+    screen, and the machine online the whole time.
+    """
+
+    def setUp(self):
+        self.store = FakeStore()
+        self.notes = []
+        self.arb = LocalEventArbiter(
+            self.store, lambda *a, **k: self.notes.append(a))
+
+    def test_silent_gateway_with_traffic_crossing_it_is_not_an_outage(self):
+        self.arb.down(100.0, beyond_ok=True)
+        self.assertEqual(self.arb.kind, "gateway-quiet")
+        self.assertFalse(self.arb.real_outage)
+        kind, sev, leg, _ = self.store.opened[0]
+        self.assertEqual((kind, sev, leg), ("gateway-quiet", "warn", "local"))
+        # Warn-toned and unnotified: the user experienced nothing.
+        self.assertEqual(self.notes, [])
+
+    def test_nothing_answering_anywhere_is_a_real_outage(self):
+        self.arb.down(100.0, beyond_ok=False)
+        self.assertEqual(self.arb.kind, "outage")
+        self.assertTrue(self.arb.real_outage)
+        self.assertEqual(self.store.opened[0][0:3],
+                         ("outage", "critical", "local"))
+        self.assertEqual(len(self.notes), 1)
+
+    def test_escalation_is_one_way(self):
+        self.arb.down(100.0, beyond_ok=True)
+        # The far side goes quiet too: an outage starting mid-spell must alarm.
+        self.arb.tick(110.0, beyond_ok=False)
+        self.assertTrue(self.arb.real_outage)
+        self.assertEqual(len(self.notes), 1)
+        # Nothing walks it back down again — flapping teaches people to
+        # ignore both verdicts.
+        self.arb.tick(120.0, beyond_ok=True)
+        self.assertTrue(self.arb.real_outage)
+
+    def test_recovery_only_notifies_for_a_real_outage(self):
+        self.arb.down(100.0, beyond_ok=True)
+        self.arb.up(130.0)
+        self.assertEqual(self.notes, [])
+        self.assertIsNone(self.arb.kind)
+        self.arb.down(200.0, beyond_ok=False)
+        self.arb.up(230.0)
+        self.assertEqual(len(self.notes), 2)   # down + recovered
+
+
+class UnknownWanLeg(unittest.TestCase):
+    def test_missing_local_yields_unknown_not_the_whole_round_trip(self):
+        total = {"count": 500, "p50": 3.5, "p75": 4.0, "p95": 18.0,
+                 "max": 26.0, "loss": 0.0, "jitter": 4.8, "last": 3.5}
+        gone = {"count": 0, "p50": None, "p75": None, "p95": None,
+                "max": None, "loss": 1.0, "jitter": None, "last": None}
+        w = score.wan_from(total, gone)
+        # Substituting zero used to make the derived leg equal the total, so
+        # a silent gateway produced a confident healthy internet figure that
+        # was really the whole round trip wearing the wan leg's label.
+        for key in ("p50", "p75", "p95", "max"):
+            self.assertIsNone(w[key], key)
+
+    def test_known_local_still_subtracts(self):
+        total = {"count": 500, "p50": 10.0, "p75": 12.0, "p95": 20.0,
+                 "max": 30.0, "loss": 0.0, "jitter": 1.0, "last": 10.0}
+        local = {"count": 500, "p50": 2.0, "p75": 2.5, "p95": 5.0,
+                 "max": 8.0, "loss": 0.0, "jitter": 0.4, "last": 2.0}
+        w = score.wan_from(total, local)
+        self.assertEqual(w["p50"], 8.0)
+        self.assertGreaterEqual(w["p95"], w["p50"])
+
+
+class LagBand(unittest.TestCase):
+    def test_one_scale_so_the_range_cannot_read_backwards(self):
+        # The reported case: "best 4 · typical 644 ms · worst 26" — two raw
+        # round trips either side of a loss-charged composite.
+        lossy = {"count": 500, "p50": 3.5, "p75": 4.0, "p95": 18.0,
+                 "max": 26.0, "loss": 1.0, "jitter": 4.8}
+        b = score.lag_band(lossy)
+        self.assertLessEqual(b["best"], b["typical"])
+        self.assertLessEqual(b["typical"], b["worst"])
+        # Loss moves all three together, which is what a range implies.
+        self.assertGreater(b["best"], 1000)
+
+    def test_monotonic_across_loss_levels_and_degenerate_windows(self):
+        base = {"count": 500, "p50": 5.0, "p75": 5.0, "p95": 5.0,
+                "max": 5.0, "jitter": 0.0}
+        for loss in (0.0, 0.01, 0.35, 1.0):
+            b = score.lag_band(dict(base, loss=loss))
+            vals = [b["best"], b["typical"], b["worst"]]
+            self.assertEqual(vals, sorted(vals), loss)
+
+    def test_no_samples_reports_nothing(self):
+        b = score.lag_band({"count": 0})
+        self.assertEqual(b, {"best": None, "typical": None, "worst": None})
+
+
+class CaptiveDetection(unittest.TestCase):
+    """Replies prove a packet came back, not what sent it."""
+
+    def test_trace_verdicts(self):
+        self.assertEqual(trace_verdict("fl=1\nip=103.87.1.2\nts=2"), "open")
+        # A portal answering with its sign-in page.
+        self.assertEqual(trace_verdict("<html>Please sign in</html>"),
+                         "intercepted")
+        self.assertEqual(trace_verdict("ip=not-an-address"), "intercepted")
+        # Nothing came back at all, which is a different thing.
+        self.assertEqual(trace_verdict(""), "silent")
+        self.assertEqual(trace_verdict(None), "silent")
+
+    def test_needs_both_halves_of_the_evidence(self):
+        c = CaptiveWatch.captive
+        # Replies but no proof of internet, confirmed: that is a portal.
+        self.assertTrue(c("intercepted", True, 2))
+        self.assertTrue(c("silent", True, 2))
+        # Proof of internet: never captive, however many strikes.
+        self.assertFalse(c("open", True, 9))
+        # Nothing answering at all is an outage, not a sign-in page — a
+        # portal prompt in front of a dead line would be worse than silence.
+        self.assertFalse(c("intercepted", False, 9))
+        # One failed fetch is a failed fetch.
+        self.assertFalse(c("intercepted", True, 1))
+
+    def test_confirms_on_the_second_check_and_clears_on_proof(self):
+        answers = ["intercepted", "intercepted", "open"]
+        calls = []
+
+        def check():
+            v = answers[min(len(calls), len(answers) - 1)]
+            calls.append(v)
+            return {"verdict": v, "proof": None}
+
+        w = CaptiveWatch(check)
+        w.tick(1000.0, probes_answering=True)
+        self.assertFalse(w.confirmed)          # one strike
+        w.tick(1000.0 + 31, probes_answering=True)
+        self.assertTrue(w.confirmed)
+        self.assertTrue(w.snapshot()["captive"])
+        # Proof of the real internet retracts it immediately.
+        w.tick(1000.0 + 62, probes_answering=True)
+        self.assertFalse(w.confirmed)
+        self.assertEqual(w.verdict, "open")
+
+    def test_rate_limited_between_checks(self):
+        calls = []
+
+        def check():
+            calls.append(1)
+            return {"verdict": "intercepted", "proof": None}
+
+        w = CaptiveWatch(check)
+        w.tick(1000.0, True)
+        w.tick(1001.0, True)
+        w.tick(1029.0, True)
+        self.assertEqual(len(calls), 1)        # 30 s floor holds
+        w.tick(1031.0, True)
+        self.assertEqual(len(calls), 2)
+
+    def test_suspicion_drops_when_nothing_answers(self):
+        w = CaptiveWatch(lambda: {"verdict": "intercepted", "proof": None})
+        w.tick(1000.0, True)
+        w.tick(1031.0, True)
+        self.assertTrue(w.confirmed)
+        # The line goes down for real: hand it to the outage path.
+        w.tick(1062.0, probes_answering=False)
+        self.assertFalse(w.confirmed)
+        self.assertEqual(w.strikes, 0)
+
+    def test_publishes_nothing_before_it_knows_anything(self):
+        w = CaptiveWatch(lambda: {"verdict": "open", "proof": None})
+        self.assertIsNone(w.snapshot())

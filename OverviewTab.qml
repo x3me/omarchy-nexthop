@@ -13,6 +13,25 @@ Column {
 
   spacing: Style.space(12)
 
+  // Only on a captive network, so it costs no height the rest of the time.
+  // It goes first because it is the one thing worth reading here: without
+  // it, every number below is the portal answering rather than the
+  // connection, and the panel would be blaming the router for a sign-in
+  // page.
+  Text {
+    textFormat: Text.PlainText
+    visible: tab.live && tab.live.state === "captive"
+    height: visible ? implicitHeight : 0
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: "This network wants you to sign in. Something here is answering "
+      + "for the internet, so treat the numbers below as the sign-in page, "
+      + "not your connection."
+    color: tab.panel.warnTone
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
   Text {
     textFormat: Text.PlainText
     text: "PATH"
@@ -50,9 +69,14 @@ Column {
       text: {
         var l = tab.live
         if (!l || !l.lag || l.lag.now === null) return "--"
+        // All three come from the same fold now (score.lag_band), so the
+        // range cannot read backwards. `typical` is that band's middle, not
+        // the separately-scored `now`, which is what used to mix scales.
+        var typical = l.lag.typical !== null && l.lag.typical !== undefined
+          ? l.lag.typical : l.lag.now
         var best = l.lag.best !== null ? Math.round(l.lag.best) : "--"
         var worst = l.lag.worst !== null ? Math.round(l.lag.worst) : "--"
-        return "best " + best + " · typical " + Math.round(l.lag.now)
+        return "best " + best + " · typical " + Math.round(typical)
           + " ms · worst " + worst
       }
       color: tab.panel.fg
@@ -90,7 +114,12 @@ Column {
       note: {
         var l = tab.live
         if (!l) return ""
-        if (l.state === "wan-down" || l.state === "local-down") return "outage in progress"
+        if (l.state === "captive") return "not signed in yet"
+        // Reliability covers 24 hours, so it barely moves in the first
+        // minute of an outage. Saying "100" beside "outage in progress"
+        // read as a contradiction; name the window instead.
+        if (l.state === "wan-down" || l.state === "local-down")
+          return "outage now · score covers 24 h"
         return "last 24 h"
       }
       textColor: tab.panel.fg
