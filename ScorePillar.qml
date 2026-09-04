@@ -11,7 +11,13 @@ Column {
   property color textColor: Color.popups.text
   property color dimColor: Color.muted
 
+  // Set when the number alone would mislead — a 24-hour reliability score
+  // still reading 100 in the first minute of an outage, say. The value is
+  // true, the green is not.
+  property var toneOverride: null
+
   readonly property color tone: {
+    if (toneOverride) return toneOverride
     if (value === null || value === undefined) return dimColor
     if (value >= 80) return "#9ece6a"
     if (value >= 50) return "#e0af68"

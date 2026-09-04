@@ -322,8 +322,15 @@ Panel {
                 textFormat: Text.PlainText
                 text: {
                   var l = root.live
-                  if (!l || !l.link) return "Nexthop"
-                  return l.link.ssid || l.link.name || l.link.iface || "Nexthop"
+                  if (!l) return "Nexthop"
+                  var name = l.link
+                    ? (l.link.ssid || l.link.name || l.link.iface || "") : ""
+                  if (name) return name
+                  // The link is gone, so there is no network to name. The
+                  // app's own name sat here reading like a network called
+                  // Nexthop; say what is true instead.
+                  return l.state === "local-down" || l.state === "wan-down"
+                    ? "No network" : "Nexthop"
                 }
                 color: root.fg
                 font.family: root.fontFamily

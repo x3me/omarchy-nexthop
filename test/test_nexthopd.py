@@ -2018,3 +2018,85 @@ class CaptiveDetection(unittest.TestCase):
     def test_publishes_nothing_before_it_knows_anything(self):
         w = CaptiveWatch(lambda: {"verdict": "open", "proof": None})
         self.assertIsNone(w.snapshot())
+
+
+class OutagePresentation(unittest.TestCase):
+    """What the panel may say when nothing is replying."""
+
+    DEAD = {"count": 60, "p50": None, "p75": None, "p95": None,
+            "max": None, "loss": 1.0, "jitter": None}
+
+    def test_scoring_keeps_its_anchor(self):
+        # Responsiveness must still land on zero, which is what 1500 is for.
+        self.assertEqual(score.lag_ms(self.DEAD), 1500.0)
+        self.assertEqual(score.responsiveness(score.lag_ms(self.DEAD)), 0.0)
+
+    def test_display_band_shows_nothing_rather_than_the_anchor(self):
+        # 1500 is an anchor, not a round trip. The panel printed it three
+        # times as "best 1500 · typical 1500 ms · worst 1500", which says
+        # the link is replying slowly when it is not replying.
+        self.assertEqual(score.lag_band(self.DEAD),
+                         {"best": None, "typical": None, "worst": None})
+
+    def test_partial_loss_still_reports_a_band(self):
+        lossy = {"count": 500, "p50": 5.0, "p75": 6.0, "p95": 20.0,
+                 "max": 30.0, "loss": 0.4, "jitter": 1.0}
+        b = score.lag_band(lossy)
+        self.assertIsNotNone(b["typical"])
+        self.assertLessEqual(b["best"], b["typical"])
+        self.assertLessEqual(b["typical"], b["worst"])
+
+
+class RouteChangeKeepsHistoryThroughAnOutage(unittest.TestCase):
+    """Losing the route must not discard the window that explains why."""
+
+    def test_no_gateway_is_an_outage_not_a_new_network(self):
+        import types
+        from nexthopd import daemon as dmod
+
+        calls = {"reset": 0}
+        d = types.SimpleNamespace(
+            config={"internetAnchor": "1.1.1.1"},
+            route={"gateway": "192.168.1.1", "iface": "wlan0"},
+            probes=[],
+        )
+
+        def fake_route_to(anchor):
+            return fake_route_to.answer
+
+        original = dmod.net.route_to
+        dmod.net.route_to = fake_route_to
+        try:
+            # Bind the real method to our stand-in object and count resets
+            # by watching for the attribute the reset path writes first.
+            def start_probes():
+                calls["reset"] += 1
+            d.start_probes = start_probes
+            d._new_instrument_series = lambda: None
+            d.counter_samples = []
+            d.wan_ip = "x"
+            d._wan_ip_at = 1.0
+            d._instrument_probes = {}
+            d.local = object()
+
+            # The route vanishes: no reset, history kept, probes untouched.
+            fake_route_to.answer = {}
+            dmod.Daemon.restart_probes_if_route_changed(d)
+            self.assertEqual(calls["reset"], 0)
+            self.assertEqual(d.route, {"gateway": "192.168.1.1",
+                                       "iface": "wlan0"})
+            self.assertEqual(d.wan_ip, "x")
+
+            # It comes back on the same network: still no reset.
+            fake_route_to.answer = {"gateway": "192.168.1.1",
+                                    "iface": "wlan0"}
+            dmod.Daemon.restart_probes_if_route_changed(d)
+            self.assertEqual(calls["reset"], 0)
+
+            # A genuinely different network does reset, exactly once.
+            fake_route_to.answer = {"gateway": "10.0.0.1", "iface": "wlan0"}
+            dmod.Daemon.restart_probes_if_route_changed(d)
+            self.assertEqual(calls["reset"], 1)
+            self.assertIsNone(d.wan_ip)
+        finally:
+            dmod.net.route_to = original

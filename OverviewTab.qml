@@ -13,6 +13,17 @@ Column {
 
   spacing: Style.space(12)
 
+  readonly property bool outage: live
+    && (live.state === "wan-down" || live.state === "local-down")
+
+  // Same shape the bar shows, so the two agree at a glance.
+  function elapsed(since) {
+    if (!since) return ""
+    var s = Math.max(0, Math.round(Date.now() / 1000 - since))
+    var m = Math.floor(s / 60)
+    return m > 0 ? m + "m" + (s % 60) + "s" : s + "s"
+  }
+
   // Only on a captive network, so it costs no height the rest of the time.
   // It goes first because it is the one thing worth reading here: without
   // it, every number below is the portal answering rather than the
@@ -68,15 +79,16 @@ Column {
       anchors.right: parent.right
       text: {
         var l = tab.live
-        if (!l || !l.lag || l.lag.now === null) return "--"
-        // All three come from the same fold now (score.lag_band), so the
-        // range cannot read backwards. `typical` is that band's middle, not
-        // the separately-scored `now`, which is what used to mix scales.
-        var typical = l.lag.typical !== null && l.lag.typical !== undefined
-          ? l.lag.typical : l.lag.now
+        if (!l || !l.lag) return "--"
+        // The band is null when the whole window was lost. `lag.now` is
+        // still 1500 there because Responsiveness needs an anchor to land
+        // on, but 1500 is not a round trip and printing it three times
+        // said the link was replying slowly when it was not replying.
+        if (l.lag.typical === null || l.lag.typical === undefined)
+          return tab.outage ? "no reply" : "--"
         var best = l.lag.best !== null ? Math.round(l.lag.best) : "--"
         var worst = l.lag.worst !== null ? Math.round(l.lag.worst) : "--"
-        return "best " + best + " · typical " + Math.round(typical)
+        return "best " + best + " · typical " + Math.round(l.lag.typical)
           + " ms · worst " + worst
       }
       color: tab.panel.fg
@@ -101,8 +113,10 @@ Column {
       value: parent.scores.responsiveness !== undefined ? parent.scores.responsiveness : null
       note: {
         var l = tab.live
-        if (!l || !l.lag || l.lag.now === null) return "no data yet"
-        return "lag " + Math.round(l.lag.now) + " ms typical"
+        if (!l || !l.lag) return "no data yet"
+        if (l.lag.typical === null || l.lag.typical === undefined)
+          return tab.outage ? "nothing is answering" : "no data yet"
+        return "lag " + Math.round(l.lag.typical) + " ms typical"
       }
       textColor: tab.panel.fg
       dimColor: tab.panel.dim
@@ -111,15 +125,20 @@ Column {
       width: parent.cell
       label: "RELIABILITY"
       value: parent.scores.reliability !== undefined ? parent.scores.reliability : null
+      // A 24-hour score barely moves in the first minute of an outage, so
+      // the number stays 100 and is honest. Green is not: it reads as
+      // reassurance next to a dead link. The caption carries the live fact
+      // instead of restating the window, and it is short enough to fit —
+      // the previous wording truncated mid-word in this column.
+      toneOverride: tab.outage ? tab.panel.warnTone : null
       note: {
         var l = tab.live
         if (!l) return ""
         if (l.state === "captive") return "not signed in yet"
-        // Reliability covers 24 hours, so it barely moves in the first
-        // minute of an outage. Saying "100" beside "outage in progress"
-        // read as a contradiction; name the window instead.
-        if (l.state === "wan-down" || l.state === "local-down")
-          return "outage now · score covers 24 h"
+        if (tab.outage) {
+          var d = tab.elapsed(l.down_since)
+          return d ? "down " + d : "outage now"
+        }
         return "last 24 h"
       }
       textColor: tab.panel.fg
@@ -134,6 +153,9 @@ Column {
         if (!ctx || ctx.last_down === null || ctx.last_down === undefined)
           return "no content check yet"
         var mbps = Math.round(ctx.last_down) + " Mbps"
+        // No content check runs while the line is down, so this figure is
+        // from before it. Saying "measured" would imply it is current.
+        if (tab.outage) return mbps + " before the drop"
         if (ctx.basis === "plan")
           return mbps + " vs " + Math.round(ctx.plan_down) + " plan"
         if (ctx.baseline_down && ctx.last_down < ctx.baseline_down * 0.6)

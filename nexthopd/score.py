@@ -115,6 +115,13 @@ def lag_band(stats: dict) -> dict:
     """
     if not stats or stats.get("count", 0) == 0:
         return {"best": None, "typical": None, "worst": None}
+    if stats.get("p75") is None:
+        # Everything in the window was lost. `lag_ms` answers 1500 here so
+        # Responsiveness lands on zero, which is its job — but 1500 is an
+        # anchor, not a measurement, and the panel used to print it three
+        # times as though the link were replying slowly. There is no latency
+        # to display, so display none.
+        return {"best": None, "typical": None, "worst": None}
     out = {}
     prev = None
     for name, key in (("best", "p50"), ("typical", "p75"), ("worst", "p95")):

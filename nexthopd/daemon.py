@@ -793,6 +793,15 @@ class Daemon:
         """New default route (roamed networks, docked, VPN up) — new targets."""
         anchor = self.config["internetAnchor"]
         fresh = net.route_to(anchor)
+        if not fresh.get("gateway"):
+            # No route at all is an outage, not a different network, and
+            # resetting on it threw away the one window a user wants
+            # afterwards — the run-up to the drop. It also fired twice per
+            # disconnect, once on the way down and once on the way back.
+            # Nothing new can contaminate the distributions while there is
+            # no network, so keep them, and keep the probes running: their
+            # losses are what the outage watch is reading.
+            return
         if fresh.get("gateway") == self.route.get("gateway") and \
            fresh.get("iface") == self.route.get("iface"):
             return
