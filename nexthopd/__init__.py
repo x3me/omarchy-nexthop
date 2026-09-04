@@ -5,4 +5,4 @@ repo, and the marketplace installer never builds or runs anything. Anything
 that needed pip or a compiler would make installation a second, manual step.
 """
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"

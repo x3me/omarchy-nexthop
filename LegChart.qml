@@ -175,7 +175,14 @@ Canvas {
         var parts = [Qt.formatTime(new Date(best.t * 1000), "HH:mm:ss")]
         if (best.total !== null && best.total !== undefined) {
           var local = best.local !== null && best.local !== undefined ? best.local : 0
-          parts.push("wan " + Math.max(0, best.total - local).toFixed(1) + " ms")
+          // Same rule the daemon applies to the leg figures: if the router
+          // answered slower than the internet behind it, total = local + wan
+          // does not hold and the subtraction says nothing. Clamping the
+          // negative to zero printed "wan 0.0 ms" — a perfect ISP leg from
+          // an invalid measurement.
+          parts.push(local > best.total + 1.0
+            ? "wan \u2014"
+            : "wan " + Math.max(0, best.total - local).toFixed(1) + " ms")
           parts.push("local " + local.toFixed(1) + " ms")
         } else {
           parts.push("no data")

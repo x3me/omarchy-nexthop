@@ -292,6 +292,14 @@ def band(score):
     return "poor"
 
 
+# Below this the two legs are indistinguishable at our resolution, and a
+# near-zero ISP leg is physically possible (an anchor a hop past the
+# gateway). Above it, the router answering slower than the internet behind
+# it means the two independent distributions disagree and the subtraction is
+# void — not that the ISP adds nothing.
+WAN_INVERSION_TOLERANCE_MS = 1.0
+
+
 def wan_from(total: dict, local: dict) -> dict:
     """The ISP leg: what is left of the round trip once the router's share is gone.
 
@@ -304,6 +312,20 @@ def wan_from(total: dict, local: dict) -> dict:
     prev = 0.0
     for key in ("p50", "p75", "p95", "max"):
         t, l = total.get(key), local.get(key)
+        if t is not None and l is not None and l > t + WAN_INVERSION_TOLERANCE_MS:
+            # The router answered SLOWER than the internet behind it, so
+            # `total = local + wan` does not hold and the subtraction has
+            # nothing to say. Clamping the negative to zero used to report
+            # the ISP leg as 0.0 ms — the best possible answer, from an
+            # invalid measurement, on the number the whole panel is built
+            # around. It happens for a real reason: plenty of gateways
+            # deprioritise or rate-limit ICMP addressed to themselves, so
+            # their own replies are slow while everything they forward is
+            # fast. That says something about the gateway's control plane,
+            # not about the link, and it cannot be turned into the ISP's
+            # share of the round trip.
+            out[key] = None
+            continue
         if t is None or l is None:
             # Unknown, not zero. Substituting 0 for a local statistic we do
             # not have made the derived leg equal the whole round trip, so a
@@ -321,7 +343,10 @@ def wan_from(total: dict, local: dict) -> dict:
         out[key] = round(v, 2)
         prev = v
     t, l = total.get("last"), local.get("last")
-    out["last"] = None if t is None else round(max(0.0, t - (l or 0.0)), 2)
+    if t is None or (l is not None and l > t + WAN_INVERSION_TOLERANCE_MS):
+        out["last"] = None
+    else:
+        out["last"] = round(max(0.0, t - (l or 0.0)), 2)
     # Jitter does not subtract: variance on the local link propagates into
     # the total, so the honest reading is "no less than the total's jitter
     # minus the local's", floored at zero.

@@ -2342,3 +2342,58 @@ class Pressure(unittest.TestCase):
     def test_nothing_to_say_is_a_valid_answer(self):
         self.assertIsNone(score.pressure()["state"])
         self.assertIsNone(score.pressure(loaded_ms=50.0)["state"])
+
+
+class WrongDirectionSweep(unittest.TestCase):
+    """A result wrong in DIRECTION is not a result.
+
+    Four instances turned up one at a time this session — the loaded/idle
+    ratio at 0.87, the 1500 ms scoring anchor printed as a latency, the
+    internet leg substituting zero for an unknown local leg, and a peak test
+    graded A+ for measuring lower latency under load than at rest. This
+    class pins the class rather than the instances, so a fifth cannot be
+    introduced quietly.
+    """
+
+    TOTAL = {"count": 500, "p50": 8.1, "p75": 10.4, "p95": 14.4,
+             "max": 26.0, "loss": 0.0, "jitter": 2.3, "last": 8.0}
+
+    def test_a_slower_router_than_internet_withholds_the_isp_leg(self):
+        # Gateways commonly deprioritise ICMP addressed to themselves, so
+        # their own replies are slow while everything they forward is fast.
+        # That is a fact about the control plane, not the ISP's share.
+        slow_gateway = {"count": 500, "p50": 20.0, "p75": 25.0, "p95": 40.0,
+                        "max": 60.0, "loss": 0.0, "jitter": 3.0, "last": 20.0}
+        w = score.wan_from(self.TOTAL, slow_gateway)
+        for key in ("p50", "p75", "p95", "max", "last"):
+            self.assertIsNone(w[key], key)
+
+    def test_a_genuinely_near_zero_isp_leg_is_still_reported(self):
+        # An anchor a hop past the gateway really can cost almost nothing;
+        # withholding that would be its own kind of dishonesty.
+        near = dict(self.TOTAL, p50=8.4, p75=10.6, p95=14.6, max=26.2)
+        w = score.wan_from(self.TOTAL, near)
+        self.assertEqual(w["p50"], 0.0)
+
+    def test_normal_subtraction_untouched(self):
+        local = {"count": 500, "p50": 2.1, "p75": 2.5, "p95": 5.0,
+                 "max": 8.0, "loss": 0.0, "jitter": 0.4, "last": 2.0}
+        w = score.wan_from(self.TOTAL, local)
+        self.assertEqual(w["p50"], 6.0)
+        self.assertEqual(w["last"], 6.0)
+
+    def test_loss_subtraction_stays_clamped_and_that_is_correct(self):
+        # Unlike latency, this one is legitimate: loss on the local link
+        # shows up in both probes, so if the internet probe lost nothing the
+        # wan leg genuinely lost nothing, however much the router probe lost.
+        lossy_local = dict(self.TOTAL, loss=0.3)
+        w = score.wan_from(dict(self.TOTAL, loss=0.0), lossy_local)
+        self.assertEqual(w["loss"], 0.0)
+
+    def test_the_signed_difference_stays_signed(self):
+        # icmp_delta_ms is MEANT to go both ways: our own measurements show
+        # ICMP optimistic at the median and pessimistic in the tail, so a
+        # negative delta is a finding, not an error. Guarding it would
+        # destroy the comparison it exists for.
+        self.assertLess(score.lag_ms(dict(self.TOTAL, p75=4.0)),
+                        score.lag_ms(dict(self.TOTAL, p75=40.0)))
