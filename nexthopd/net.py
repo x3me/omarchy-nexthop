@@ -75,8 +75,11 @@ def nm_metered(iface: str) -> bool:
     `no (guessed)` — so a guess is treated as no answer at all rather than
     as evidence either way.
     """
-    if not iface or not shutil.which("nmcli"):
+    if not iface:
         return False
+    # No binary check here: _run already answers None when nmcli is absent,
+    # and a second check in front of it kept the parser out of reach of the
+    # tests on a machine without NetworkManager — which is what CI is.
     raw = _run(["nmcli", "-t", "-f", "GENERAL.METERED", "dev", "show", iface],
                timeout=4.0)
     if not raw:
