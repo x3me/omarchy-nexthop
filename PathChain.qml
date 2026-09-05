@@ -13,6 +13,23 @@ Item {
   property color textColor: Color.popups.text
   property color dimColor: Color.muted
 
+  // A phone sharing its data, as detected by the daemon from the gateway
+  // range. `label` is what to call it — iPhone, Phone, Hotspot.
+  readonly property var metered: live && live.metered ? live.metered : null
+  readonly property bool tethered: !!(metered && metered.tethered)
+
+  readonly property string middleTitle: tethered ? metered.label : "Router"
+
+  readonly property string middleDetail: {
+    if (!live || !live.link) return ""
+    // On a hotspot the gateway is always the same fixed address for the
+    // platform, so it carries no information; the phone's own name does.
+    // iOS names the hotspot after the device, so the network name IS the
+    // handset's name.
+    if (tethered) return live.link.ssid || live.link.gateway || ""
+    return live.link.gateway || ""
+  }
+
   readonly property var localMs: live && live.local ? live.local.p50 : null
   readonly property var wanMs: live && live.wan ? live.wan.p50 : null
   readonly property bool localDown: live && live.state === "local-down"
@@ -154,10 +171,13 @@ Item {
       down: root.localDown
       label: "LOCAL"
     }
+    // When the connection comes from a phone, this node is the phone. Drawing
+    // a router here mislabelled both legs at once: the local leg is the hop
+    // to the handset, and everything past it is cellular, not an ISP line.
     Node {
-      icon: "󰑩"   // nf-md-router_wireless
-      title: "Router"
-      detail: root.live && root.live.link ? (root.live.link.gateway || "") : ""
+      icon: root.tethered ? "󰄜" : "󰑩"   // nf-md-cellphone / nf-md-router_wireless
+      title: root.middleTitle
+      detail: root.middleDetail
     }
     Leg {
       ms: root.wanMs

@@ -26,6 +26,65 @@ def _run(cmd, timeout=2.0) -> Optional[str]:
     return out.stdout if out.returncode == 0 else None
 
 
+# Gateway ranges that phone and desktop tethering hand out. Each is fixed by
+# its vendor and documented, so this is a table lookup with no network call
+# and nothing to keep up to date. It is the only reliable signal available:
+# iOS randomises both the hotspot BSSID and the gateway's hardware address
+# (checked on a live hotspot — `66:f8:f9:…` and `a2:ee:1a:…`, both with the
+# locally-administered bit set), so vendor lookup on either is useless, and
+# NetworkManager reports such a connection as "no (guessed)" rather than
+# metered.
+TETHER_RANGES = (
+    # iOS Personal Hotspot, over Wi-Fi or USB. A /28 with the phone at .1.
+    ("172.20.10.0/28", "ios", "iPhone"),
+    # Android Wi-Fi tethering, and its USB counterpart.
+    ("192.168.43.0/24", "android", "Phone"),
+    ("192.168.42.0/24", "android", "Phone"),
+    # Windows mobile hotspot.
+    ("192.168.137.0/24", "windows", "Hotspot"),
+)
+
+
+def tether_from_gateway(gateway: str):
+    """Is this gateway a phone sharing its connection? Pure, so it is tested.
+
+    Returns `{"kind", "label"}` or None. `label` is what to call the middle
+    node of the path — it is a phone, not a router, and drawing a router
+    there quietly mislabels both legs.
+    """
+    if not gateway:
+        return None
+    try:
+        addr = ipaddress.ip_address(gateway)
+    except ValueError:
+        return None
+    for cidr, kind, label in TETHER_RANGES:
+        try:
+            if addr in ipaddress.ip_network(cidr):
+                return {"kind": kind, "label": label}
+        except ValueError:
+            continue
+    return None
+
+
+def nm_metered(iface: str) -> bool:
+    """Has the user explicitly marked this connection metered?
+
+    Only an explicit answer counts. NetworkManager guesses by default and
+    guesses wrong on a phone hotspot — a live one reports
+    `no (guessed)` — so a guess is treated as no answer at all rather than
+    as evidence either way.
+    """
+    if not iface or not shutil.which("nmcli"):
+        return False
+    raw = _run(["nmcli", "-t", "-f", "GENERAL.METERED", "dev", "show", iface],
+               timeout=4.0)
+    if not raw:
+        return False
+    value = raw.split(":", 1)[-1].strip().lower() if ":" in raw else ""
+    return value.startswith("yes") and "guess" not in value
+
+
 def route_to(anchor: str = "1.1.1.1") -> dict:
     """The interface, gateway and source address used to reach the anchor.
 

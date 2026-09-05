@@ -172,6 +172,7 @@ class Config:
         "planUpMbps": (0, None),
         "notifyOutage": (True, None),
         "updateCheck": (True, None),
+        "meteredCare": (True, None),
         "historyDays": (7, None),
         "throughputWindowS": (3, None),
     }
@@ -243,6 +244,7 @@ Config.SCHEMA["planDownMbps"] = (0, Config._int(0, 10000))
 Config.SCHEMA["planUpMbps"] = (0, Config._int(0, 10000))
 Config.SCHEMA["notifyOutage"] = (True, Config._bool)
 Config.SCHEMA["updateCheck"] = (True, Config._bool)
+Config.SCHEMA["meteredCare"] = (True, Config._bool)
 Config.SCHEMA["historyDays"] = (7, Config._int(1, 90))
 Config.SCHEMA["throughputWindowS"] = (3, Config._int(1, 30))
 
@@ -742,6 +744,10 @@ class Daemon:
         self.wan_events = WanEventArbiter(self.store, self.notify)
         self.local_events = LocalEventArbiter(self.store, self.notify)
         self.captive = CaptiveWatch(net.reachability)
+        # Is this connection someone's phone sharing its data? Recomputed
+        # whenever the route changes, which is the only thing that can
+        # change the answer.
+        self.metered = None
         # The address this connection appears from — live.json only, never
         # recent.json or history: shown, not archived.
         self.wan_ip = None
@@ -832,6 +838,10 @@ class Daemon:
     def start_probes(self):
         anchor = self.config["internetAnchor"]
         self.route = net.route_to(anchor)
+        # Answer this before the first content check can be due, not only
+        # when the route later changes — a daemon started on a hotspot must
+        # not spend a check to find out it is on one.
+        self.refresh_metered()
         interval = int(self.config["probeIntervalMs"])
         gw = self.route.get("gateway", "")
         if gw:
@@ -1035,6 +1045,29 @@ class Daemon:
             info["checked_ts"] = int(time.time())
             self.wan_ip = info
 
+    def refresh_metered(self):
+        """Tethering, or a connection the user has marked metered.
+
+        Two independent signals, and neither is a guess: the gateway sitting
+        in a range only tethering hands out, and NetworkManager being told
+        so explicitly. Published so the panel can name the phone instead of
+        drawing a router, and consulted before anything spends data.
+        """
+        gw = self.route.get("gateway", "")
+        iface = self.route.get("iface", "")
+        tether = net.tether_from_gateway(gw)
+        explicit = net.nm_metered(iface)
+        if not tether and not explicit:
+            self.metered = None
+            return
+        self.metered = {
+            "tethered": tether is not None,
+            "kind": tether["kind"] if tether else "declared",
+            # What to call the middle node of the path.
+            "label": tether["label"] if tether else "Metered link",
+            "explicit": explicit,
+        }
+
     def maybe_content_test(self, now: float):
         if not self.config["contentSpeed"]:
             return
@@ -1048,6 +1081,14 @@ class Daemon:
         # Skip while down — a failed transfer during an outage is not a
         # speed measurement, and skip while a peak test owns the line.
         if self.watch_wan.down_since or self.watch_local.down_since or self.peak_running:
+            return
+        # Someone's phone is paying for this. The check is ~14 MB and runs
+        # hourly, which is around 336 MB a day of a data plan the user did
+        # not offer. Skipped rather than shrunk: a smaller sample would
+        # still cost money and would measure worse. Speed then scores None
+        # on this network, and the index already skips a component it does
+        # not have rather than inventing one.
+        if self.metered and self.config["meteredCare"]:
             return
         self.last_content_test = now
 
@@ -1366,6 +1407,12 @@ class Daemon:
                     "drain_settled": bloat["drain"]["settled"]},
             "local": ls, "total": ts, "wan": ws,
             "wan_ip": self.wan_ip,
+            # A phone sharing its data, or a link the user marked metered.
+            # `care` rides along so the panel can say whether anything is
+            # actually being held back, and is read fresh each time rather
+            # than frozen when the link was detected.
+            "metered": (dict(self.metered, care=bool(self.config["meteredCare"]))
+                        if self.metered else None),
             # Proof the real internet answered, or why it did not.
             "reach": self.captive.snapshot(),
             "app": self.app_path(300.0),

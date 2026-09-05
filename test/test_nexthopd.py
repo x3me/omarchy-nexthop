@@ -20,7 +20,8 @@ from nexthopd.daemon import (MIN_PLAUSIBLE_INFLATION,  # noqa: E402
                              Config, LegWatch, LinkWatch,
                              LocalEventArbiter, WanEventArbiter)
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
-from nexthopd.net import trace_verdict  # noqa: E402
+from nexthopd.net import (nm_metered, tether_from_gateway,  # noqa: E402
+                          trace_verdict)
 from nexthopd.instruments import Bench, MergedSeries, penalty  # noqa: E402
 from nexthopd.apps import (AppTraffic, Sock, latency_stats,  # noqa: E402
                            parse_ss, socket_timing)
@@ -2397,3 +2398,48 @@ class WrongDirectionSweep(unittest.TestCase):
         # destroy the comparison it exists for.
         self.assertLess(score.lag_ms(dict(self.TOTAL, p75=4.0)),
                         score.lag_ms(dict(self.TOTAL, p75=40.0)))
+
+
+class TetherDetection(unittest.TestCase):
+    """A phone sharing its data, from the one signal that is reliable."""
+
+    def test_the_documented_ranges(self):
+        self.assertEqual(tether_from_gateway("172.20.10.1"),
+                         {"kind": "ios", "label": "iPhone"})
+        self.assertEqual(tether_from_gateway("192.168.43.1")["kind"], "android")
+        self.assertEqual(tether_from_gateway("192.168.42.129")["kind"],
+                         "android")
+        self.assertEqual(tether_from_gateway("192.168.137.1")["kind"],
+                         "windows")
+
+    def test_ordinary_gateways_are_not_phones(self):
+        # Including the hotel gateway that started this: 172.20.0.1 is close
+        # to the iOS range and outside it, so the /28 matters.
+        for gw in ("192.168.1.1", "172.20.0.1", "10.0.0.1", "172.20.11.1"):
+            self.assertIsNone(tether_from_gateway(gw), gw)
+
+    def test_nothing_and_nonsense_are_not_phones(self):
+        for gw in ("", None, "not-an-ip", "999.1.1.1"):
+            self.assertIsNone(tether_from_gateway(gw))
+
+    def test_ipv6_gateway_does_not_raise(self):
+        self.assertIsNone(tether_from_gateway("fe80::1"))
+
+    def test_a_guess_from_networkmanager_is_not_evidence(self):
+        # A live iPhone hotspot reports "no (guessed)", so only an explicit
+        # answer may count — and a guessed YES must not either.
+        import nexthopd.net as netmod
+        original = netmod._run
+        try:
+            for raw, expected in (
+                ("GENERAL.METERED:yes", True),
+                ("GENERAL.METERED:yes (guessed)", False),
+                ("GENERAL.METERED:no", False),
+                ("GENERAL.METERED:no (guessed)", False),
+                ("", False),
+                (None, False),
+            ):
+                netmod._run = lambda *a, **k: raw
+                self.assertEqual(nm_metered("wlan0"), expected, raw)
+        finally:
+            netmod._run = original

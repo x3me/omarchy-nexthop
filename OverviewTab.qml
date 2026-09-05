@@ -149,13 +149,19 @@ Column {
       label: "SPEED"
       value: parent.scores.speed !== undefined ? parent.scores.speed : null
       note: {
+        // Say why it is blank, or the pause reads as a fault. This is the
+        // whole point of detecting the hotspot: the checks are ~14 MB each
+        // and hourly, which is data the user did not offer.
+        var m = tab.live ? tab.live.metered : null
         var ctx = tab.live ? tab.live.speed_ctx : null
+        var held = m && m.care
         if (!ctx || ctx.last_down === null || ctx.last_down === undefined)
-          return "no content check yet"
+          return held ? "checks paused on " + m.label : "no content check yet"
         var mbps = Math.round(ctx.last_down) + " Mbps"
         // No content check runs while the line is down, so this figure is
         // from before it. Saying "measured" would imply it is current.
         if (tab.outage) return mbps + " before the drop"
+        if (held) return mbps + " · checks paused"
         if (ctx.basis === "plan")
           return mbps + " vs " + Math.round(ctx.plan_down) + " plan"
         if (ctx.baseline_down && ctx.last_down < ctx.baseline_down * 0.6)
@@ -298,7 +304,9 @@ Column {
         id: runLabel
         textFormat: Text.PlainText
         anchors.centerIn: parent
-        text: tab.live && tab.live.peak_running ? "󰓅 Testing…" : "󰓅 Run test"
+        text: tab.live && tab.live.peak_running ? "󰓅 Testing…"
+          : tab.panel.peakArmed ? "󰓅 Uses data · press again"
+          : "󰓅 Run test"
         color: tab.panel.fg
         font.family: tab.panel.fontFamily
         font.pixelSize: Style.font.bodySmall

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.x3me.nexthop",
   "name": "Nexthop",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "author": "Extreme Labs",
   "license": "MIT",
   "description": "Splits your Wi-Fi from your ISP, hop by hop. Continuous latency, jitter and loss on both legs of your connection, with history, outage detection and speed tests.",
@@ -147,6 +147,13 @@
         "label": "Tell me when an update is published",
         "defaultValue": true,
         "description": "Once a day, asks the repository you installed from whether a newer version exists, and shows a small marker in the panel if so. It never installs anything and sends nothing about you. Turn it off and no check is made."
+      },
+      {
+        "key": "meteredCare",
+        "type": "boolean",
+        "label": "Go easy on phone hotspots",
+        "defaultValue": true,
+        "description": "When the connection comes from a phone sharing its data, pause the small hourly speed checks and ask twice before a full speed test. Turn this off if your plan is unlimited and you would rather keep measuring."
       },
       {
         "key": "historyDays",

@@ -476,7 +476,9 @@ Column {
         id: runText
         textFormat: Text.PlainText
         anchors.centerIn: parent
-        text: tab.panel.live && tab.panel.live.peak_running ? "󰓅 Testing…" : "󰓅 Run test"
+        text: tab.panel.live && tab.panel.live.peak_running ? "󰓅 Testing…"
+          : tab.panel.peakArmed ? "󰓅 Uses data · press again"
+          : "󰓅 Run test"
         color: tab.panel.fg
         font.family: tab.panel.fontFamily
         font.pixelSize: Style.font.bodySmall

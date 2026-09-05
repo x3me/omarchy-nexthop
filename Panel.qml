@@ -110,6 +110,7 @@ Panel {
       planUpMbps: setting("planUpMbps", 0),
       notifyOutage: setting("notifyOutage", true),
       updateCheck: setting("updateCheck", true),
+      meteredCare: setting("meteredCare", true),
       historyDays: setting("historyDays", 7),
       throughputWindowS: setting("throughputWindowS", 3),
     }
@@ -191,7 +192,33 @@ Panel {
     }
   }
 
+  // A phone sharing its data, and whether we are being careful with it.
+  readonly property var metered: live && live.metered ? live.metered : null
+  readonly property bool meteredCare: !!(metered && metered.care)
+
+  // The peak test is sized to saturate the link for a fixed duration, not
+  // to a fixed size, so it costs whatever the connection can carry: 285 MB
+  // measured on a fibre line, tens of megabytes on a phone. It also fires
+  // from a middle-click on the bar, which is easy to hit by accident. So on
+  // a metered link the first press arms it and the second runs it — never
+  // blocked, because measuring the cellular link is sometimes exactly what
+  // you want.
+  property bool peakArmed: false
+
+  Timer {
+    id: peakDisarm
+    interval: 8000
+    onTriggered: root.peakArmed = false
+  }
+
   function runPeakTest() {
+    if (meteredCare && !peakArmed) {
+      peakArmed = true
+      peakDisarm.restart()
+      return
+    }
+    peakArmed = false
+    peakDisarm.stop()
     peakProc.command = ["sh", "-c",
       "cd \"$1\" && exec python3 -m nexthopd.cli peak", "sh", pluginDir]
     peakProc.running = true

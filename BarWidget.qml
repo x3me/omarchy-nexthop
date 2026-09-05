@@ -202,8 +202,17 @@ BarWidget {
     }
 
     onPressed: function(b) {
-      if (b === Qt.MiddleButton) peakRequest.running = true
-      else root.togglePanel()
+      if (b === Qt.MiddleButton) {
+        // The easiest way to spend a phone's data by accident: a stray
+        // middle-click saturating the link. On a metered connection this
+        // opens the panel instead, where the button asks twice.
+        if (root.live && root.live.metered && root.live.metered.care)
+          root.open()
+        else
+          peakRequest.running = true
+      } else {
+        root.togglePanel()
+      }
     }
   }
 }
