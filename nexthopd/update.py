@@ -111,9 +111,23 @@ class UpdateWatch:
         env["GIT_TERMINAL_PROMPT"] = "0"
         env.pop("GIT_ASKPASS", None)
         env.pop("SSH_ASKPASS", None)
+        # `git -C <dir>` does not require <dir> to BE a repository: git
+        # walks up until it finds one. A copy-install with no .git of its
+        # own, inside a home that is itself a checkout (dotfiles), would
+        # otherwise be compared against — and contact the remote of — the
+        # wrong repository every day. The ceiling stops the walk at our
+        # parent, so a missing .git answers "unknown", never someone else.
+        env["GIT_CEILING_DIRECTORIES"] = str(self.repo.parent)
         try:
             proc = subprocess.run(
-                ["git", "-C", str(self.repo), *args],
+                ["git", "-C", str(self.repo),
+                 # No credential helper and no askpass program may run for
+                 # this: a private or moved remote gets "unknown", not a
+                 # keyring prompt once a day. GIT_TERMINAL_PROMPT above
+                 # covers only git's own tty prompt.
+                 "-c", "credential.helper=", "-c", "core.askPass=",
+                 *args],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=GIT_TIMEOUT_S, env=env,

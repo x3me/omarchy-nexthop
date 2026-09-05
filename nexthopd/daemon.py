@@ -79,35 +79,6 @@ DIVERSITY_HOST = "dns.google"
 STANDBY_FACTOR = 10.0
 BENCH_EVAL_EVERY_S = 60.0
 
-# One real HTTP/3 request every five minutes, as ground truth for what a
-# request actually costs end to end. A HEAD request returns no body at all,
-# so the sample costs only the handshake — a few KB, about 1 MB a day
-# against the ~11 MB a day the continuous probing already spends.
-H3_SAMPLE_INTERVAL_S = 300.0
-# How often to re-ask which address this connection appears from.
-WAN_IP_REFRESH_S = 3600.0
-H3_TIMEOUT_S = 10.0
-
-# TLS needs a name the certificate covers, and a bare IP has none. These
-# map the well-known anchor addresses to the name that serves the SAME
-# host — one.one.one.one *is* 1.1.1.1 — so the request measures the path
-# everything else measures, not some other operator's. An anchor we have
-# no name for is skipped rather than quietly redirected elsewhere.
-H3_HOSTS = {
-    "1.1.1.1": "one.one.one.one", "1.0.0.1": "one.one.one.one",
-    "8.8.8.8": "dns.google", "8.8.4.4": "dns.google",
-    "9.9.9.9": "dns.quad9.net", "149.112.112.112": "dns.quad9.net",
-}
-
-
-def h3_target(anchor: str):
-    """The hostname to request, for an anchor — or None if there isn't one."""
-    if anchor in H3_HOSTS:
-        return H3_HOSTS[anchor]
-    # A hostname anchor already validates; a bare address never will.
-    return anchor if any(c.isalpha() for c in anchor) else None
-
-
 def proc_start_ticks(pid):
     """The process start time in clock ticks, from /proc/<pid>/stat.
 
@@ -298,7 +269,11 @@ class LinkWatch:
         self.last_sample = 0.0
 
     def _instant(self, ts, kind, detail):
-        eid = self.store.open_event(int(ts), kind, "info", "local", detail)
+        # Severity travels WITH the event so the panel can colour a kind it
+        # has never heard of. A kick or a drop is a fault; a roam, an
+        # association or a channel change is information.
+        severity = "warn" if kind in ("kick", "drop") else "info"
+        eid = self.store.open_event(int(ts), kind, severity, "local", detail)
         self.store.close_event(eid, int(ts))
 
     def _cause(self, bssid, since, now):
@@ -415,7 +390,7 @@ class LinkWatch:
                 self.low_since = now
             elif self.rate_event_id is None and now - self.low_since >= self.SUSTAIN_S:
                 self.rate_event_id = self.store.open_event(
-                    int(self.low_since), "rate-drop", "info", "local",
+                    int(self.low_since), "rate-drop", "warn", "local",
                     "Tx rate dropped to %d Mbps" % round(self.low_floor))
         elif tx >= self.rate_ceiling * self.RECOVER_FRACTION:
             self._close_rate_event(now)
@@ -566,19 +541,45 @@ class CaptiveWatch:
     Confirmation takes two consecutive checks, because one failed fetch is a
     failed fetch. The decision itself is pure so it can be argued with and
     tested; only the fetching is not.
+
+    The fetch runs OFF the loop and on suspicion, not on a clock. `tick()`
+    starts a check when one is due and collects the result on a later tick;
+    it never waits. Until 0.2.13 it ran the curl inline every 30 s for as
+    long as anything answered — i.e. always — which stalled the bar for up
+    to 8 s on exactly the slow networks this exists for, and cost 2,880
+    fetches a day where the WAN-address fetch it duplicated cost 24. Now: a
+    check on every new network and whenever the internet comes back; every
+    30 s only while the last answer was not proof of the internet; hourly
+    once it was. That hourly check is also where the WAN address comes
+    from, so the separate fetch is gone.
     """
 
-    # A suspicion is worth re-checking soon, but not on the 2 Hz loop.
+    # While a sign-in page is suspected, re-check soon.
     CHECK_EVERY_S = 30.0
+    # Once the real internet has answered, once an hour keeps the address
+    # fresh and would notice a portal that appears mid-session.
+    RECHECK_OPEN_S = 3600.0
     CONFIRM_AFTER = 2
 
-    def __init__(self, check):
+    def __init__(self, check, spawn=None):
         self._check = check        # injected: () -> {"verdict", "proof"}
+        # How a check is run. Off the loop by default; tests pass a
+        # synchronous spawn so the result lands within the same tick.
+        self._spawn = spawn or self._in_thread
+        self._lock = threading.Lock()
+        self._pending = None       # (generation, result) awaiting a tick
+        self._inflight = False
+        self._gen = 0              # bumped by request(): stale results drop
         self.verdict = "unknown"
         self.proof = None
         self.checked_ts = None
         self.strikes = 0
         self._next = 0.0
+        self._confirmed = False
+
+    @staticmethod
+    def _in_thread(fn):
+        threading.Thread(target=fn, name="reach", daemon=True).start()
 
     @staticmethod
     def captive(verdict: str, probes_answering: bool, strikes: int) -> bool:
@@ -591,21 +592,56 @@ class CaptiveWatch:
     def confirmed(self) -> bool:
         return self._confirmed
 
-    _confirmed = False
+    def request(self):
+        """A new network, or the internet just came back: start over.
+
+        The old verdict described a different situation, and a check still
+        in flight for it must not be mistaken for an answer about this one.
+        """
+        self._gen += 1
+        self._inflight = False
+        self._next = 0.0
+        self.verdict = "unknown"
+        self.proof = None
+        self.strikes = 0
+        self._confirmed = False
 
     def tick(self, now: float, probes_answering: bool):
+        self._collect(now)
         if not probes_answering:
             # Nothing is answering at all: not our verdict to make. Drop the
             # suspicion rather than carrying it into a real outage.
             self.strikes = 0
             self._confirmed = False
             return
-        if now < self._next:
+        if self._inflight or now < self._next:
             self._confirmed = self.captive(
                 self.verdict, probes_answering, self.strikes)
             return
-        self._next = now + self.CHECK_EVERY_S
-        result = self._check() or {"verdict": "silent", "proof": None}
+        self._inflight = True
+        gen = self._gen
+        self._spawn(lambda: self._run(gen))
+        # A synchronous spawn has already delivered; a thread delivers to a
+        # later tick.
+        self._collect(now)
+
+    def _run(self, gen: int):
+        try:
+            result = self._check() or {"verdict": "silent", "proof": None}
+        except Exception:
+            result = {"verdict": "silent", "proof": None}
+        with self._lock:
+            self._pending = (gen, result)
+            self._inflight = False
+
+    def _collect(self, now: float):
+        with self._lock:
+            pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        gen, result = pending
+        if gen != self._gen:
+            return                 # answered a question we stopped asking
         self.verdict = result.get("verdict") or "silent"
         self.proof = result.get("proof")
         if self.verdict == "open":
@@ -613,8 +649,9 @@ class CaptiveWatch:
         else:
             self.strikes += 1
         self.checked_ts = round(now)
-        self._confirmed = self.captive(
-            self.verdict, probes_answering, self.strikes)
+        self._next = now + (self.RECHECK_OPEN_S if self.verdict == "open"
+                            else self.CHECK_EVERY_S)
+        self._confirmed = self.captive(self.verdict, True, self.strikes)
 
     def snapshot(self) -> dict:
         if self.verdict == "unknown":
@@ -709,18 +746,20 @@ class Daemon:
         # instruments.py. Each instrument feeds its own Series; the scored
         # series (self.total) is a merged view over whichever two hold the
         # seats, so every consumer downstream keeps reading one "internet
-        # leg". self.app stays the anchor's TCP series: its gap against
-        # the anchor's ICMP series is the protocol comparison it always was.
+        # leg". The anchor's ICMP series keeps a name of its own too: the
+        # minute rows record what ICMP alone would have scored (`lag_icmp`).
         self.bench = Bench(self._instrument_pool())
         self._instrument_series = {}
         self._instrument_probes = {}
         self._new_instrument_series()
         self.total = MergedSeries(self._active_series)
         self._last_bench_eval = 0.0
-        self.app_request = None          # last HTTP/3 request sample
-        self._curl_h3 = None             # cached curl capability
-        self.last_app_request = 0.0
         self.probes = []
+        self._local_probe = None
+        # (anchor, interval) the running probes were built from, so a
+        # settings change is noticed on the next tick — see
+        # restart_probes_if_settings_changed.
+        self._probe_settings = None
         self.running = True
         self.route = {}
         # Sliding window of (t, rx, tx) counter samples. Rates are computed
@@ -738,6 +777,11 @@ class Daemon:
         # 5-second aux samples riding along in recent.json: throughput and
         # signal, so the panel's charts have history the moment they open.
         self.aux_ring = deque(maxlen=400)
+        # Elapsed-time gate for the 5 s flush. It used to be `int(now) % 5
+        # == 0`, which is true on BOTH half-second ticks of a qualifying
+        # second, so the ring filled twice as fast and the Wi-Fi and
+        # throughput charts held ~17 min under a 30-minute label.
+        self.last_recent_flush = 0.0
         self.last_signal = None
         self.watch_local = LegWatch("local")
         self.watch_wan = LegWatch("wan")
@@ -751,7 +795,9 @@ class Daemon:
         # The address this connection appears from — live.json only, never
         # recent.json or history: shown, not archived.
         self.wan_ip = None
-        self._wan_ip_at = 0.0
+        # checked_ts of the reachability result the address came from, so
+        # one proof is not re-adopted every tick.
+        self._wan_ip_at = 0
         # Who ended each Wi-Fi association — read from nl80211 via `iw
         # event`, unprivileged. Without it the link log still works; it
         # just cannot tell a kick from a roam.
@@ -813,9 +859,8 @@ class Daemon:
     def _new_instrument_series(self):
         self._instrument_series = {
             key: Series() for key, _, _ in self._instrument_pool()}
-        # The names the rest of the daemon has always read.
+        # The name the rest of the daemon has always read.
         self.icmp_anchor = self._instrument_series["icmp-anchor"]
-        self.app = self._instrument_series["tcp-anchor"]
 
     def _active_series(self):
         return [self._instrument_series[i.key] for i in self.bench.actives()
@@ -843,12 +888,15 @@ class Daemon:
         # not spend a check to find out it is on one.
         self.refresh_metered()
         interval = int(self.config["probeIntervalMs"])
+        self._probe_settings = (anchor, interval)
         gw = self.route.get("gateway", "")
+        self._local_probe = None
         if gw:
             p = PingProbe(gw, self.local, interval, "local",
                           loaded_fn=lambda: self.link_loaded)
             p.start()
             self.probes.append(p)
+            self._local_probe = p
         for key, kind, target in self._instrument_pool():
             series = self._instrument_series[key]
             host = target.rsplit(":", 1)[0] if kind == "tcp" else target
@@ -884,21 +932,52 @@ class Daemon:
         if fresh.get("gateway") == self.route.get("gateway") and \
            fresh.get("iface") == self.route.get("iface"):
             return
+        self._rebuild_probes(fresh)
+
+    def restart_probes_if_settings_changed(self):
+        """The anchor or the probe interval changed under us.
+
+        Both used to be read only when probes were built, so a change sat
+        unapplied until the next network change or restart while the panel
+        said settings apply live. An interval change is applied in place —
+        the distributions stay valid, only the cadence moves. A new anchor
+        rebuilds the probes: half the instruments now point somewhere else,
+        and their old samples describe a host nobody is measuring any more.
+        """
+        if self._probe_settings is None:
+            return                       # probes not started yet
+        anchor = self.config["internetAnchor"]
+        interval = int(self.config["probeIntervalMs"])
+        if (anchor, interval) == self._probe_settings:
+            return
+        if anchor != self._probe_settings[0]:
+            self._rebuild_probes(net.route_to(anchor))
+            return
+        self._probe_settings = (anchor, interval)
+        if self._local_probe is not None:
+            self._local_probe.set_interval(interval / 1000.0)
+        self._apply_seats([(k, i.active)
+                           for k, i in self.bench.instruments.items()])
+
+    def _rebuild_probes(self, route: dict):
+        """Stop every probe and start over against `route`: fresh network,
+        fresh distributions. The bench keeps its seats — continuity until
+        the new windows hold enough samples to argue about."""
         for p in self.probes:
             p.stop()
         self.probes.clear()
         self._instrument_probes = {}
         self.local = Series()
-        # Fresh network, fresh distributions: every instrument starts
-        # over. The bench keeps its seats — continuity until the new
-        # windows hold enough samples to argue about.
         self._new_instrument_series()
-        self.route = fresh
+        self.route = route
         self.counter_samples = []
-        # A new route means a new apparent address; drop the stale one now
-        # rather than display it wrong for up to an hour.
+        # A new route means a new apparent address; drop the stale one
+        # rather than display it wrong until the next check — and ask for
+        # that check now: a new network is exactly where a sign-in page is
+        # likeliest.
         self.wan_ip = None
-        self._wan_ip_at = 0.0
+        self._wan_ip_at = 0
+        self.captive.request()
         self.start_probes()
 
     def stop(self, *_):
@@ -953,7 +1032,7 @@ class Daemon:
             except OSError:
                 pass
 
-    def watch_outages(self, now: float, ls: dict, ts: dict):
+    def watch_outages(self, now: float):
         """Outage logic on the freshest sample of each series.
 
         The wan watch only counts a loss when the local leg answered — if
@@ -998,6 +1077,9 @@ class Daemon:
                 self.wan_events.down(now, self._any_instrument_alive(4.5))
             elif move == "up":
                 self.wan_events.up(now)
+                # The internet is back — or something answering for it is.
+                # Ask the reachability check now rather than wait its hour.
+                self.captive.request()
             elif move == "disruption":
                 self.record_disruption("wan", self.watch_wan,
                                        self._any_instrument_alive(4.5))
@@ -1036,14 +1118,17 @@ class Daemon:
                 return True
         return False
 
-    def refresh_wan_ip(self):
-        """Off the loop: a curl with a timeout, and the bar must not wait
-        on it. A failed fetch keeps the last answer — the route is the
-        thing that invalidates it, and the route path clears it."""
-        info = net.wan_ip()
-        if info:
-            info["checked_ts"] = int(time.time())
-            self.wan_ip = info
+    def adopt_wan_ip(self):
+        """The address this connection appears from, taken from the
+        reachability check's proof — the same fetch, so no second request
+        and no second host learns the address. A check that could not prove
+        the internet leaves the last answer standing: the route is what
+        invalidates it, and the route path clears it."""
+        proof, checked = self.captive.proof, self.captive.checked_ts
+        if not proof or not checked or checked == self._wan_ip_at:
+            return
+        self._wan_ip_at = checked
+        self.wan_ip = dict(proof, checked_ts=checked)
 
     def refresh_metered(self):
         """Tethering, or a connection the user has marked metered.
@@ -1196,82 +1281,6 @@ class Daemon:
                      "last_down": down, "last_up": up,
                      "samples": len(recent)}
 
-    def sample_app_request(self):
-        """One real HTTP/3 request, for what a request actually costs.
-
-        The TCP probe gives a round trip comparable with ICMP; this gives
-        what neither measures — handshake plus first byte over the protocol
-        a browser would use. Degrades to HTTP/2 where curl has no HTTP/3
-        rather than reporting nothing.
-        """
-        if not shutil.which("curl"):
-            return
-        host = h3_target(self.config["internetAnchor"])
-        if not host:
-            self.app_request = {"ok": False, "skipped": "no TLS name for anchor",
-                                "at": time.time()}
-            return
-        proto = ["--http3"] if self._curl_has_http3() else ["--http2"]
-        cmd = (["curl", "-sS", "-I", "-o", "/dev/null", "--proto", "=https",
-                "--max-time", str(int(H3_TIMEOUT_S))]
-               + proto
-               + ["-w", "%{http_version} %{time_appconnect} "
-                        "%{time_starttransfer} %{size_download} %{http_code}",
-                  f"https://{host}/"])
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=H3_TIMEOUT_S + 5)
-        except (subprocess.TimeoutExpired, OSError):
-            self.app_request = {"ok": False, "at": time.time()}
-            return
-        if r.returncode != 0:
-            self.app_request = {"ok": False, "at": time.time()}
-            return
-        try:
-            version, appconnect, ttfb, size, code = r.stdout.split()
-            self.app_request = {
-                "ok": code.startswith("2"),
-                "protocol": "h3" if version.startswith("3") else "h" + version,
-                "handshake_ms": round(float(appconnect) * 1000.0, 1),
-                "ttfb_ms": round(float(ttfb) * 1000.0, 1),
-                "bytes": int(size),
-                "at": time.time(),
-            }
-        except (ValueError, IndexError):
-            self.app_request = {"ok": False, "at": time.time()}
-
-    def _curl_has_http3(self) -> bool:
-        """Cached once: curl is not rebuilt mid-run."""
-        if self._curl_h3 is None:
-            try:
-                out = subprocess.run(["curl", "--version"], capture_output=True,
-                                     text=True, timeout=5).stdout
-                self._curl_h3 = "HTTP3" in out
-            except (subprocess.TimeoutExpired, OSError):
-                self._curl_h3 = False
-        return self._curl_h3
-
-    def app_path(self, window_s: float = 300.0) -> dict:
-        """The application path beside the ICMP one, and the gap between.
-
-        `icmp_delta_ms` is what this probe exists to produce: how much
-        lower ICMP reads than a handshake over the same path to the same
-        host. A large positive gap means the ICMP figure — and any score
-        built on it — is flattering the connection.
-        """
-        app_stats = Series.stats(self.app.since(window_s))
-        icmp_stats = Series.stats(self.icmp_anchor.since(window_s))
-        out = {"rtt": app_stats, "request": self.app_request}
-        # Every sample failing means the anchor does not answer on this
-        # port: a fact about the target, not a fault in the connection.
-        out["available"] = bool(app_stats["count"]) and app_stats["loss"] != 1.0
-        delta = None
-        if (out["available"] and app_stats.get("p50") is not None
-                and icmp_stats.get("p50") is not None):
-            delta = round(app_stats["p50"] - icmp_stats["p50"], 2)
-        out["icmp_delta_ms"] = delta
-        return out
-
     def bufferbloat(self, window_s: float = 300.0) -> dict:
         """Lag while the link was idle vs while it was carrying traffic.
 
@@ -1415,10 +1424,8 @@ class Daemon:
                         if self.metered else None),
             # Proof the real internet answered, or why it did not.
             "reach": self.captive.snapshot(),
-            "app": self.app_path(300.0),
             # What the user's own TCP connections are experiencing, straight
-            # from the kernel. `app` above is our anchor probe; this is their
-            # real traffic to their real destinations.
+            # from the kernel: their real traffic to their real destinations.
             "sockets": self.app_traffic.latency,
             # What the connection is doing right now, as opposed to lately.
             # The index answers the second question and cannot answer the
@@ -1443,6 +1450,7 @@ class Daemon:
 
     def flush_recent(self, now: float):
         """recent.json: last 30 min at 5-second resolution, ~360 points."""
+        self.last_recent_flush = now
         self.aux_ring.append((now, self.rates[0], self.rates[1],
                               self.last_signal))
         points = []
@@ -1556,10 +1564,9 @@ class Daemon:
         while self.running:
             now = time.time()
             self.config.refresh()
+            self.restart_probes_if_settings_changed()
 
-            ls = Series.stats(self.local.since(30))
-            ts = Series.stats(self.total.since(30))
-            self.watch_outages(now, ls, ts)
+            self.watch_outages(now)
             self.throughput(now, self.route.get("iface", ""))
 
             write_atomic(live_path(), self.compose_live(now))
@@ -1573,7 +1580,7 @@ class Daemon:
                 self.flush_minute(now)
                 self.flush_recent(now)
                 self.restart_probes_if_route_changed()
-            elif int(now) % 5 == 0:
+            elif now - self.last_recent_flush >= 5.0:
                 self.flush_recent(now)
 
             if now - self.last_rollup >= 3600:
@@ -1582,7 +1589,11 @@ class Daemon:
                 self.store.prune(minute_days=int(self.config["historyDays"]),
                                  now=now)
 
+            # Off the loop: the check is a curl, and the bar must keep
+            # updating at 2 Hz while it runs. tick() only starts and
+            # collects it; the address it proves is adopted here.
             self.captive.tick(now, self._any_instrument_alive(6.0))
+            self.adopt_wan_ip()
 
             self.update_watch.enabled = bool(self.config["updateCheck"])
             self.update_watch.tick(now)
@@ -1593,18 +1604,6 @@ class Daemon:
                 self._last_bench_eval = now
                 self._apply_seats(
                     self.bench.evaluate(now, self._instrument_stats()))
-
-            if now - self._wan_ip_at >= WAN_IP_REFRESH_S:
-                self._wan_ip_at = now
-                threading.Thread(target=self.refresh_wan_ip,
-                                 name="wan-ip", daemon=True).start()
-
-            if now - self.last_app_request >= H3_SAMPLE_INTERVAL_S:
-                self.last_app_request = now
-                # Off the loop: a request can block for seconds and the
-                # bar must keep updating at 2 Hz while it does.
-                threading.Thread(target=self.sample_app_request,
-                                 name="app-request", daemon=True).start()
 
             if self.peak_requested.is_set():
                 self.peak_requested.clear()

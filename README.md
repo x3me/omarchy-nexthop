@@ -81,9 +81,10 @@ The event log, naming who did what — including the router that kicks:
 
 ## Using it
 
-- **Bar widget**: the index (or lag, or a sparkline — pick in Setup >
-  Plugins). Colour is the verdict; during an outage it shows how long
-  you've been down. Click opens the panel, middle-click runs a peak test.
+- **Bar widget**: the index, the lag figure, or just the icon
+  (`displayMode` on the widget's entry in `~/.config/omarchy/shell.json`).
+  Colour is the verdict; during an outage it shows how long you've been
+  down. Click opens the panel, middle-click runs a peak test.
 - **Panel tabs**: Overview (is it me or is it them), Latency (window picker,
   per-leg stats, latency under load), Speed (content history + last peak),
   Wi-Fi (the local leg in detail, airtime, link events), Apps (who is using
@@ -177,7 +178,7 @@ speed-test hosts named at the end.
 | --- | --- | --- |
 | ICMP | your gateway, and the anchor while seated | ~11 MB/day at the default 500 ms interval |
 | TCP handshakes | the instrument pool, port 443, ~1/s while seated | ~20 MB/day per seated instrument — connections opened and closed, no payload |
-| One HTTPS request | the anchor, by its TLS name, every 5 min | ~1 MB/day — a HEAD request, so no body is transferred |
+| Reachability check | speed.cloudflare.com/cdn-cgi/trace | one ~1 KB HTTPS request when the network changes and hourly after that; every 30 s only while a sign-in page is suspected. Proves the real internet answered, and supplies the WAN address |
 | Content check | speed.cloudflare.com | ~14 MB each, hourly, and can be turned off |
 | Peak test | Ookla / Cloudflare / fast.com | up to ~600 MB, **only ever when you ask** |
 

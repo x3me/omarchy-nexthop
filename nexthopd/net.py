@@ -278,19 +278,6 @@ def parse_trace(text: str) -> Optional[dict]:
     return None
 
 
-def wan_ip() -> Optional[dict]:
-    """The address this connection appears from.
-
-    Asked of a host the daemon already fetches from every hour — no new
-    destination learns the user's address, which is the reason this is not
-    an ifconfig-style third-party lookup. The URL is our constant, never
-    anything a response handed us.
-    """
-    raw = _run(["curl", "-sf", "--proto", "=https", "--max-time", "5",
-                "--max-filesize", "4096", TRACE_URL], timeout=8.0)
-    return parse_trace(raw) if raw else None
-
-
 def trace_verdict(raw) -> str:
     """Did the real internet answer? `open` | `intercepted` | `silent`.
 
@@ -313,7 +300,15 @@ def trace_verdict(raw) -> str:
 
 
 def reachability() -> dict:
-    """One reachability check: the verdict, plus the address when proven."""
+    """One reachability check: the verdict, plus the address when proven.
+
+    This is also where the WAN address comes from — the `proof` — so the
+    machine's address is only ever asked of a host the daemon talks to
+    anyway, never of an ifconfig-style third party. The URL is our
+    constant, never anything a response handed us. Cadence is the caller's
+    (CaptiveWatch): on every new network, hourly once the internet has
+    answered, every 30 s only while it has not.
+    """
     raw = _run(["curl", "-sf", "--proto", "=https", "--max-time", "5",
                 "--max-filesize", "4096", TRACE_URL], timeout=8.0)
     verdict = trace_verdict(raw)

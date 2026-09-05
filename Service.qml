@@ -15,7 +15,9 @@ Item {
   id: root
 
   readonly property string pluginDir: {
-    var url = Qt.resolvedUrl(".").toString()
+    // A URL, not a path: percent-encoded, so decode before it is used as
+    // a filesystem path or a space in the way becomes %20 and cd fails.
+    var url = decodeURIComponent(Qt.resolvedUrl(".").toString())
     return url.replace(/^file:\/\//, "").replace(/\/$/, "")
   }
 
@@ -112,8 +114,8 @@ Item {
 
   Process {
     id: daemon
-    command: ["sh", "-c",
-      "cd '" + root.pluginDir + "' && exec python3 -m nexthopd"]
+    command: ["sh", "-c", 'cd "$1" && exec python3 -m nexthopd',
+              "sh", root.pluginDir]
     running: true
 
     onExited: function(code, status) {

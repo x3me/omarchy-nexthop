@@ -36,8 +36,12 @@ Column {
   function put(key, value) {
     if (!canWrite) return
     var id = "io.github.x3me.nexthop"
-    var entry = { "id": id }
     var s = panel.settings
+    // The shell REPLACES the entry with what it is handed, so writing from
+    // an absent settings object would hand back {id, key} and drop every
+    // other setting the user has. Better to do nothing than to do that.
+    if (!s || typeof s !== "object") return
+    var entry = { "id": id }
     for (var k in s) if (k !== "id") entry[k] = s[k]
     entry[key] = value
     panel.bar.shell.updateEntryInline(id, entry)

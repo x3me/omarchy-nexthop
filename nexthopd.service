@@ -7,6 +7,12 @@
 #   systemctl --user enable --now nexthopd
 #
 # The shell's Service.qml sees the flock is held and simply attaches.
+#
+# The other direction needs a line too: if this unit starts while the
+# shell's own daemon already holds the lock, ours exits 3 ("lock held").
+# That is a clean outcome, not a failure, and without
+# RestartPreventExitStatus systemd would restart it every 5 s until the
+# next shell restart handed the lock over.
 [Unit]
 Description=Nexthop internet quality monitor daemon
 After=network.target
@@ -15,6 +21,7 @@ After=network.target
 ExecStart=/usr/bin/python3 -m nexthopd
 WorkingDirectory=@PLUGIN_DIR@
 Restart=on-failure
+RestartPreventExitStatus=3
 RestartSec=5
 Nice=10
 

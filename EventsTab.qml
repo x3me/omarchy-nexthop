@@ -115,7 +115,7 @@ Column {
   function groupable(kind) {
     return kind === "roam" || kind === "kick" || kind === "drop"
       || kind === "rate-drop" || kind === "disruption"
-      || kind === "icmp-quiet"
+      || kind === "icmp-quiet" || kind === "gateway-quiet"
   }
 
   function foldEvents(list) {
@@ -447,12 +447,21 @@ Column {
 
         readonly property color tone: {
           var k = modelData.kind
-          if (k === "outage") return Color.urgent
-          if (k === "disruption" || k === "rate-drop"
-              || k === "icmp-quiet") return tab.panel.warnTone
+          // Two link events keep colours of their own: a roam is purple
+          // because it is neither good nor bad, an association is the link
+          // coming up. Everything else takes the severity the daemon stored
+          // WITH the event, so a kind added on the daemon side arrives
+          // coloured. This used to be a second table keyed by kind, and
+          // 0.2.4's gateway-quiet shipped warn-toned in the database and
+          // accent-toned here because that table never learned of it.
           if (k === "roam") return "#bb9af7"
-          if (k === "kick" || k === "drop") return tab.panel.warnTone
           if (k === "associate") return tab.panel.okTone
+          var s = modelData.first ? modelData.first.severity : undefined
+          if (s === "critical") return Color.urgent
+          if (s === "warn") return tab.panel.warnTone
+          // Rows written before 0.2.13 stored every link fault as "info".
+          if (k === "kick" || k === "drop" || k === "rate-drop")
+            return tab.panel.warnTone
           return Color.accent
         }
 

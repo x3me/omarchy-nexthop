@@ -18,8 +18,11 @@ BarWidget {
   // whole lines, so an oversized file, a FIFO or a symlink swapped in at
   // the predictable path is refused in a small short-lived process instead
   // of allocating or stalling inside the long-lived shell.
+  // A URL, not a path: percent-encoded, so a space in the way becomes %20
+  // and `cd` fails. Decode before it is used as a filesystem path.
   readonly property string pluginDir:
-    Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
+    decodeURIComponent(Qt.resolvedUrl(".").toString())
+      .replace(/^file:\/\//, "").replace(/\/$/, "")
 
   // One reader serves the whole widget: the panel below is created by this
   // component and binds to these properties rather than opening anything
@@ -155,11 +158,12 @@ BarWidget {
     }
   }
 
+  // The path travels as a positional argument, never spliced into the
+  // script — the same form every other Process here uses.
   Process {
     id: peakRequest
-    command: ["sh", "-c",
-      "cd '" + Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "") +
-      "' && exec python3 -m nexthopd.cli peak"]
+    command: ["sh", "-c", 'cd "$1" && exec python3 -m nexthopd.cli peak',
+              "sh", root.pluginDir]
   }
 
   // Why the width is measured here rather than left to the control:

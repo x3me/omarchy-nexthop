@@ -7,6 +7,7 @@ Run: python3 -m unittest discover -s test
 import json
 import subprocess
 import sys
+import os
 import tempfile
 import time
 import unittest
@@ -282,70 +283,14 @@ class LoadTagging(unittest.TestCase):
         self.assertFalse(broken._loaded())
 
 
-class ApplicationPath(unittest.TestCase):
-    """The TCP-handshake probe that sits beside ICMP.
+class TcpProbeBehaviour(unittest.TestCase):
+    """The TCP-handshake instruments beside ICMP.
 
     ICMP is answered by fast paths in hardware and can be spoofed by
     anything on the way; a handshake to port 443 has to reach a listener
-    that completes it. The gap between the two is the measurement.
+    that completes it. Since 0.2.0 these are seated instruments in the
+    bench (instruments.py), not a comparison probe on the side.
     """
-
-    def setUp(self):
-        import os as _os
-        from nexthopd.daemon import Daemon
-        self.dir = tempfile.TemporaryDirectory()
-        _os.environ["XDG_STATE_HOME"] = self.dir.name
-        self.daemon = Daemon()
-        self._os = _os
-
-    def tearDown(self):
-        self.daemon.store.close()
-        del self._os.environ["XDG_STATE_HOME"]
-        self.dir.cleanup()
-
-    def test_reports_the_gap_against_icmp(self):
-        now = time.time()
-        for i in range(30):
-            self.daemon.icmp_anchor.add(now - 30 + i, 7.0)     # ICMP: fast-pathed
-            self.daemon.app.add(now - 30 + i, 12.0)      # handshake: honest
-        ap = self.daemon.app_path(300.0)
-        self.assertTrue(ap["available"])
-        self.assertAlmostEqual(ap["icmp_delta_ms"], 5.0, places=1)
-
-    def test_anchor_that_refuses_443_reads_as_unavailable_not_broken(self):
-        # Every sample failing is a fact about the target, not a fault in
-        # the connection — it must not surface as 100% packet loss.
-        now = time.time()
-        for i in range(20):
-            self.daemon.icmp_anchor.add(now - 20 + i, 8.0)
-            self.daemon.app.add(now - 20 + i, None)
-        ap = self.daemon.app_path(300.0)
-        self.assertFalse(ap["available"])
-        self.assertIsNone(ap["icmp_delta_ms"])
-
-    def test_no_samples_yet_is_unavailable_without_a_delta(self):
-        ap = self.daemon.app_path(300.0)
-        self.assertFalse(ap["available"])
-        self.assertIsNone(ap["icmp_delta_ms"])
-        self.assertIsNone(ap["request"])
-
-    def test_h3_target_follows_the_anchor(self):
-        from nexthopd.daemon import h3_target
-        # one.one.one.one IS 1.1.1.1 — the name exists so TLS can validate,
-        # not to reach somewhere else.
-        self.assertEqual(h3_target("1.1.1.1"), "one.one.one.one")
-        self.assertEqual(h3_target("8.8.8.8"), "dns.google")
-        self.assertEqual(h3_target("dns.example.net"), "dns.example.net")
-
-    def test_unknown_bare_ip_anchor_is_skipped_not_redirected(self):
-        from nexthopd.daemon import h3_target
-        # Sending the sample to Cloudflare when the user chose another
-        # anchor would measure a different path and a different operator.
-        self.assertIsNone(h3_target("192.0.2.1"))
-        self.daemon.config.values["internetAnchor"] = "192.0.2.1"
-        self.daemon.sample_app_request()
-        self.assertFalse(self.daemon.app_request["ok"])
-        self.assertIn("skipped", self.daemon.app_request)
 
     def test_tcp_probe_records_a_failure_rather_than_raising(self):
         from nexthopd.probes import TcpProbe
@@ -1173,10 +1118,6 @@ class AtomicState(unittest.TestCase):
             self.assertEqual([f.name for f in Path(d).iterdir()], ["live.json"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StubEvents:
     """Stands in for NlEvents: answers cause_for() with a fixed cause."""
 
@@ -1974,6 +1915,11 @@ class LagBand(unittest.TestCase):
         self.assertEqual(b, {"best": None, "typical": None, "worst": None})
 
 
+def run_now(fn):
+    """A spawn for tests: run the check inline so its result lands this tick."""
+    fn()
+
+
 class CaptiveDetection(unittest.TestCase):
     """Replies prove a packet came back, not what sent it."""
 
@@ -2009,7 +1955,7 @@ class CaptiveDetection(unittest.TestCase):
             calls.append(v)
             return {"verdict": v, "proof": None}
 
-        w = CaptiveWatch(check)
+        w = CaptiveWatch(check, spawn=run_now)
         w.tick(1000.0, probes_answering=True)
         self.assertFalse(w.confirmed)          # one strike
         w.tick(1000.0 + 31, probes_answering=True)
@@ -2027,7 +1973,7 @@ class CaptiveDetection(unittest.TestCase):
             calls.append(1)
             return {"verdict": "intercepted", "proof": None}
 
-        w = CaptiveWatch(check)
+        w = CaptiveWatch(check, spawn=run_now)
         w.tick(1000.0, True)
         w.tick(1001.0, True)
         w.tick(1029.0, True)
@@ -2036,7 +1982,8 @@ class CaptiveDetection(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
     def test_suspicion_drops_when_nothing_answers(self):
-        w = CaptiveWatch(lambda: {"verdict": "intercepted", "proof": None})
+        w = CaptiveWatch(lambda: {"verdict": "intercepted", "proof": None},
+                         spawn=run_now)
         w.tick(1000.0, True)
         w.tick(1031.0, True)
         self.assertTrue(w.confirmed)
@@ -2046,7 +1993,8 @@ class CaptiveDetection(unittest.TestCase):
         self.assertEqual(w.strikes, 0)
 
     def test_publishes_nothing_before_it_knows_anything(self):
-        w = CaptiveWatch(lambda: {"verdict": "open", "proof": None})
+        w = CaptiveWatch(lambda: {"verdict": "open", "proof": None},
+                         spawn=run_now)
         self.assertIsNone(w.snapshot())
 
 
@@ -2108,6 +2056,10 @@ class RouteChangeKeepsHistoryThroughAnOutage(unittest.TestCase):
             d._wan_ip_at = 1.0
             d._instrument_probes = {}
             d.local = object()
+            d.probes = []
+            # The reset path also asks the reachability check to start over.
+            d.captive = type("Captive", (), {"request": lambda self: None})()
+            d._rebuild_probes = lambda fresh: dmod.Daemon._rebuild_probes(d, fresh)
 
             # The route vanishes: no reset, history kept, probes untouched.
             fake_route_to.answer = {}
@@ -2443,3 +2395,220 @@ class TetherDetection(unittest.TestCase):
                 self.assertEqual(nm_metered("wlan0"), expected, raw)
         finally:
             netmod._run = original
+
+
+class CaptiveCheckOffTheLoop(unittest.TestCase):
+    """The reachability curl must never stall the 2 Hz loop, and it runs on
+    suspicion rather than on a clock. Until 0.2.13 it did both wrong."""
+
+    OPEN = {"verdict": "open", "proof": {"ip": "203.0.113.9", "family": "v4"}}
+
+    def test_tick_returns_before_a_slow_check_finishes(self):
+        import threading
+        release, done = threading.Event(), threading.Event()
+
+        def slow_check():
+            release.wait(5)
+            done.set()
+            return dict(self.OPEN)
+
+        w = CaptiveWatch(slow_check)             # the real thread spawn
+        t0 = time.monotonic()
+        w.tick(1000.0, True)
+        self.assertLess(time.monotonic() - t0, 0.5)
+        self.assertEqual(w.verdict, "unknown")   # nothing has landed yet
+        release.set()
+        self.assertTrue(done.wait(5))
+        for _ in range(100):                     # a later tick collects it
+            w.tick(1000.5, True)
+            if w.verdict != "unknown":
+                break
+            time.sleep(0.01)
+        self.assertEqual(w.verdict, "open")
+        self.assertEqual(w.proof["ip"], "203.0.113.9")
+
+    def test_proof_of_internet_backs_off_to_hourly(self):
+        calls = []
+
+        def check():
+            calls.append(1)
+            return dict(self.OPEN)
+
+        w = CaptiveWatch(check, spawn=run_now)
+        w.tick(1000.0, True)
+        for t in (1031.0, 1600.0, 4599.0):
+            w.tick(t, True)
+        self.assertEqual(len(calls), 1)          # not the old 30 s clock
+        w.tick(1000.0 + CaptiveWatch.RECHECK_OPEN_S, True)
+        self.assertEqual(len(calls), 2)
+
+    def test_request_starts_over_and_drops_a_stale_answer(self):
+        held = []
+        w = CaptiveWatch(lambda: dict(self.OPEN), spawn=held.append)
+        w.tick(1000.0, True)                     # a check for network A
+        self.assertEqual(len(held), 1)
+        w.request()                              # the route changed
+        self.assertEqual(w.verdict, "unknown")
+        held[0]()                                # A's answer arrives late
+        w.tick(1001.0, True)
+        self.assertIsNone(w.proof)               # dropped, not adopted
+        self.assertEqual(len(held), 2)           # and B is being asked
+        held[1]()
+        w.tick(1002.0, True)
+        self.assertEqual(w.verdict, "open")
+
+    def test_daemon_adopts_the_address_from_the_proof_once(self):
+        import os as _os
+        from nexthopd.daemon import Daemon
+        with tempfile.TemporaryDirectory() as d:
+            _os.environ["XDG_STATE_HOME"] = d
+            try:
+                dm = Daemon()
+                try:
+                    dm.captive.proof = dict(self.OPEN["proof"])
+                    dm.captive.checked_ts = 1234
+                    dm.adopt_wan_ip()
+                    self.assertEqual(dm.wan_ip,
+                                     {"ip": "203.0.113.9", "family": "v4",
+                                      "checked_ts": 1234})
+                    # A later check that could not prove the internet
+                    # leaves the last answer standing.
+                    dm.captive.proof = None
+                    dm.adopt_wan_ip()
+                    self.assertEqual(dm.wan_ip["ip"], "203.0.113.9")
+                finally:
+                    dm.store.close()
+            finally:
+                del _os.environ["XDG_STATE_HOME"]
+
+
+class PeakSignalAuthorization(unittest.TestCase):
+    """`nexthop peak` signals only a verified lock holder. SIGUSR1's default
+    disposition is terminate, so the wrong pid is not a harmless miss."""
+
+    def setUp(self):
+        import contextlib, io
+        from nexthopd import cli, paths
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["XDG_STATE_HOME"] = self.dir.name
+        self.cli = cli
+        self.lock = str(paths.lock_path())
+        os.makedirs(os.path.dirname(self.lock), mode=0o700, exist_ok=True)
+        self.killed = []
+        self._kill = os.kill
+        os.kill = lambda pid, sig: self.killed.append((pid, sig))
+        self._quiet = contextlib.redirect_stdout(io.StringIO())
+        self._quiet.__enter__()
+
+    def tearDown(self):
+        self._quiet.__exit__(None, None, None)
+        os.kill = self._kill
+        del os.environ["XDG_STATE_HOME"]
+        self.dir.cleanup()
+
+    def test_a_lock_nobody_holds_is_not_a_daemon(self):
+        # A dead daemon's pid, recycled by a live process — this one.
+        Path(self.lock).write_text(str(os.getpid()))
+        self.assertEqual(self.cli.cmd_peak(None), 1)
+        self.assertEqual(self.killed, [])
+
+    def test_a_held_lock_still_needs_the_holders_identity(self):
+        import fcntl
+        # Hold the lock ourselves: our argv is the test runner, not
+        # `python -m nexthopd`, so the identity check must refuse it.
+        fd = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, str(os.getpid()).encode())
+        try:
+            self.assertEqual(self.cli.cmd_peak(None), 1)
+            self.assertEqual(self.killed, [])
+        finally:
+            os.close(fd)
+
+    def test_a_symlink_at_the_lock_path_is_refused(self):
+        os.symlink("/proc/self/stat", self.lock)
+        self.assertEqual(self.cli.cmd_peak(None), 1)
+        self.assertEqual(self.killed, [])
+
+    def test_missing_lock_file_is_not_a_daemon(self):
+        self.assertEqual(self.cli.cmd_peak(None), 1)
+        self.assertEqual(self.killed, [])
+
+
+class UpdateCheckIsPinnedToThePlugin(unittest.TestCase):
+    """`git -C <dir>` walks up until it finds a repository. A copy-install
+    with no .git of its own inside a dotfiles checkout must answer unknown,
+    not the dotfiles' status — and must not contact the dotfiles' remote."""
+
+    def test_a_plain_directory_inside_a_repo_is_not_that_repo(self):
+        import shutil, subprocess
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            sub = Path(d) / "plugins" / "io.github.x3me.nexthop"
+            sub.mkdir(parents=True)
+            w = UpdateWatch(repo=sub)
+            self.assertIsNone(w._local_head())
+            self.assertEqual(w.check(), "unknown")
+
+
+class SettingsApplyLive(unittest.TestCase):
+    """The anchor and the probe interval used to be read only when probes
+    were built, while the Setup tab said settings apply without a restart."""
+
+    def setUp(self):
+        from nexthopd.daemon import Daemon
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["XDG_STATE_HOME"] = self.dir.name
+        self.d = Daemon()
+        self.calls = []
+        self.d._rebuild_probes = lambda route: self.calls.append(("rebuild", route))
+        self.d._apply_seats = lambda changes: self.calls.append(("seats", changes))
+
+    def tearDown(self):
+        self.d.store.close()
+        del os.environ["XDG_STATE_HOME"]
+        self.dir.cleanup()
+
+    def test_nothing_happens_before_probes_exist(self):
+        self.d.config.values["probeIntervalMs"] = 1000
+        self.d.restart_probes_if_settings_changed()
+        self.assertEqual(self.calls, [])
+
+    def test_interval_change_moves_the_cadence_in_place(self):
+        class Probe:
+            interval = None
+
+            def set_interval(self, v):
+                self.interval = v
+
+        anchor = self.d.config["internetAnchor"]
+        self.d._probe_settings = (anchor, 500)
+        self.d._local_probe = Probe()
+        self.d.config.values["probeIntervalMs"] = 1000
+        self.d.restart_probes_if_settings_changed()
+        self.assertEqual(self.d._local_probe.interval, 1.0)
+        self.assertEqual([c[0] for c in self.calls], ["seats"])
+        self.assertEqual(self.d._probe_settings, (anchor, 1000))
+        # Applied once, not on every tick.
+        self.d.restart_probes_if_settings_changed()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_anchor_change_rebuilds_the_probes(self):
+        import nexthopd.daemon as dmod
+        self.d._probe_settings = (self.d.config["internetAnchor"], 500)
+        real = dmod.net.route_to
+        dmod.net.route_to = lambda a: {"gateway": "192.0.2.1", "iface": "x"}
+        try:
+            self.d.config.values["internetAnchor"] = "9.9.9.9"
+            self.d.restart_probes_if_settings_changed()
+        finally:
+            dmod.net.route_to = real
+        self.assertEqual(self.calls, [("rebuild", {"gateway": "192.0.2.1",
+                                                   "iface": "x"})])
+
+
+if __name__ == "__main__":
+    unittest.main()

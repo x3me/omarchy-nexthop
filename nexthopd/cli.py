@@ -13,9 +13,11 @@ go straight to the sqlite file, which WAL mode makes safe.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import signal
+import stat
 import sys
 import time
 
@@ -202,13 +204,69 @@ def cmd_tests(args):
     return 0
 
 
-def cmd_peak(_args):
-    """Ring the daemon's doorbell. SIGUSR1 is the whole protocol."""
+def _lock_holder_pid() -> int:
+    """The pid written by whoever holds the daemon lock, or 0.
+
+    The lock file outlives a daemon that died hard and pids are recycled,
+    so the number in the file is not evidence on its own. The flock is:
+    if this process can take it, nobody holds it and nobody is listening,
+    whatever the file says. Opened the way the daemon opens it — no
+    symlink following, a regular file or nothing — and never truncated.
+    """
     try:
-        with open(lock_path()) as f:
-            pid = int(f.read().strip())
+        fd = os.open(lock_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return 0
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return 0
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Held: that is the daemon, and the pid it wrote after taking
+            # the lock is the one to ring.
+            try:
+                return int(os.read(fd, 32).strip())
+            except ValueError:
+                return 0
+        # We got it, so nobody was holding it. Give it straight back.
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return 0
+    except OSError:
+        return 0
+    finally:
+        os.close(fd)
+
+
+def cmd_peak(_args):
+    """Ring the daemon's doorbell. SIGUSR1 is the whole protocol.
+
+    SIGUSR1's default disposition is *terminate*, so signalling the wrong
+    pid is not a harmless no-op — and this is what a middle-click on the
+    bar runs. Two checks stand before the signal: the lock must actually
+    be held (see `_lock_holder_pid`), and the holder must pass the same
+    owner-and-argv test the retire path applies, with the start time
+    live.json published when it names the same pid. The same rule as
+    `nexthop retire`: a process is authorised by identity, never by the
+    number a file happens to contain.
+    """
+    pid = _lock_holder_pid()
+    if pid <= 0 or pid == os.getpid():
+        emit({"ok": False, "error": "daemon not running"})
+        return 1
+    live = read_json(live_path(), {}) or {}
+    want_start = 0
+    if live.get("pid") == pid:
+        try:
+            want_start = int(live.get("pid_start") or 0)
+        except (TypeError, ValueError):
+            want_start = 0
+    if not authorized_to_retire(pid, want_start):
+        emit({"ok": False, "error": "lock holder is not nexthopd"})
+        return 1
+    try:
         os.kill(pid, signal.SIGUSR1)
-    except (OSError, ValueError):
+    except OSError:
         emit({"ok": False, "error": "daemon not running"})
         return 1
     emit({"ok": True})
