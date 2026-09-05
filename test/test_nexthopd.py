@@ -16,10 +16,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from nexthopd import net, score  # noqa: E402
-from nexthopd.daemon import (MIN_PLAUSIBLE_INFLATION,  # noqa: E402
-                             NOTIFY_AFTER_S, CaptiveWatch,
-                             Config, LegWatch, LinkWatch,
-                             LocalEventArbiter, WanEventArbiter)
+from nexthopd.daemon import (DISRUPTION_AFTER_S,  # noqa: E402
+                             LEG_STALE_S, MIN_PLAUSIBLE_INFLATION,
+                             NOTIFY_AFTER_S, OUTAGE_AFTER_S, CaptiveWatch,
+                             Config, LegState, LegWatch, LinkWatch,
+                             LocalEventArbiter, WanEventArbiter, leg_state)
 from nexthopd.linkevents import NlEvents, reason_text  # noqa: E402
 from nexthopd.net import (nm_metered, tether_from_gateway,  # noqa: E402
                           trace_verdict)
@@ -2102,12 +2103,16 @@ class DisruptionProducer(unittest.TestCase):
         self.dir.cleanup()
 
     def run_losses(self, n, cadence=0.5, t0=None):
+        """`n` lost samples at `cadence`, then a reply, with a watch tick at
+        each sample — which is how the default 500 ms cadence behaves."""
         t0 = time.time() if t0 is None else t0
         w = LegWatch()
         moves = []
         for i in range(n):
-            moves.append(w.sample(False, t0 + i * cadence))
-        moves.append(w.sample(True, t0 + n * cadence))
+            t = t0 + i * cadence
+            moves.append(w.sample(LegState(False, t, t0, i + 1), t))
+        t = t0 + n * cadence
+        moves.append(w.sample(LegState(True, t, None, 0), t))
         return w, moves
 
     def test_a_single_loss_is_noise(self):
@@ -2128,16 +2133,55 @@ class DisruptionProducer(unittest.TestCase):
         # Timed from the FIRST loss, not from the threshold being crossed:
         # the interruption started when the packets started going missing.
         self.assertEqual(began, t0)
-        # 1.5 s of sample() calls at the 0.5 s cadence — NOT 1.5 s of silence.
-        # Each sample already summarises a 3 s any-reply window, so three of
-        # them mean ~4 s without a reply (see DISRUPTION_AFTER_LOSSES).
-        self.assertEqual(ended, t0 + 1.5)
+        # 1.5 s of silence on the stream itself: three lost probes at the
+        # default 500 ms, exactly DISRUPTION_AFTER_S. Until 0.2.15 a "loss"
+        # was an empty 3 s window, and this same blip could not register.
+        self.assertEqual(ended, t0 + DISRUPTION_AFTER_S)
 
     def test_reaching_the_outage_threshold_is_an_outage_not_a_disruption(self):
-        w, moves = self.run_losses(8)
-        self.assertIn("down", moves)
+        # Nine lost probes at 500 ms: the ninth lands 4.0 s after the first,
+        # which is OUTAGE_AFTER_S of unbroken silence.
+        w, moves = self.run_losses(9)
+        self.assertEqual(moves[8], "down")
         self.assertEqual(moves[-1], "up")
         self.assertIsNone(w.blip)
+
+    def test_a_run_recovering_just_short_of_the_threshold_is_a_disruption(self):
+        w, moves = self.run_losses(8)         # 3.5 s of silence, then a reply
+        self.assertNotIn("down", moves)
+        self.assertEqual(moves[-1], "disruption")
+
+    def test_thresholds_are_seconds_not_ticks(self):
+        # The same 1.5 s blip seen by a loop ticking five times as often
+        # must read the same: the stream carries the time, not the tick.
+        t0 = 1000.0
+        w = LegWatch()
+        for k in range(15):
+            t = t0 + k * 0.1
+            w.sample(LegState(False, t, t0, 1 + k // 5), t)
+        self.assertEqual(w.sample(LegState(True, t0 + 1.5, None, 0), t0 + 1.5),
+                         "disruption")
+
+    def test_the_outage_starts_when_the_packets_stopped(self):
+        t0 = 1000.0
+        w, _ = self.run_losses(9, t0=t0)
+        w2 = LegWatch()
+        for i in range(9):
+            t = t0 + i * 0.5
+            move = w2.sample(LegState(False, t, t0, i + 1), t)
+        self.assertEqual(move, "down")
+        self.assertEqual(w2.down_since, t0)   # not the tick that noticed
+
+    def test_one_lost_probe_is_never_an_event_at_any_cadence(self):
+        # At a 5 s probe interval a single loss is followed by 5 s with no
+        # sample at all. Measured in seconds alone that would be an outage;
+        # two lost probes are the floor.
+        t0 = 1000.0
+        w = LegWatch()
+        self.assertIsNone(w.sample(LegState(False, t0, t0, 1), t0 + 4.5))
+        self.assertIsNone(w.down_since)
+        self.assertEqual(w.sample(LegState(False, t0 + 5.0, t0, 2), t0 + 5.0),
+                         "down")
 
     def test_recorded_closed_with_a_duration_and_charged(self):
         w, _ = self.run_losses(4)
@@ -2611,6 +2655,78 @@ class SettingsApplyLive(unittest.TestCase):
             dmod.net.route_to = real
         self.assertEqual(self.calls, [("rebuild", {"gateway": "192.0.2.1",
                                                    "iface": "x"})])
+
+
+class LegStateReading(unittest.TestCase):
+    """leg_state() turns a probe stream into what the outage watch consumes:
+    is the newest sample a reply, and if not, since when has it been quiet."""
+
+    def test_empty_and_stale_streams_are_unknown_not_outages(self):
+        now = 1000.0
+        self.assertIsNone(leg_state([], now))
+        # The probe stopped talking: ping -O keeps emitting losses through
+        # a real outage, so a silent stream is a dead probe, not a dead line.
+        self.assertIsNone(leg_state([(now - LEG_STALE_S - 1, None, False)], now))
+
+    def test_a_reply_at_the_head_is_ok(self):
+        now = 1000.0
+        st = leg_state([(now - 1.0, None, False), (now - 0.5, 8.0, False)], now)
+        self.assertTrue(st.ok)
+        self.assertEqual(st.lost, 0)
+        self.assertIsNone(st.run_since)
+
+    def test_the_trailing_run_is_measured_from_its_first_loss(self):
+        now = 1000.0
+        samples = [(now - 3.0, 7.0, False), (now - 2.5, None, False),
+                   (now - 2.0, None, False), (now - 1.5, None, False),
+                   (now - 1.0, None, False)]
+        st = leg_state(samples, now)
+        self.assertFalse(st.ok)
+        self.assertEqual(st.run_since, now - 2.5)
+        self.assertEqual(st.lost, 4)
+        self.assertEqual(st.ts, now - 1.0)
+
+    def test_a_merged_stream_ends_the_run_on_any_instruments_reply(self):
+        # ICMP at 2 Hz losing everything while the TCP instrument answers:
+        # the newest sample decides, whichever instrument produced it.
+        now = 1000.0
+        merged = sorted([(now - 1.5, None, False), (now - 1.0, None, False),
+                         (now - 0.5, None, False),      # icmp
+                         (now - 0.2, 21.0, False)],     # tcp, replied
+                        key=lambda s: s[0])
+        self.assertTrue(leg_state(merged, now).ok)
+
+    def test_a_two_second_blip_is_now_seen_end_to_end(self):
+        # The case the old any-reply window could not register at all.
+        t0 = 1000.0
+        w = LegWatch()
+        stream = [(t0 - 0.5, 6.0, False)]
+        move = None
+        for k in range(4):                          # 4 losses over 1.5 s
+            stream.append((t0 + k * 0.5, None, False))
+            move = w.sample(leg_state(stream, t0 + k * 0.5), t0 + k * 0.5)
+        self.assertIsNone(move)
+        stream.append((t0 + 2.0, 6.5, False))
+        move = w.sample(leg_state(stream, t0 + 2.0), t0 + 2.0)
+        self.assertEqual(move, "disruption")
+        self.assertEqual(w.blip, (t0, t0 + 2.0))
+
+    def test_outage_rows_start_when_the_silence_began(self):
+        # The arbiters take the run's start, so the stored row carries the
+        # true onset rather than the tick that crossed the threshold.
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(Path(d) / "t.db")
+            try:
+                now = time.time()
+                WanEventArbiter(store, lambda *a, **k: None).down(
+                    now, False, since=now - OUTAGE_AFTER_S)
+                LocalEventArbiter(store, lambda *a, **k: None).down(
+                    now, True, since=now - OUTAGE_AFTER_S)
+                rows = {e["kind"]: e["ts"] for e in store.events()}
+                self.assertEqual(rows["outage"], int(now - OUTAGE_AFTER_S))
+                self.assertEqual(rows["gateway-quiet"], int(now - OUTAGE_AFTER_S))
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

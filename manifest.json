@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.x3me.nexthop",
   "name": "Nexthop",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "author": "Extreme Labs",
   "license": "MIT",
   "description": "Splits your Wi-Fi from your ISP, hop by hop. Continuous latency, jitter and loss on both legs of your connection, with history, outage detection and speed tests.",

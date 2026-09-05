@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import NamedTuple
 from collections import deque
 
 from . import __version__, apps, linkevents, net, score, speedtest
@@ -28,28 +29,36 @@ from .state import write_atomic
 from .store import Store
 from .update import UpdateWatch
 
-# Consecutive losses on a leg before we call it down. A "loss" is one empty
-# 3 s any-reply window sampled every 0.5 s (see the CAUTION below), so eight
-# is about 6.5 s of unbroken silence — long enough to skip a Wi-Fi roam,
-# short enough that the alarm still feels immediate. This comment said
-# "four seconds" from 0.1.0 until the audit that found it.
-OUTAGE_AFTER_LOSSES = 8
-# A run of losses shorter than an outage but longer than noise: an
-# interruption the user may well have felt — a call breaking up, a stream
-# rebuffering — that used to leave no trace at all and cost Reliability
-# nothing, because only runs reaching OUTAGE_AFTER_LOSSES were ever
-# recorded.
+# Unbroken silence on a leg — no probe of any kind answering — before we
+# call it down. Measured on the probe stream itself, from the timestamp of
+# the first lost sample after the last reply, so it means four seconds
+# whatever the probe cadence or the loop's tick. Long enough to skip a
+# Wi-Fi roam, short enough that the alarm still feels immediate.
 #
-# CAUTION, and the comment first written here got this wrong: a "loss" is
-# NOT a lost probe. `watch_outages` runs every 0.5 s but asks whether any
-# probe replied in the last 3 s, so one loss already means ~3 s of unbroken
-# silence, three mean ~4.0 s and eight mean ~6.5 s. The band this threshold
-# opens is therefore only ~4.0-6.5 s wide, and an interruption shorter than
-# 3 s registers nothing at all — which is most of the blips it was meant to
-# catch. Lowering this number cannot help; the fix is to count losses from
-# the probe stream instead of from a rolling any-reply window, and that
-# touches the outage path so it wants its own change.
-DISRUPTION_AFTER_LOSSES = 3
+# History, because it cost a year: until 0.2.15 this was a COUNT of loop
+# ticks (eight) in which a 3 s any-reply window came back empty, so a
+# "loss" was three seconds wide, an outage took ~6.5 s while every comment
+# said four, and an interruption shorter than 3 s could not register at
+# all. Reading the stream is what makes the number mean what it says.
+OUTAGE_AFTER_S = 4.0
+# A run of silence shorter than an outage but longer than noise: an
+# interruption the user may well have felt — a call breaking up, a stream
+# rebuffering. Recorded at recovery, when its length is known, and charged
+# to Reliability at half weight (score.reliability). Three lost probes at
+# the default 500 ms.
+DISRUPTION_AFTER_S = 1.5
+# One lost probe is never an event, at any cadence. At a slow probe interval
+# a single loss is followed by seconds with no sample at all, and measured
+# in seconds alone that would read as an outage.
+MIN_LOST_SAMPLES = 2
+# A stream whose newest sample is older than this has stopped talking — a
+# dead ping process, a stopped probe — which is not an outage. `ping -O`
+# and the TCP probe keep emitting losses through a real one, so a stale
+# stream is never mistaken for a dead line: it is unknown, and not counted.
+LEG_STALE_S = 6.0
+# How far back to read a leg's stream for the start of the current run. Past
+# OUTAGE_AFTER_S with margin; the watch remembers an older start itself.
+LEG_STREAM_WINDOW_S = 12.0
 
 # Probes needed on each side of the idle/loaded split before their ratio is
 # reported. Below this the comparison is sampling noise.
@@ -416,40 +425,79 @@ def _short_duration(seconds):
     return "%d h %d min" % (s // 3600, (s % 3600) // 60)
 
 
+class LegState(NamedTuple):
+    """What a leg's probe stream says right now — see leg_state()."""
+    ok: bool             # the newest sample is a reply
+    ts: float            # timestamp of the newest sample
+    run_since: object    # first lost sample of the trailing run; None when ok
+    lost: int            # lost samples in that run; 0 when ok
+
+
+def leg_state(samples, now: float):
+    """Read a leg's recent samples into a LegState, or None when the stream
+    is empty or stale — the probe stopped talking, which is not an outage.
+
+    `samples` are (ts, rtt_or_None, ...) in time order: one Series, or the
+    MergedSeries of the seated instruments. The trailing run of losses is
+    the whole question — how long since anything answered, counted from the
+    first sample that did not. This replaces a rolling "did anything reply
+    in the last 3 s" window, whose width was silently added to every
+    threshold built on it.
+    """
+    if not samples:
+        return None
+    ts = samples[-1][0]
+    if now - ts > LEG_STALE_S:
+        return None
+    lost, run_since = 0, None
+    for smp in reversed(samples):
+        if smp[1] is not None:
+            break
+        lost += 1
+        run_since = smp[0]
+    if lost == 0:
+        return LegState(True, ts, None, 0)
+    return LegState(False, ts, run_since, lost)
+
+
 class LegWatch:
-    """Outage state for one leg: counts consecutive losses, opens and
-    closes events, and remembers what to say when it recovers."""
+    """Outage state for one leg: how long its stream has been silent, when
+    that silence became an outage, and what a recovered run looked like."""
 
     def __init__(self):
-        self.losses = 0
         self.down_since = None
-        self.run_since = None      # when the current run of losses began
+        self.run_since = None      # first lost sample of the current run
+        self.lost = 0              # lost samples seen in that run
         self.blip = None           # (from, to) of a run that just recovered
 
-    def sample(self, ok: bool, now: float):
+    def sample(self, state: LegState, now: float):
         """Returns 'down' / 'up' / 'disruption' on a transition, else None.
 
         `disruption` is a run that recovered before reaching the outage
         threshold. It is reported at recovery rather than at onset because
         that is the first moment its length is known, and its length is what
-        Reliability charges.
+        Reliability charges. Both thresholds are seconds of silence on the
+        stream, from the first lost sample to the first reply after it.
         """
-        if ok:
-            run, began = self.losses, self.run_since
-            self.losses = 0
-            self.run_since = None
+        if state.ok:
+            began, lost = self.run_since, self.lost
+            self.run_since, self.lost = None, 0
             if self.down_since is not None:
                 self.down_since = None
                 return "up"
-            if run >= DISRUPTION_AFTER_LOSSES and began is not None:
-                self.blip = (began, now)
+            if (began is not None and lost >= MIN_LOST_SAMPLES
+                    and state.ts - began >= DISRUPTION_AFTER_S):
+                self.blip = (began, state.ts)
                 return "disruption"
             return None
-        if self.losses == 0:
-            self.run_since = now
-        self.losses += 1
-        if self.losses == OUTAGE_AFTER_LOSSES and self.down_since is None:
-            self.down_since = now
+        # The run began when the packets started going missing, not when we
+        # noticed: keep the earliest start seen for this run.
+        if self.run_since is None or state.run_since < self.run_since:
+            self.run_since = state.run_since
+        self.lost = max(self.lost, state.lost)
+        if (self.down_since is None and self.lost >= MIN_LOST_SAMPLES
+                and now - self.run_since >= OUTAGE_AFTER_S):
+            self.down_since = self.run_since
             return "down"
         return None
 
@@ -487,15 +535,18 @@ class WanEventArbiter:
     def real_outage(self) -> bool:
         return self.kind == "outage"
 
-    def down(self, now, app_ok: bool):
+    def down(self, now, app_ok: bool, since=None):
+        # `since` is when the silence began; the row carries the onset, not
+        # the tick that crossed the threshold.
+        began = int(since if since is not None else now)
         if app_ok:
             self.kind = "icmp-quiet"
             self.event_id = self.store.open_event(
-                int(now), "icmp-quiet", "warn", "wan", self.QUIET_DETAIL)
+                began, "icmp-quiet", "warn", "wan", self.QUIET_DETAIL)
             return
         self.kind = "outage"
         self.event_id = self.store.open_event(
-            int(now), "outage", "critical", "wan",
+            began, "outage", "critical", "wan",
             "router answers, nothing past it does")
         # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
         self._notify_at = now + NOTIFY_AFTER_S
@@ -700,15 +751,16 @@ class LocalEventArbiter:
     def real_outage(self) -> bool:
         return self.kind == "outage"
 
-    def down(self, now, beyond_ok: bool):
+    def down(self, now, beyond_ok: bool, since=None):
+        began = int(since if since is not None else now)
         if beyond_ok:
             self.kind = "gateway-quiet"
             self.event_id = self.store.open_event(
-                int(now), "gateway-quiet", "warn", "local", self.QUIET_DETAIL)
+                began, "gateway-quiet", "warn", "local", self.QUIET_DETAIL)
             return
         self.kind = "outage"
         self.event_id = self.store.open_event(
-            int(now), "outage", "critical", "local", "router unreachable")
+            began, "outage", "critical", "local", "router unreachable")
         # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
         self._notify_at = now + NOTIFY_AFTER_S
         self._notified = False
@@ -1034,32 +1086,37 @@ class Daemon:
                 pass
 
     def watch_outages(self, now: float):
-        """Outage logic on the freshest sample of each series.
+        """Outage logic on each leg's probe stream (leg_state / LegWatch).
 
-        The wan watch counts a loss only when the local leg answered, or
+        The wan watch counts silence only when the local leg answered, or
         when the gateway is merely quiet (LocalEventArbiter): if the router
         is confirmed unreachable, the internet probes' losses say nothing
         about the ISP.
-        """
-        recent_local = self.local.since(3.0)
-        recent_total = self.total.since(3.0)
-        local_ok = any(s[1] is not None for s in recent_local) if recent_local else None
-        total_ok = any(s[1] is not None for s in recent_total) if recent_total else None
 
-        if local_ok is not None:
-            move = self.watch_local.sample(local_ok, now)
+        Arbitration is judged on the run itself — did anything beyond the
+        leg answer DURING the silence — not on a trailing window: a reply
+        from just before a 1.5 s blip must not vouch for the blip.
+        """
+        local = leg_state(self.local.since(LEG_STREAM_WINDOW_S), now)
+        total = leg_state(self.total.since(LEG_STREAM_WINDOW_S), now)
+        local_ok = None if local is None else local.ok
+
+        if local is not None:
+            move = self.watch_local.sample(local, now)
             if move == "down":
                 # Is anything past the gateway answering? If so the gateway
                 # is forwarding and merely refuses pings — see
                 # LocalEventArbiter.
-                self.local_events.down(now, self._any_instrument_alive(4.5))
+                since = self.watch_local.down_since
+                self.local_events.down(
+                    now, self._any_instrument_replied_between(since, now), since)
             elif move == "up":
                 self.local_events.up(now)
             elif move == "disruption":
-                self.record_disruption("local", self.watch_local,
-                                       self._any_instrument_alive(4.5))
+                self.record_disruption("local", self.watch_local)
             elif self.watch_local.down_since is not None:
-                self.local_events.tick(now, self._any_instrument_alive(5.0))
+                self.local_events.tick(
+                    now, self._any_instrument_alive(OUTAGE_AFTER_S))
 
         # The wan watch normally ignores any window where the local leg lost
         # packets: if the router is unreachable, the internet probe's losses
@@ -1069,37 +1126,43 @@ class Daemon:
         # applies to a confirmed local outage, not to a quiet gateway.
         gateway_quiet = (self.watch_local.down_since is not None
                          and not self.local_events.real_outage)
-        if total_ok is not None and (local_ok is not False or gateway_quiet):
-            move = self.watch_wan.sample(total_ok, now)
+        if total is not None and (local_ok is not False or gateway_quiet):
+            move = self.watch_wan.sample(total, now)
             if move == "down":
-                # Did TCP keep answering while the pings failed? Samples
-                # are stamped at send time, so a handshake that merely
-                # straddled the moment the line died cannot vouch for the
-                # window after it.
-                self.wan_events.down(now, self._any_instrument_alive(4.5))
+                # Did another instrument keep answering while the seated
+                # pair fell silent? Samples are stamped at send time, so a
+                # handshake that merely straddled the moment the line died
+                # cannot vouch for the window after it.
+                since = self.watch_wan.down_since
+                self.wan_events.down(
+                    now, self._any_instrument_replied_between(since, now), since)
             elif move == "up":
                 self.wan_events.up(now)
                 # The internet is back — or something answering for it is.
                 # Ask the reachability check now rather than wait its hour.
                 self.captive.request()
             elif move == "disruption":
-                self.record_disruption("wan", self.watch_wan,
-                                       self._any_instrument_alive(4.5))
+                self.record_disruption("wan", self.watch_wan)
             elif self.watch_wan.down_since is not None:
-                self.wan_events.tick(now, self._any_instrument_alive(5.0))
+                self.wan_events.tick(
+                    now, self._any_instrument_alive(OUTAGE_AFTER_S))
 
-    def record_disruption(self, leg: str, watch, beyond_ok: bool):
+    def record_disruption(self, leg: str, watch, beyond_ok=None):
         """A run that recovered before it became an outage.
 
         Arbitrated exactly like an outage: if something past this leg kept
-        answering, the leg did not interrupt anything — a gateway dropping
-        three pings while traffic crosses it is not a disruption, and
-        logging it would fill the log with noise the user never felt.
+        answering DURING the run, the leg did not interrupt anything — a
+        gateway dropping three pings while traffic crosses it is not a
+        disruption, and logging it would fill the log with noise the user
+        never felt. `beyond_ok` is computed from the run's own interval
+        unless a caller supplies it.
         """
         if not watch.blip:
             return
         began, ended = watch.blip
         watch.blip = None
+        if beyond_ok is None:
+            beyond_ok = self._any_instrument_replied_between(began, ended)
         if beyond_ok:
             return
         # Stored closed, with its duration, because Reliability charges
@@ -1114,10 +1177,22 @@ class Daemon:
 
     def _any_instrument_alive(self, window_s: float) -> bool:
         """Some instrument — seated or benched — heard the internet this
-        recently. The outage arbiter treats that as proof the leg carries."""
+        recently. While a leg is down, the arbiters read this each tick to
+        decide whether a quiet spell has become an outage."""
         for series in self._instrument_series.values():
             if any(s[1] is not None for s in series.since(window_s)):
                 return True
+        return False
+
+    def _any_instrument_replied_between(self, a: float, b: float) -> bool:
+        """Did some instrument hear the internet during [a, b]? Judged on the
+        interval itself, so a reply from just before a run of silence cannot
+        vouch for it — which a trailing window longer than the run would."""
+        span = max(0.0, time.time() - a) + 1.0
+        for series in self._instrument_series.values():
+            for smp in series.since(span):
+                if smp[1] is not None and a <= smp[0] <= b:
+                    return True
         return False
 
     def adopt_wan_ip(self):
