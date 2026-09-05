@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "readout.js" as Readout
 
 // The local leg in detail: signal on a labelled scale, link facts, and the
 // airtime counters that explain "signal looks fine but Wi-Fi feels slow".
@@ -340,18 +341,8 @@ Column {
             if (best.local !== null && best.local !== undefined)
               parts.push("lag " + best.local.toFixed(1) + " ms")
             var label = parts.join("  ·  ")
-            ctx.font = "10px " + tab.panel.fontFamily
-            ctx.textBaseline = "top"
-            var w = ctx.measureText(label).width + 12
-            var bx = Math.max(2, Math.min(width - w - 2, cx - w / 2))
-            var bg = Color.popups.background
-            ctx.fillStyle = Qt.rgba(bg.r, bg.g, bg.b, 0.92)
-            ctx.fillRect(bx, 2, w, 16)
-            ctx.strokeStyle = Qt.rgba(tab.panel.fg.r, tab.panel.fg.g,
-                                      tab.panel.fg.b, 0.25)
-            ctx.strokeRect(bx + 0.5, 2.5, w - 1, 15)
-            ctx.fillStyle = tab.panel.fg
-            ctx.fillText(label, bx + 6, 6)
+            Readout.draw(ctx, tab.panel.fontFamily, label, cx, width,
+                         tab.panel.fg, Color.popups.background)
           }
         }
       }

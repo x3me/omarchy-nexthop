@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import qs.Commons
+import "readout.js" as Readout
 
 // The two-leg latency chart: local leg as a dim band from the baseline, wan
 // leg stacked on top in the accent colour, loss as ticks along the floor.
@@ -24,11 +25,6 @@ Canvas {
   property bool showScale: false
   property string fontFamily: Style.font.family
   // Hover crosshair with the values under the cursor. -1 = no hover.
-  // Cap height of the 10 px readout font, used to centre its ink in the
-  // box. JetBrains Mono is ~0.73 em; anything in that neighbourhood is
-  // within a pixel, which is the resolution that matters here.
-  readonly property real readoutCapHeight: 7.3
-
   property real hoverX: -1
   property color readoutBg: Color.popups.background
   property color readoutFg: Color.popups.text
@@ -191,24 +187,8 @@ Canvas {
           parts.push("loss " + Math.round(best.loss * 100) + "%")
         var label = parts.join("  ·  ")
 
-        ctx.font = "10px " + fontFamily
-        // Centring this needed measuring, not guessing. The box runs y=2..18
-        // so its centre is 10. A "top" baseline at 6 put the line flush
-        // against the bottom border; "middle" then sat it ~1.6 px high,
-        // because that baseline centres the EM box and this label is digits
-        // and lower-case with no descenders, so its ink rides high inside
-        // that box. Placing the alphabetic baseline instead centres the ink
-        // itself: it runs from baseline-capHeight to baseline, so the
-        // baseline belongs half a cap-height below the box centre.
-        ctx.textBaseline = "alphabetic"
-        var w = ctx.measureText(label).width + 12
-        var bx = Math.max(2, Math.min(width - w - 2, cx - w / 2))
-        ctx.fillStyle = Qt.rgba(readoutBg.r, readoutBg.g, readoutBg.b, 0.92)
-        ctx.fillRect(bx, 2, w, 16)
-        ctx.strokeStyle = Qt.rgba(readoutFg.r, readoutFg.g, readoutFg.b, 0.25)
-        ctx.strokeRect(bx + 0.5, 2.5, w - 1, 15)
-        ctx.fillStyle = readoutFg
-        ctx.fillText(label, bx + 6, 10 + readoutCapHeight / 2)
+        Readout.draw(ctx, fontFamily, label, cx, width,
+                     readoutFg, readoutBg)
       }
     }
   }
