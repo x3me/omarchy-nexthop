@@ -8,7 +8,8 @@ Item {
   id: root
 
   property var live: null
-  // What the wan probe actually pings — the honest label for the far node.
+  // The configured anchor: the far node's fallback label when no WAN
+  // address has been proven yet (see middle/far node text below).
   property string anchor: ""
   property color textColor: Color.popups.text
   property color dimColor: Color.muted

@@ -1,4 +1,4 @@
-"""Persistent ping probes and the rolling windows they feed.
+"""Persistent ping and TCP-handshake probes, and the rolling windows they feed.
 
 One long-lived `ping` process per target rather than one process per sample.
 At two samples a second, spawning a process each time would mean 172,800
@@ -265,9 +265,10 @@ class TcpProbe(threading.Thread):
     connection per sample, opened and closed — no payload, no TLS, nothing
     kept.
 
-    Reported beside the ICMP number rather than replacing it: the gap
-    between the two is the measurement, and it has to be trusted before it
-    can move a score.
+    Since 0.2.0 these are seated instruments in the bench (instruments.py):
+    the two best of four feed the scored internet leg, so a TCP series moves
+    the score whenever it holds a seat. The anchor's ICMP figure is still
+    recorded beside it per minute (`lag_icmp`) so the switch stays auditable.
     """
 
     daemon = True

@@ -1,9 +1,9 @@
 """The nexthopd main loop.
 
 Owns the probes, folds their samples into live.json / recent.json /
-history.db, detects outages, and runs the scheduled content check. The QML
-side never talks to this process — the files are the whole contract, so
-either side can restart without the other noticing.
+apps.json / history.db, detects outages, and runs the scheduled content
+check. The QML side never talks to this process — the files are the whole
+contract, so either side can restart without the other noticing.
 """
 
 import fcntl
@@ -28,9 +28,11 @@ from .state import write_atomic
 from .store import Store
 from .update import UpdateWatch
 
-# Consecutive losses on a leg before we call it down. At 500 ms per probe,
-# eight of them is four seconds — long enough to skip a Wi-Fi roam, short
-# enough that the notification still feels immediate.
+# Consecutive losses on a leg before we call it down. A "loss" is one empty
+# 3 s any-reply window sampled every 0.5 s (see the CAUTION below), so eight
+# is about 6.5 s of unbroken silence — long enough to skip a Wi-Fi roam,
+# short enough that the alarm still feels immediate. This comment said
+# "four seconds" from 0.1.0 until the audit that found it.
 OUTAGE_AFTER_LOSSES = 8
 # A run of losses shorter than an outage but longer than noise: an
 # interruption the user may well have felt — a call breaking up, a stream
@@ -62,10 +64,11 @@ MIN_LOAD_SPLIT_SAMPLES = 10
 # floor, and the guard the socket metric already has.
 MIN_PLAUSIBLE_INFLATION = 0.95
 
-# The application-path probe: a TCP handshake to the anchor's TLS port,
-# once a second. Slower than the ICMP cadence on purpose — this exists to
-# characterise the gap against ICMP, not to detect outages, and it opens a
-# real connection to someone else's server every time it runs.
+# The TCP instruments: a handshake to port 443, once a second per target.
+# Slower than the ICMP cadence on purpose — each one opens a real connection
+# to someone else's server. Since 0.2.0 these are seated instruments in the
+# bench, so a TCP series feeds the scored internet leg and the outage watch
+# whenever it holds a seat (instruments.py).
 TCP_PROBE_INTERVAL_S = 1.0
 TCP_PROBE_PORT = 443
 # The rest of the instrument pool (see instruments.py). Cloudflare edge
@@ -97,7 +100,7 @@ def proc_start_ticks(pid):
         return None
 # An interruption that self-heals in under this is recorded but not
 # notified. The constant was written with 0.1.0 and never read: outages
-# alarmed the instant they were declared, so a four-second blip on a flaky
+# alarmed the instant they were declared, so a six-second blip on a flaky
 # link fired a desktop notification the user could do nothing about. The
 # event is always logged; only the interruption goes quiet.
 NOTIFY_AFTER_S = 5.0
@@ -454,19 +457,21 @@ class LegWatch:
 
 
 class WanEventArbiter:
-    """What a wan-leg "down" means, given the second probe's testimony.
+    """What a wan-leg "down" means, given the other instruments' testimony.
 
-    Eight lost pings say the anchor went quiet; only both probes failing
-    say the internet did. An ISP or middlebox that stops answering ICMP
-    while TCP still flows used to be recorded — notified, and charged to
-    Reliability — as an outage the user never experienced.
+    Eight empty windows say the scored probes went quiet; only every
+    instrument failing says the internet did. An ISP or middlebox that
+    stops answering one probe while others still flow used to be recorded
+    — notified, and charged to Reliability — as an outage the user never
+    experienced.
 
-    A down with the TCP probe still answering opens an `icmp-quiet` event
-    instead: in the log, excluded from outage_stats, no notification.
-    Escalation is one-way — if TCP stops answering during a quiet spell,
-    the quiet event closes and a real outage opens, because an outage that
-    begins mid-spell must still alarm. Nothing downgrades the other way:
-    flapping between verdicts would teach people to ignore both.
+    A down with any instrument still answering opens an `icmp-quiet` event
+    instead (the kind predates the bench; the stored name was not worth a
+    migration): in the log, excluded from outage_stats, no notification.
+    Escalation is one-way — if the rest stop answering during a quiet
+    spell, the quiet event closes and a real outage opens, because an
+    outage that begins mid-spell must still alarm. Nothing downgrades the
+    other way: flapping between verdicts would teach people to ignore both.
     """
 
     QUIET_DETAIL = ("Scored probes went quiet; another instrument on "
@@ -528,13 +533,13 @@ class CaptiveWatch:
 
     A probe reply proves a packet came back; it does not prove what sent it.
     So this asks for two things at once and only claims interception when it
-    has both: something IS answering our probes, and the content check
+    has both: something IS answering our probes, and the reachability check
     cannot prove the real internet answered. Packets going somewhere, but
     not to the internet, is what a captive portal looks like from here.
 
-    Neither half is enough alone. Probes answering with no content check is
-    the state we were in before, and it read as a healthy internet. A failed
-    content check with nothing answering is simply no internet, which the
+    Neither half is enough alone. Probes answering with no reachability check
+    is the state we were in before, and it read as a healthy internet. A
+    failed check with nothing answering is simply no internet, which the
     wan arbiter already handles — calling that "captive" would put a sign-in
     prompt in front of a user whose line is down.
 
@@ -1035,9 +1040,10 @@ class Daemon:
     def watch_outages(self, now: float):
         """Outage logic on the freshest sample of each series.
 
-        The wan watch only counts a loss when the local leg answered — if
-        the router itself is unreachable, the internet probe's losses say
-        nothing about the ISP.
+        The wan watch counts a loss only when the local leg answered, or
+        when the gateway is merely quiet (LocalEventArbiter): if the router
+        is confirmed unreachable, the internet probes' losses say nothing
+        about the ISP.
         """
         recent_local = self.local.since(3.0)
         recent_total = self.total.since(3.0)

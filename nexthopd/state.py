@@ -1,10 +1,13 @@
-"""The two JSON files the QML side reads.
+"""Reading and writing the JSON state files, safely.
 
-live.json is rewritten at the probe cadence and is all the bar widget ever
-looks at. recent.json is a pre-downsampled 30-minute window so the panel's
-default graphs paint without a subprocess. Both are written to a temp file
-and renamed, so a reader never sees a half-written file — QML's FileView
-would happily parse one and blank the widget.
+live.json is rewritten twice a second and is all the bar widget ever looks
+at; recent.json is a pre-downsampled 30-minute window so the panel's default
+graphs paint without a query; apps.json is per-application traffic. All are
+written to a temp file and renamed, so a reader never sees a half-written
+file. The QML side does not open any of them itself (0.1.9): `nexthop
+stream` reads them through `read_text_bounded` — no symlink following, a
+regular file or nothing, a size cap on the read itself — and hands the shell
+one re-serialised line per record.
 """
 
 import json

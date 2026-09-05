@@ -291,8 +291,14 @@ def trace_verdict(raw) -> str:
 
     `open` is the only positive claim, and it needs the response to parse as
     a trace with an address `ipaddress` accepts. Something that answered with
-    anything else is `intercepted`. Nothing at all is `silent`, which is not
-    the same thing and must not be reported as one.
+    anything else is `intercepted`. Nothing at all is `silent`.
+
+    Honest limit: the fetch runs `curl -f`, so a portal that answers with a
+    4xx/5xx, a redirect with an empty body, or a certificate that does not
+    validate for the host all come back as nothing — `silent`. In practice
+    `intercepted` needs a portal that serves a 200 over a certificate valid
+    for speed.cloudflare.com, which is rare. The captive decision does not
+    care (both verdicts count against `open`); only this label does.
     """
     if not raw:
         return "silent"

@@ -78,7 +78,7 @@
       "x": -560,
       "y": 720,
       "w": 440,
-      "text": "Five tabs, one panel.\n\nOverview answers \"is it me or is it them\" in one glance. The other four are for when the answer is them.\n\nThe Overview artboard has a state switch above it \u2014 flip it to degraded or outage to see the bad days, including the recommendation strip."
+      "text": "Five tabs, one panel (the shipped panel has since grown to seven: Apps, Events and a Setup cog).\n\nOverview answers \"is it me or is it them\" in one glance. The other four are for when the answer is them.\n\nThe Overview artboard has a state switch above it \u2014 flip it to degraded or outage to see the bad days, including the recommendation strip."
     },
     {
       "id": "arch",

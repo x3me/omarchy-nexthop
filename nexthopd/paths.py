@@ -1,7 +1,9 @@
 """Where Nexthop keeps its state.
 
-One directory, three files the QML side reads, and a lock so two daemons
-never fight over them. Honours XDG_STATE_HOME like the rest of Omarchy.
+One directory: the four files the daemon writes (live.json, recent.json,
+apps.json, history.db), the config.json the panel writes for it, and a lock
+so two daemons never fight over them. Honours XDG_STATE_HOME like the rest
+of Omarchy.
 """
 
 import os

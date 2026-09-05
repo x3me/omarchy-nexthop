@@ -1418,7 +1418,7 @@ class WanArbitration(unittest.TestCase):
         self.store.close()
         self.dir.cleanup()
 
-    def test_quiet_when_tcp_still_answers(self):
+    def test_quiet_when_another_instrument_still_answers(self):
         t = time.time()
         self.arb.down(t, app_ok=True)
         self.assertFalse(self.arb.real_outage)
@@ -1429,7 +1429,7 @@ class WanArbitration(unittest.TestCase):
         self.assertIsNotNone(evs[0]["ended_ts"])
         self.assertEqual(self.notices, [])
 
-    def test_outage_when_both_probes_fail(self):
+    def test_outage_when_every_instrument_fails(self):
         t = time.time()
         self.arb.down(t, app_ok=False)
         self.assertTrue(self.arb.real_outage)
@@ -1457,7 +1457,7 @@ class WanArbitration(unittest.TestCase):
             self.arb.tick(t + NOTIFY_AFTER_S + i, app_ok=False)
         self.assertEqual(len(self.notices), 1)
 
-    def test_escalates_one_way_when_tcp_stops_too(self):
+    def test_escalates_one_way_when_the_rest_stop_too(self):
         t = time.time()
         self.arb.down(t, app_ok=True)
         self.arb.tick(t + 2, app_ok=True)        # still quiet, still no alarm
@@ -2128,6 +2128,9 @@ class DisruptionProducer(unittest.TestCase):
         # Timed from the FIRST loss, not from the threshold being crossed:
         # the interruption started when the packets started going missing.
         self.assertEqual(began, t0)
+        # 1.5 s of sample() calls at the 0.5 s cadence — NOT 1.5 s of silence.
+        # Each sample already summarises a 3 s any-reply window, so three of
+        # them mean ~4 s without a reply (see DISRUPTION_AFTER_LOSSES).
         self.assertEqual(ended, t0 + 1.5)
 
     def test_reaching_the_outage_threshold_is_an_outage_not_a_disruption(self):

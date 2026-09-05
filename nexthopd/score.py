@@ -1,9 +1,10 @@
 """Turning measurements into the three component scores and the index.
 
 The shape follows Orb: Responsiveness, Reliability and Speed each score
-0-100 and weigh equally, because the alternative — ranking a connection by
-its download number — is exactly the habit that leaves people with a fast
-line that feels broken on a video call.
+0-100, and the index is the weakest of them with a nudge from the other two
+(`index`, 0.1.10 — a plain mean let one dead dimension hide behind two good
+ones). Ranking a connection by its download number alone is exactly the
+habit that leaves people with a fast line that feels broken on a video call.
 
 Every threshold below is an anchor table rather than a formula. Anchors are
 arguable in public, which is the point: someone who disagrees that 60 ms of

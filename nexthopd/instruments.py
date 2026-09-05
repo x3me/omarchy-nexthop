@@ -15,14 +15,14 @@ time, like the score anchors:
 
     penalty = 2000·loss + (p95 − p50) + 0.1·p50
 
-Loss dominates (5 % of packets lost outweighs 100 ms of tail spread), the
+Loss dominates (5 % of packets lost costs as much as 100 ms of tail spread), the
 tail spread comes second because Lag leans on p75, and the median is a
 tiebreak — an instrument must not win its seat merely by being close.
 
 Damping, because re-selection is where naive versions of this oscillate:
 a challenger must beat the worst active instrument by 20 % on two
-consecutive evaluations; an instrument whose seat changes more than three
-times an hour is quarantined for thirty minutes; and a dead active
+consecutive evaluations; an instrument whose seat changes three or more
+times in an hour is quarantined for thirty minutes; and a dead active
 instrument is replaced immediately, hysteresis notwithstanding — waiting
 two rounds to bench a corpse helps nobody.
 

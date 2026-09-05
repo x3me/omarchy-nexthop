@@ -34,14 +34,16 @@ the router owns the problem.
 - **You won't feel it.** About 3 % of one CPU core and ~30 MB of memory —
   no fan, no stutter, nothing competing with your work.
 - **It doesn't clog your line.** The probes are pings and payload-free
-  handshakes; background checks are a few MB an hour and can be turned
-  off. Nothing saturates your connection unless you press the button.
+  handshakes and add up to a few MB an hour; the hourly speed check is
+  about 14 MB and can be turned off. Nothing saturates your connection
+  unless you press the button.
 - **Private by construction.** Everything it measures stays on your machine
   — no account, no cloud, no telemetry. Even your own IP is shown masked, so
   a screenshot of the panel is safe to post. The one thing it asks the
   outside world is whether a newer version exists: once a day it asks the
   repository you installed from, sends nothing about you, and shows a small
-  marker if so. Turn that off in Setup > Plugins and it asks nothing.
+  marker if so. Turn that off in the panel's Setup tab (the cog) and it
+  asks nothing.
 
 ## Made for Omarchy
 
@@ -63,9 +65,10 @@ what changed before applying it. Nexthop checks once a day whether a newer
 version is published and marks the panel header if so; it never installs
 anything itself.
 
-Requirements: `python3`, `ping`, `curl`, `ss` (all present on a stock
-Omarchy), `iw` for Wi-Fi detail, optionally `speedtest` (Ookla) for peak
-tests.
+Requirements: `python3`, `ping`, `curl`, `ss`, `ip` and `git` (all present on
+a stock Omarchy; `git` only serves the daily update check), `iw` for Wi-Fi
+detail, `wl-copy` for Copy report, optionally `nmcli` for the metered flag
+and `speedtest` (Ookla) for peak tests.
 
 | Latency, by leg | Speed |
 |---|---|
@@ -88,9 +91,10 @@ The event log, naming who did what — including the router that kicks:
 - **Panel tabs**: Overview (is it me or is it them), Latency (window picker,
   per-leg stats, latency under load), Speed (content history + last peak),
   Wi-Fi (the local leg in detail, airtime, link events), Apps (who is using
-  the connection), Events (what happened + Copy report). Arrow keys or 1–6
+  the connection), Events (what happened + Copy report), and a Setup cog
+  with the four settings worth reaching from the panel. Arrow keys or 1–6
   switch tabs.
-- **CLI**: `bin/nexthop live | query --window 24h | events | tests | report`
+- **CLI**: `bin/nexthop live | query --window 24h | events | tests | report | peak`
   — all JSON except `report`.
 - **IPC**: `omarchy-shell io.github.x3me.nexthop toggle | speedTest |
   showTab Latency`
@@ -102,9 +106,12 @@ The event log, naming who did what — including the router that kicks:
   your ISP; the gateway leg is your Wi-Fi.
 - **Lag** — one number for how the connection feels, folding latency, jitter
   (RFC 3550 IPDV) and packet loss, reported as best / typical / worst.
-- **An experience index (0–100)** from three equally weighted components:
+- **An experience index (0–100)** from three components — the weakest sets
+  the number and the other two nudge it, so one broken dimension cannot
+  hide behind two good ones:
   - *Responsiveness* — scored from lag
-  - *Reliability* — uptime; it only bites during true outages
+  - *Reliability* — uptime, charged in time: outages in full, brief
+    self-healed interruptions at half
   - *Speed* — scored from small periodic **content checks** (~14 MB,
     hourly by default), not from saturating speed tests. No configuration:
     the score answers "is it fast enough" on an experience-anchored curve
@@ -132,8 +139,9 @@ The event log, naming who did what — including the router that kicks:
   (`ss -tinp`, no root, no packet capture), each with a one-minute history
   strip and session totals. What Linux won't attribute without privileges
   (QUIC/UDP, overhead) is shown as its own bucket rather than hidden.
-- **Outage detection** with one notification when a disruption starts and
-  one when it clears — naming the leg that failed. A wan outage needs the
+- **Outage detection** with a notification once an outage has lasted a few
+  seconds and one when it clears — naming the leg that failed. Brief
+  self-healed interruptions are logged, never notified. A wan outage needs the
   probes to agree: if TCP handshakes keep succeeding while pings go
   unanswered, the log records an "ICMP went quiet" event instead — no
   alarm for downtime you are not having.
@@ -146,7 +154,8 @@ The event log, naming who did what — including the router that kicks:
 
 The QML plugin is a thin reader. All measurement lives in **nexthopd**, a
 Python 3 daemon (standard library only, no pip), spawned and supervised by
-the plugin's shell service. Four files are the whole contract:
+the plugin's shell service. Five files are the whole contract — four the
+daemon writes, one the panel writes for it:
 
 | file | cadence | consumer |
 |---|---|---|
@@ -154,6 +163,7 @@ the plugin's shell service. Four files are the whole contract:
 | `~/.local/state/nexthop/recent.json` | every 5 s | the panel's 30-min graphs |
 | `~/.local/state/nexthop/apps.json` | every 3 s | the Apps tab |
 | `~/.local/state/nexthop/history.db` | 1-min rows | `nexthop query`, longer windows |
+| `~/.local/state/nexthop/config.json` | when a setting changes | the daemon — the one file the panel writes |
 
 The daemon never talks to the shell, so either side restarts without the
 other noticing — and your history survives every theme change.
@@ -171,27 +181,24 @@ outside Cloudflare, so a Cloudflare incident cannot silence the whole
 pool. The **two best** instruments — fewest losses, steadiest tails,
 re-ranked every five minutes with flap damping — feed the score; the rest
 idle at a tenth of the rate. One anchor having a bad day stops being your
-connection's bad day. Beyond the pool, nothing is contacted except the
-speed-test hosts named at the end.
+connection's bad day. Beyond the pool, the only other contacts are the
+speed-test hosts named at the end and the once-a-day update check against
+the repository you installed from.
 
 | Probe | Where | Cost |
 | --- | --- | --- |
-| ICMP | your gateway, and the anchor while seated | ~11 MB/day at the default 500 ms interval |
+| ICMP | your gateway, and the anchor while seated | ~30 MB/day per target on the wire at the default 500 ms — two 84-byte packets a second; the gateway's share never leaves your LAN |
 | TCP handshakes | the instrument pool, port 443, ~1/s while seated | ~20 MB/day per seated instrument — connections opened and closed, no payload |
 | Reachability check | speed.cloudflare.com/cdn-cgi/trace | one ~1 KB HTTPS request when the network changes and hourly after that; every 30 s only while a sign-in page is suspected. Proves the real internet answered, and supplies the WAN address |
 | Content check | speed.cloudflare.com | ~14 MB each, hourly, and can be turned off |
 | Peak test | Ookla / Cloudflare / fast.com | up to ~600 MB, **only ever when you ask** |
+| Update check | the repository you installed from (`git ls-remote`) | one request a day, carrying nothing about you; off in the Setup tab |
 
-The TCP and HTTPS probes exist because ICMP is not what applications
+The TCP probes exist because ICMP is not what applications
 experience: routers commonly answer pings from hardware while real traffic
 waits in the queues that actually cause delay, and they rate-limit pings
 under load. Measuring both, against the same host, shows the difference
 rather than assuming it.
-
-The HTTPS request needs a name TLS can validate, so a bare-IP anchor is
-mapped to the name serving that same address — `one.one.one.one` *is*
-`1.1.1.1`. An anchor with no such name is skipped rather than quietly
-redirected somewhere else.
 
 Peak tests size themselves to saturate the line for ~10 s each way — far
 less on a slow one — and run only from the panel, by middle-clicking the
@@ -215,7 +222,7 @@ remove `~/.config/systemd/user/nexthopd.service`.
 ## Development
 
 ```bash
-python3 -m unittest discover -s test    # 145 tests, fixtures from real hardware
+python3 -m unittest discover -s test    # fixtures recorded from real hardware
 python3 -m nexthopd                     # run the daemon in the foreground
 ```
 

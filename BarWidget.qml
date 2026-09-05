@@ -52,7 +52,7 @@ BarWidget {
   }
 
   // Each file has a known small size; a line past its bound is not ours.
-  // live ~1 KB, apps ~8 KB, recent ~30 KB.
+  // live ~3 KB, apps ~8 KB, recent ~30 KB.
   function applyStream(line) {
     var sp = line ? line.indexOf(" ") : -1
     if (sp <= 0) return

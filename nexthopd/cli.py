@@ -1,8 +1,9 @@
 """`nexthop` — the query CLI the panel (and you) use for history.
 
 Everything answers in JSON on stdout, because the consumer is a QML
-Process { } as often as it is a person. The daemon is not involved: reads
-go straight to the sqlite file, which WAL mode makes safe.
+Process { } as often as it is a person. The daemon is not involved: reads go
+straight to the files — sqlite for history (WAL mode makes that safe), the
+JSON state files for the rest.
 
   nexthop query --window 24h     history series at the right resolution
   nexthop live                   the current live.json
@@ -10,6 +11,9 @@ go straight to the sqlite file, which WAL mode makes safe.
   nexthop tests [--kind peak]    speed test results
   nexthop report --window 24h    plain-text summary for an ISP ticket
   nexthop peak                   ask the running daemon for a peak test
+  nexthop stream <keys>          the shell's bounded reader: one JSON line
+                                 per named state file, re-emitted on change
+  nexthop retire --pid --start   SIGTERM a stale daemon, identity-checked
 """
 
 import argparse
@@ -60,7 +64,7 @@ def cmd_live(_args):
 #
 # Keys, never paths: the caller picks from this table, so no argument it
 # passes can widen what gets opened. Caps match each file's real size
-# (live ~1 KB, apps ~8 KB, recent ~30 KB) with generous headroom.
+# (live ~3 KB, apps ~8 KB, recent ~30 KB) with generous headroom.
 STREAMABLE = {
     "live": (live_path, 256 * 1024),
     "apps": (apps_path, 1024 * 1024),

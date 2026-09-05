@@ -1,6 +1,6 @@
 """Speed measurement, two kinds.
 
-Content speed: a short ranged download, run on a schedule, small enough to
+Content speed: a short ranged download and a small upload, on a schedule, small enough to
 be honest about the connection without being a burden on it. This is what
 feeds the Speed score, following Orb's split — score the everyday number,
 keep the fireworks manual.

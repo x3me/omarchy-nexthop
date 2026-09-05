@@ -42,7 +42,9 @@
       "planUpMbps": 0,
       "notifyOutage": true,
       "historyDays": 7,
-      "throughputWindowS": 3
+      "throughputWindowS": 3,
+      "updateCheck": true,
+      "meteredCare": true
     },
     "schema": [
       {
@@ -62,7 +64,7 @@
         "type": "string",
         "label": "Internet anchor",
         "defaultValue": "1.1.1.1",
-        "description": "The host pinged past your router. Its latency minus the router's is your ISP leg."
+        "description": "One of four internet-leg probe targets (pinged, and TCP-handshaked on 443). The scored leg comes from the two best instruments, so this one need not be among them."
       },
       {
         "key": "probeIntervalMs",
@@ -72,14 +74,14 @@
         "max": 5000,
         "step": 250,
         "defaultValue": 500,
-        "description": "500 ms is two samples a second, about 11 MB a day. Raise it to use less."
+        "description": "500 ms is two samples a second, about 30 MB a day per ICMP target on the wire. Raise it to use less."
       },
       {
         "key": "contentSpeed",
         "type": "boolean",
         "label": "Measure content speed automatically",
         "defaultValue": true,
-        "description": "A short ranged download that scores Speed honestly. Roughly 15 MB per check."
+        "description": "A short download and a small upload that score Speed honestly. About 14 MB per check."
       },
       {
         "key": "contentSpeedIntervalMin",
@@ -138,7 +140,7 @@
         "type": "boolean",
         "label": "Notify on outage and recovery",
         "defaultValue": true,
-        "description": "One notification when a disruption starts, one when it clears, naming the leg that failed."
+        "description": "A desktop notification once an outage has lasted a few seconds, and one when it clears, naming the leg that failed. Brief interruptions are logged, never notified."
       },
       {
         "key": "updateCheck",

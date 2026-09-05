@@ -6,7 +6,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// The Nexthop panel: header verdict, five tabs, one alive at a time.
+// The Nexthop panel: header verdict, seven tabs, one alive at a time.
 //
 // All data arrives through files the daemon writes, but never through a
 // file handle the shell holds: `nexthop stream` reads live.json (the
@@ -31,9 +31,6 @@ Panel {
   readonly property color okTone: "#9ece6a"
   readonly property color warnTone: "#e0af68"
 
-  // A newer version is published. The daemon only ever reports this; the
-  // panel only ever mentions it. Updating stays with `omarchy plugin update`,
-  // which shows the diff and asks.
   // Right-now congestion, from score.pressure: the fast channel the index
   // cannot be. Empty unless it is worth saying.
   readonly property string pressureSuffix: {
@@ -48,6 +45,9 @@ Panel {
   property bool instrumentsExpanded: false
   property bool underLoadExpanded: false
 
+  // A newer version is published. The daemon only ever reports this; the
+  // panel only ever mentions it. Updating stays with `omarchy plugin update`,
+  // which shows the diff and asks.
   readonly property bool updateAvailable:
     !!(live && live.update && live.update.available)
 
@@ -55,7 +55,7 @@ Panel {
     return "A newer version of Nexthop is published.\n\n"
       + "omarchy plugin update io.github.x3me.nexthop\n\n"
       + "That shows you what changed before applying it. "
-      + "These checks can be turned off in Setup \u203a Plugins."
+      + "These checks can be turned off in the panel's Setup tab (the cog)."
   }
 
   function bandColor(idx) {
@@ -315,7 +315,8 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
       Keys.onPressed: function(event) {
-        // Left/right walk the tab strip; 1-5 jump straight to a tab.
+        // Left/right walk the tab strip; 1-6 jump straight to a tab (Setup,
+        // the seventh, has no digit — it is reached by arrow, click or IPC).
         if (event.key === Qt.Key_Left) {
           root.currentTab = (root.currentTab + root.tabNames.length - 1) % root.tabNames.length
           event.accepted = true
