@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "format.js" as Fmt
 
 // Who is using the connection: top applications by TCP traffic, with an
 // honest bucket for what no unprivileged tool can attribute (QUIC/UDP,
@@ -19,20 +20,6 @@ Column {
     ? panel.appsData.apps : []
   readonly property var other: panel.appsData ? panel.appsData.other : null
 
-  function fmtRate(bps) {
-    if (bps === null || bps === undefined) return "--"
-    if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"
-    if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " KB/s"
-    return Math.round(bps) + " B/s"
-  }
-
-  function fmtTotal(bytes) {
-    if (!bytes) return "0 B"
-    if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + " GB"
-    if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + " MB"
-    if (bytes >= 1e3) return (bytes / 1e3).toFixed(0) + " KB"
-    return bytes + " B"
-  }
 
   Item {
     width: parent.width
@@ -104,8 +91,8 @@ Column {
           Text {
             textFormat: Text.PlainText
             anchors.right: parent.right
-            text: "󰇚 " + tab.fmtRate(appRow.modelData.rx_bps)
-              + "   󰕒 " + tab.fmtRate(appRow.modelData.tx_bps)
+            text: "󰇚 " + Fmt.rate(appRow.modelData.rx_bps)
+              + "   󰕒 " + Fmt.rate(appRow.modelData.tx_bps)
             color: tab.panel.dim
             font.family: tab.panel.fontFamily
             font.pixelSize: Style.font.caption
@@ -188,8 +175,8 @@ Column {
             textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: tab.fmtTotal(appRow.modelData.rx_total)
-              + " down · " + tab.fmtTotal(appRow.modelData.tx_total) + " up"
+            text: Fmt.bytes(appRow.modelData.rx_total)
+              + " down · " + Fmt.bytes(appRow.modelData.tx_total) + " up"
             color: tab.panel.dim
             font.family: tab.panel.fontFamily
             font.pixelSize: Style.font.caption
@@ -221,7 +208,7 @@ Column {
       textFormat: Text.PlainText
       anchors.right: parent.right
       text: tab.other
-        ? "󰇚 " + tab.fmtRate(tab.other.rx_bps) + "   󰕒 " + tab.fmtRate(tab.other.tx_bps)
+        ? "󰇚 " + Fmt.rate(tab.other.rx_bps) + "   󰕒 " + Fmt.rate(tab.other.tx_bps)
         : ""
       color: tab.panel.dim
       font.family: tab.panel.fontFamily

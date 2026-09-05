@@ -4,6 +4,7 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 import "readout.js" as Readout
+import "format.js" as Fmt
 
 // Speed: live throughput, content-check history as paired bars, and the
 // last peak result in full.
@@ -37,19 +38,6 @@ Column {
     return Math.max(1, best)
   }
 
-  function fmtBytes(b) {
-    if (b === null || b === undefined) return "--"
-    if (b >= 1e9) return (b / 1e9).toFixed(2) + " GB"
-    if (b >= 1e6) return (b / 1e6).toFixed(0) + " MB"
-    return (b / 1e3).toFixed(0) + " KB"
-  }
-
-  function fmtRate(bps) {
-    if (bps === null || bps === undefined || !isFinite(bps)) return "--"
-    if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"
-    if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " KB/s"
-    return Math.round(bps) + " B/s"
-  }
 
   // ---- live throughput ----------------------------------------------------
   Text {
@@ -74,13 +62,6 @@ Column {
     HoverHandler {
       onPointChanged: flowChart.hoverX = hovered ? point.position.x : -1
       onHoveredChanged: if (!hovered) flowChart.hoverX = -1
-    }
-
-    function fmt(bps) {
-      if (bps === null || bps === undefined) return "--"
-      if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"
-      if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " KB/s"
-      return Math.round(bps) + " B/s"
     }
 
     readonly property var pts: {
@@ -153,7 +134,7 @@ Column {
       ctx.font = "10px " + tab.panel.fontFamily
       ctx.textBaseline = "top"
       ctx.fillStyle = tab.panel.dim
-      ctx.fillText("\u2264 " + fmt(peak), 4, 3)
+      ctx.fillText("\u2264 " + Fmt.rate(peak), 4, 3)
 
       if (hoverX >= 0) {
         var tAt = t0 + hoverX * span / (width - 1)
@@ -172,7 +153,7 @@ Column {
           ctx.lineTo(cx + 0.5, height)
           ctx.stroke()
           var label = Qt.formatTime(new Date(best.t * 1000), "HH:mm:ss")
-            + "  ·  \u2193 " + fmt(best.rx) + "  ·  \u2191 " + fmt(best.tx)
+            + "  ·  \u2193 " + Fmt.rate(best.rx) + "  ·  \u2191 " + Fmt.rate(best.tx)
           Readout.draw(ctx, tab.panel.fontFamily, label, cx, width,
                        tab.panel.fg, Color.popups.background)
         }
@@ -212,26 +193,26 @@ Column {
       width: parent.cell
       label: "RECEIVING"
       tint: Color.accent
-      value: tab.fmtRate(tab.panel.live && tab.panel.live.rates
+      value: Fmt.rate(tab.panel.live && tab.panel.live.rates
         ? tab.panel.live.rates.rx_bps : null)
     }
     BigStat {
       width: parent.cell
       label: "SENDING"
       tint: tab.panel.warnTone
-      value: tab.fmtRate(tab.panel.live && tab.panel.live.rates
+      value: Fmt.rate(tab.panel.live && tab.panel.live.rates
         ? tab.panel.live.rates.tx_bps : null)
     }
     BigStat {
       width: parent.cell
       label: "DOWNLOADED"
-      value: tab.fmtBytes(tab.panel.live && tab.panel.live.rates
+      value: Fmt.bytes(tab.panel.live && tab.panel.live.rates
         ? tab.panel.live.rates.rx_total : null)
     }
     BigStat {
       width: parent.cell
       label: "UPLOADED"
-      value: tab.fmtBytes(tab.panel.live && tab.panel.live.rates
+      value: Fmt.bytes(tab.panel.live && tab.panel.live.rates
         ? tab.panel.live.rates.tx_total : null)
     }
   }

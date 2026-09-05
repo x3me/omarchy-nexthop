@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "format.js" as Fmt
 
 // The default tab: is it me or is it them, in one glance.
 Column {
@@ -270,7 +271,7 @@ Column {
           textFormat: Text.PlainText
           text: {
             var r = tab.live && tab.live.rates ? tab.live.rates.rx_bps : null
-            return "󰇚 " + tab.formatRate(r)
+            return "󰇚 " + Fmt.rate(r)
           }
           color: Color.accent
           font.family: tab.panel.fontFamily
@@ -280,7 +281,7 @@ Column {
           textFormat: Text.PlainText
           text: {
             var r = tab.live && tab.live.rates ? tab.live.rates.tx_bps : null
-            return "󰕒 " + tab.formatRate(r)
+            return "󰕒 " + Fmt.rate(r)
           }
           color: tab.panel.warnTone
           font.family: tab.panel.fontFamily
@@ -319,11 +320,4 @@ Column {
     }
   }
 
-  function formatRate(bps) {
-    if (bps === null || bps === undefined || !isFinite(bps)) return "--"
-    if (bps >= 1e9) return (bps / 1e9).toFixed(2) + " GB/s"
-    if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"
-    if (bps >= 1e3) return (bps / 1e3).toFixed(1) + " KB/s"
-    return Math.round(bps) + " B/s"
-  }
 }

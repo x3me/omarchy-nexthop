@@ -13,6 +13,42 @@ Column {
 
   spacing: Style.space(12)
 
+  // The stats-table vocabulary, declared once for every table in this tab.
+  // There were three identical copies of these three components, scoped
+  // inside their own Grid, plus three formatters differing only in which
+  // dash they printed for a missing value — the "fix it everywhere" trap
+  // readout.js already sprang once. A missing figure is the em dash
+  // throughout now, which is the panel's own grammar for "no value".
+  component StatHead: Text {
+    textFormat: Text.PlainText
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+    font.letterSpacing: 1
+    horizontalAlignment: Text.AlignRight
+  }
+  component StatName: Text {
+    textFormat: Text.PlainText
+    color: tab.panel.dim
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.bodySmall
+  }
+  component StatVal: Text {
+    textFormat: Text.PlainText
+    color: tab.panel.fg
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.bodySmall
+    horizontalAlignment: Text.AlignRight
+  }
+
+  function ms(v) {
+    return v === null || v === undefined ? "\u2014" : v.toFixed(1) + " ms"
+  }
+  function pct(v) {
+    return v === null || v === undefined ? "\u2014"
+      : (v * 100).toFixed(2) + " %"
+  }
+
   Component.onCompleted: panel.requestTests()
 
   // The last peak test that captured latency both ways.
@@ -264,60 +300,36 @@ Column {
     readonly property var local: tab.panel.live ? tab.panel.live.local : null
     readonly property var wan: tab.panel.live ? tab.panel.live.wan : null
 
-    component HeadCell: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.dim
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.caption
-      font.letterSpacing: 1
-      horizontalAlignment: Text.AlignRight
-    }
-    component NameCell: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.dim
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    component ValCell: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.fg
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      horizontalAlignment: Text.AlignRight
-    }
 
-    function ms(v) { return v === null || v === undefined ? "--" : v.toFixed(1) + " ms" }
-    function pct(v) { return v === null || v === undefined ? "--" : (v * 100).toFixed(2) + " %" }
+    StatHead { width: parent.cell; text: "LAST 30 S" ; horizontalAlignment: Text.AlignLeft }
+    StatHead { width: parent.cell; text: "LOCAL LEG" }
+    StatHead { width: parent.cell; text: "WAN LEG" }
 
-    HeadCell { width: parent.cell; text: "LAST 30 S" ; horizontalAlignment: Text.AlignLeft }
-    HeadCell { width: parent.cell; text: "LOCAL LEG" }
-    HeadCell { width: parent.cell; text: "WAN LEG" }
+    StatName { width: parent.cell; text: "median" }
+    StatVal { width: parent.cell; text: tab.ms(parent.local ? parent.local.p50 : null) }
+    StatVal { width: parent.cell; text: tab.ms(parent.wan ? parent.wan.p50 : null) }
 
-    NameCell { width: parent.cell; text: "median" }
-    ValCell { width: parent.cell; text: parent.ms(parent.local ? parent.local.p50 : null) }
-    ValCell { width: parent.cell; text: parent.ms(parent.wan ? parent.wan.p50 : null) }
+    StatName { width: parent.cell; text: "p95" }
+    StatVal { width: parent.cell; text: tab.ms(parent.local ? parent.local.p95 : null) }
+    StatVal { width: parent.cell; text: tab.ms(parent.wan ? parent.wan.p95 : null) }
 
-    NameCell { width: parent.cell; text: "p95" }
-    ValCell { width: parent.cell; text: parent.ms(parent.local ? parent.local.p95 : null) }
-    ValCell { width: parent.cell; text: parent.ms(parent.wan ? parent.wan.p95 : null) }
+    StatName { width: parent.cell; text: "worst" }
+    StatVal { width: parent.cell; text: tab.ms(parent.local ? parent.local.max : null) }
+    StatVal { width: parent.cell; text: tab.ms(parent.wan ? parent.wan.max : null) }
 
-    NameCell { width: parent.cell; text: "worst" }
-    ValCell { width: parent.cell; text: parent.ms(parent.local ? parent.local.max : null) }
-    ValCell { width: parent.cell; text: parent.ms(parent.wan ? parent.wan.max : null) }
+    StatName { width: parent.cell; text: "jitter" }
+    StatVal { width: parent.cell; text: tab.ms(parent.local ? parent.local.jitter : null) }
+    StatVal { width: parent.cell; text: tab.ms(parent.wan ? parent.wan.jitter : null) }
 
-    NameCell { width: parent.cell; text: "jitter" }
-    ValCell { width: parent.cell; text: parent.ms(parent.local ? parent.local.jitter : null) }
-    ValCell { width: parent.cell; text: parent.ms(parent.wan ? parent.wan.jitter : null) }
-
-    NameCell { width: parent.cell; text: "loss" }
-    ValCell {
+    StatName { width: parent.cell; text: "loss" }
+    StatVal {
       width: parent.cell
-      text: parent.pct(parent.local ? parent.local.loss : null)
+      text: tab.pct(parent.local ? parent.local.loss : null)
       color: parent.local && parent.local.loss > 0 ? tab.panel.warnTone : tab.panel.fg
     }
-    ValCell {
+    StatVal {
       width: parent.cell
-      text: parent.pct(parent.wan ? parent.wan.loss : null)
+      text: tab.pct(parent.wan ? parent.wan.loss : null)
       color: parent.wan && parent.wan.loss > 0 ? tab.panel.warnTone : tab.panel.fg
     }
   }
@@ -363,51 +375,28 @@ Column {
     readonly property real cell: (width - Style.space(14) * 2) / 3
     readonly property var s: tab.sockets
 
-    component HeadCell2: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.dim
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.caption
-      font.letterSpacing: 1
-      horizontalAlignment: Text.AlignRight
-    }
-    component NameCell2: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.dim
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    component ValCell2: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.fg
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      horizontalAlignment: Text.AlignRight
-    }
 
-    function ms2(v) { return v === null || v === undefined ? "--" : v.toFixed(1) + " ms" }
+    StatHead { width: parent.cell; text: "TCP, LIVE"; horizontalAlignment: Text.AlignLeft }
+    StatHead { width: parent.cell; text: "TYPICAL" }
+    StatHead { width: parent.cell; text: "WORST" }
 
-    HeadCell2 { width: parent.cell; text: "TCP, LIVE"; horizontalAlignment: Text.AlignLeft }
-    HeadCell2 { width: parent.cell; text: "TYPICAL" }
-    HeadCell2 { width: parent.cell; text: "WORST" }
+    StatName { width: parent.cell; text: "round trip" }
+    StatVal { width: parent.cell; text: tab.ms(parent.s ? parent.s.rtt_p50 : null) }
+    StatVal { width: parent.cell; text: tab.ms(parent.s ? parent.s.rtt_p95 : null) }
 
-    NameCell2 { width: parent.cell; text: "round trip" }
-    ValCell2 { width: parent.cell; text: parent.ms2(parent.s ? parent.s.rtt_p50 : null) }
-    ValCell2 { width: parent.cell; text: parent.ms2(parent.s ? parent.s.rtt_p95 : null) }
+    StatName { width: parent.cell; text: "path floor" }
+    StatVal { width: parent.cell; text: tab.ms(parent.s ? parent.s.floor_p50 : null) }
+    StatVal { width: parent.cell; text: "\u2014" }
 
-    NameCell2 { width: parent.cell; text: "path floor" }
-    ValCell2 { width: parent.cell; text: parent.ms2(parent.s ? parent.s.floor_p50 : null) }
-    ValCell2 { width: parent.cell; text: "\u2014" }
-
-    NameCell2 { width: parent.cell; text: "queueing" }
-    ValCell2 {
+    StatName { width: parent.cell; text: "queueing" }
+    StatVal {
       width: parent.cell
-      text: parent.ms2(parent.s ? parent.s.queue_p50 : null)
+      text: tab.ms(parent.s ? parent.s.queue_p50 : null)
       color: parent.s && parent.s.queue_p50 > 30 ? tab.panel.warnTone : tab.panel.fg
     }
-    ValCell2 {
+    StatVal {
       width: parent.cell
-      text: parent.ms2(parent.s ? parent.s.queue_p95 : null)
+      text: tab.ms(parent.s ? parent.s.queue_p95 : null)
       color: parent.s && parent.s.queue_p95 > 60 ? tab.panel.warnTone : tab.panel.fg
     }
   }
@@ -746,57 +735,32 @@ Column {
     readonly property real cell: (width - Style.space(14) * 2) / 3
     readonly property var u: tab.underLoad
 
-    component H3: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.dim
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.caption
-      font.letterSpacing: 1
-      horizontalAlignment: Text.AlignRight
-    }
-    component N3: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.dim
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.bodySmall
-    }
-    component V3: Text {
-      textFormat: Text.PlainText
-      color: tab.panel.fg
-      font.family: tab.panel.fontFamily
-      font.pixelSize: Style.font.bodySmall
-      horizontalAlignment: Text.AlignRight
-    }
 
-    function ms3(v) {
-      return v === null || v === undefined ? "\u2014" : v.toFixed(1) + " ms"
-    }
+    StatHead { width: parent.cell; text: "PROBES"; horizontalAlignment: Text.AlignLeft }
+    StatHead { width: parent.cell; text: "TYPICAL" }
+    StatHead { width: parent.cell; text: "WORST" }
 
-    H3 { width: parent.cell; text: "PROBES"; horizontalAlignment: Text.AlignLeft }
-    H3 { width: parent.cell; text: "TYPICAL" }
-    H3 { width: parent.cell; text: "WORST" }
-
-    N3 { width: parent.cell; text: "while busy" }
-    V3 {
+    StatName { width: parent.cell; text: "while busy" }
+    StatVal {
       width: parent.cell
-      text: parent.ms3(parent.u ? parent.u.loaded_p50 : null)
+      text: tab.ms(parent.u ? parent.u.loaded_p50 : null)
     }
     // Scoped to the samples taken under load, so a short burst is not
     // averaged away by the quiet either side of it — which is what the
     // headline 30 s window does to it.
-    V3 {
+    StatVal {
       width: parent.cell
-      text: parent.ms3(parent.u ? parent.u.loaded_p95 : null)
+      text: tab.ms(parent.u ? parent.u.loaded_p95 : null)
       color: parent.u && parent.u.loaded_p95 > 100
         ? tab.panel.warnTone : tab.panel.fg
     }
 
-    N3 { width: parent.cell; text: "while quiet" }
-    V3 {
+    StatName { width: parent.cell; text: "while quiet" }
+    StatVal {
       width: parent.cell
-      text: parent.ms3(parent.u ? parent.u.idle_p50 : null)
+      text: tab.ms(parent.u ? parent.u.idle_p50 : null)
     }
-    V3 { width: parent.cell; text: "\u2014" }
+    StatVal { width: parent.cell; text: "\u2014" }
   }
 
   Text {
