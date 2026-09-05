@@ -10,6 +10,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from .probes import nearest_rank
+
 SAMPLE_COLUMNS = [
     "local_p50", "local_p95", "local_jitter", "local_loss",
     "wan_p50", "wan_p95", "wan_jitter", "wan_loss",
@@ -220,7 +222,7 @@ class Store:
                           if r["down_mbps"] is not None)
             if len(vals) < min_samples:
                 return None
-            return vals[min(len(vals) - 1, int(round(0.9 * (len(vals) - 1))))]
+            return nearest_rank(vals, 0.9)
 
         if network:
             rows = self.db.execute(

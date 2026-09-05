@@ -33,6 +33,8 @@ import time
 from collections import deque
 from typing import NamedTuple
 
+from .probes import nearest_rank
+
 # users:(("chrome",pid=4958,fd=66))  — first process owning the socket.
 RE_USER = re.compile(r'users:\(\("([^"]+)",pid=(\d+)')
 RE_SENT = re.compile(r"bytes_sent:(\d+)")
@@ -70,14 +72,6 @@ RTT_INVERSION_TOLERANCE_MS = 0.05
 # Below this many qualifying sockets we publish nothing rather than a
 # distribution drawn from a handful of connections.
 MIN_LATENCY_SOCKETS = 3
-
-
-def _pct(ordered: list, p: float) -> float:
-    """Nearest-rank percentile, matching probes.Series.stats so the two agree."""
-    if len(ordered) == 1:
-        return ordered[0]
-    idx = min(len(ordered) - 1, max(0, int(round(p * (len(ordered) - 1)))))
-    return ordered[idx]
 
 
 def socket_timing(s) -> tuple:
@@ -127,13 +121,13 @@ def latency_stats(socks: dict) -> dict:
         "rejected": rejected,
         # What the applications see, end to end, including distance.
         "rtt_p50": round(statistics.median(srtts), 2),
-        "rtt_p95": round(_pct(srtts, 0.95), 2),
+        "rtt_p95": round(nearest_rank(srtts, 0.95), 2),
         # The structural floor of the paths in use.
         "floor_p50": round(statistics.median(floors), 2),
         # Queueing, with distance divided out. This is the number that
         # compares across connections.
         "queue_p50": round(statistics.median(queues), 2),
-        "queue_p95": round(_pct(queues, 0.95), 2),
+        "queue_p95": round(nearest_rank(queues, 0.95), 2),
         "retrans_sockets": retrans_socks,
     }
 

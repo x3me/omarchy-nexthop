@@ -502,32 +502,43 @@ class LegWatch:
         return None
 
 
-class WanEventArbiter:
-    """What a wan-leg "down" means, given the other instruments' testimony.
+class LegArbiter:
+    """What a leg going quiet MEANS, given whether anything beyond it answered.
 
-    Eight empty windows say the scored probes went quiet; only every
-    instrument failing says the internet did. An ISP or middlebox that
-    stops answering one probe while others still flow used to be recorded
-    — notified, and charged to Reliability — as an outage the user never
-    experienced.
+    A run of losses on one leg is not the same event as the internet being
+    gone. The evidence that separates them is already in hand: if anything
+    past this leg is still answering, packets are crossing it, so it is not
+    unreachable — it is merely refusing our probes. That opens a warn-toned
+    "quiet" event (`QUIET_KIND`) instead of an outage: logged, excluded from
+    outage_stats, no notification, the bar stays calm. Only every path
+    falling silent opens a real `outage`, which alarms once it has lasted
+    NOTIFY_AFTER_S.
 
-    A down with any instrument still answering opens an `icmp-quiet` event
-    instead (the kind predates the bench; the stored name was not worth a
-    migration): in the log, excluded from outage_stats, no notification.
-    Escalation is one-way — if the rest stop answering during a quiet
-    spell, the quiet event closes and a real outage opens, because an
-    outage that begins mid-spell must still alarm. Nothing downgrades the
-    other way: flapping between verdicts would teach people to ignore both.
+    Escalation is one-way. If the far side goes quiet too during a quiet
+    spell, the quiet event closes and a real outage opens, because an outage
+    that begins mid-spell must still alarm. Nothing walks back the other
+    way: flapping between verdicts would teach people to ignore both.
+
+    The two legs differ only in wording — which kind, which detail, which
+    notification — so those are class attributes and the mechanism is shared.
+    Until 0.2.16 this was two classes that had been copied and string-edited
+    apart, which is exactly how 0.2.4's gateway-quiet reached the store
+    correctly and the Events tab not at all: a fix to one copy that missed
+    the other.
     """
 
-    QUIET_DETAIL = ("Scored probes went quiet; another instrument on "
-                    "the same path kept answering")
+    LEG = None            # "wan" | "local"
+    QUIET_KIND = None     # "icmp-quiet" | "gateway-quiet" (names predate the
+    QUIET_DETAIL = None   # bench/arbiter; not worth a stored-value migration)
+    OUTAGE_DETAIL = None
+    ALARM = None          # (summary, body) when a real outage is declared
+    RECOVERED = None      # (summary, body) when a real outage recovers
 
     def __init__(self, store, notify):
         self.store = store
         self.notify = notify
         self.event_id = None
-        self.kind = None          # "outage" | "icmp-quiet" while down
+        self.kind = None          # QUIET_KIND | "outage" while down
         self._notify_at = None    # when the alarm becomes due
         self._notified = False    # whether it actually fired
 
@@ -535,46 +546,78 @@ class WanEventArbiter:
     def real_outage(self) -> bool:
         return self.kind == "outage"
 
-    def down(self, now, app_ok: bool, since=None):
+    def down(self, now, beyond_ok: bool, since=None):
         # `since` is when the silence began; the row carries the onset, not
         # the tick that crossed the threshold.
         began = int(since if since is not None else now)
-        if app_ok:
-            self.kind = "icmp-quiet"
+        if beyond_ok:
+            self.kind = self.QUIET_KIND
             self.event_id = self.store.open_event(
-                began, "icmp-quiet", "warn", "wan", self.QUIET_DETAIL)
+                began, self.QUIET_KIND, "warn", self.LEG, self.QUIET_DETAIL)
             return
         self.kind = "outage"
         self.event_id = self.store.open_event(
-            began, "outage", "critical", "wan",
-            "router answers, nothing past it does")
+            began, "outage", "critical", self.LEG, self.OUTAGE_DETAIL)
         # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
         self._notify_at = now + NOTIFY_AFTER_S
         self._notified = False
 
-    def tick(self, now, app_ok: bool):
-        if self.kind == "icmp-quiet" and not app_ok:
+    def tick(self, now, beyond_ok: bool):
+        if self.kind == self.QUIET_KIND and not beyond_ok:
             self.store.close_event(self.event_id, int(now))
             self.down(now, False)
             return
         if (self.kind == "outage" and not self._notified
                 and self._notify_at is not None and now >= self._notify_at):
             self._notified = True
-            self.notify("No internet",
-                        "The router answers but nothing past it does — "
-                        "the fault is on the ISP side.", True)
+            self.notify(self.ALARM[0], self.ALARM[1], True)
 
     def up(self, now):
         if self.event_id is not None:
             self.store.close_event(self.event_id, int(now))
-            # Only say it came back if we said it went away.
+            # Only say it came back if we said it went away. A recovery
+            # notice with no matching alarm is a message about nothing.
             if self.kind == "outage" and self._notified:
-                self.notify("Internet recovered",
-                            "Replies from the internet again.")
+                self.notify(self.RECOVERED[0], self.RECOVERED[1])
         self.event_id = None
         self.kind = None
         self._notify_at = None
         self._notified = False
+
+
+class WanEventArbiter(LegArbiter):
+    """The internet leg. `beyond_ok` here means some instrument still
+    answered: an ISP or middlebox that stops answering one probe while
+    others still flow used to be recorded — notified, charged to Reliability
+    — as an outage the user never experienced. See LegArbiter."""
+
+    LEG = "wan"
+    QUIET_KIND = "icmp-quiet"
+    QUIET_DETAIL = ("Scored probes went quiet; another instrument on "
+                    "the same path kept answering")
+    OUTAGE_DETAIL = "router answers, nothing past it does"
+    ALARM = ("No internet",
+             "The router answers but nothing past it does — "
+             "the fault is on the ISP side.")
+    RECOVERED = ("Internet recovered", "Replies from the internet again.")
+
+
+class LocalEventArbiter(LegArbiter):
+    """The local leg. `beyond_ok` here means something past the gateway
+    answered, so packets are crossing it and it is not unreachable — just
+    refusing pings, which hotel and captive networks routinely do. This is
+    0.1.17's wan arbitration applied to the leg it had never covered. See
+    LegArbiter."""
+
+    LEG = "local"
+    QUIET_KIND = "gateway-quiet"
+    QUIET_DETAIL = ("Router stopped answering pings; traffic through it "
+                    "kept working")
+    OUTAGE_DETAIL = "router unreachable"
+    ALARM = ("Router unreachable",
+             "Nothing on the local network is answering.")
+    RECOVERED = ("Local network recovered",
+                 "The router is answering again.")
 
 
 class CaptiveWatch:
@@ -712,82 +755,6 @@ class CaptiveWatch:
             return None
         return {"verdict": self.verdict, "captive": self._confirmed,
                 "checked_ts": self.checked_ts}
-
-
-class LocalEventArbiter:
-    """What a local "down" means, given that packets may still be crossing.
-
-    The gateway going silent is not the gateway being unreachable. Plenty of
-    networks — hotel and captive ones especially — rate-limit or simply drop
-    ICMP addressed to the router while forwarding everything through it. On
-    such a link every local ping is lost and the panel used to say ROUTER
-    UNREACHABLE, notify, and charge Reliability, while the machine was
-    online the whole time.
-
-    The evidence that settles it is already in hand: if anything past the
-    gateway is answering, packets are crossing the gateway, so it cannot be
-    unreachable. That opens a `gateway-quiet` event instead — logged,
-    warn-toned, excluded from outage_stats, no notification, and the bar
-    stays its ordinary colour.
-
-    This is 0.1.17's wan arbitration applied to the leg it was never applied
-    to. Escalation is one-way for the same reason: if the far side goes quiet
-    too during a quiet spell, this closes and a real local outage opens,
-    because an outage that begins mid-spell must still alarm.
-    """
-
-    QUIET_DETAIL = ("Router stopped answering pings; traffic through it "
-                    "kept working")
-
-    def __init__(self, store, notify):
-        self.store = store
-        self.notify = notify
-        self.event_id = None
-        self.kind = None          # "outage" | "gateway-quiet" while down
-        self._notify_at = None    # when the alarm becomes due
-        self._notified = False    # whether it actually fired
-
-    @property
-    def real_outage(self) -> bool:
-        return self.kind == "outage"
-
-    def down(self, now, beyond_ok: bool, since=None):
-        began = int(since if since is not None else now)
-        if beyond_ok:
-            self.kind = "gateway-quiet"
-            self.event_id = self.store.open_event(
-                began, "gateway-quiet", "warn", "local", self.QUIET_DETAIL)
-            return
-        self.kind = "outage"
-        self.event_id = self.store.open_event(
-            began, "outage", "critical", "local", "router unreachable")
-        # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
-        self._notify_at = now + NOTIFY_AFTER_S
-        self._notified = False
-
-    def tick(self, now, beyond_ok: bool):
-        if self.kind == "gateway-quiet" and not beyond_ok:
-            self.store.close_event(self.event_id, int(now))
-            self.down(now, False)
-            return
-        if (self.kind == "outage" and not self._notified
-                and self._notify_at is not None and now >= self._notify_at):
-            self._notified = True
-            self.notify("Router unreachable",
-                        "Nothing on the local network is answering.", True)
-
-    def up(self, now):
-        if self.event_id is not None:
-            self.store.close_event(self.event_id, int(now))
-            # Only say it came back if we said it went away. A recovery
-            # notice with no matching alarm is a message about nothing.
-            if self.kind == "outage" and self._notified:
-                self.notify("Local network recovered",
-                            "The router is answering again.")
-        self.event_id = None
-        self.kind = None
-        self._notify_at = None
-        self._notified = False
 
 
 class Daemon:

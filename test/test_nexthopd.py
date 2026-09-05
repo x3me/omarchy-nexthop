@@ -1421,7 +1421,7 @@ class WanArbitration(unittest.TestCase):
 
     def test_quiet_when_another_instrument_still_answers(self):
         t = time.time()
-        self.arb.down(t, app_ok=True)
+        self.arb.down(t, beyond_ok=True)
         self.assertFalse(self.arb.real_outage)
         self.assertEqual(self.notices, [])       # the user's internet works
         self.arb.up(t + 30)
@@ -1432,12 +1432,12 @@ class WanArbitration(unittest.TestCase):
 
     def test_outage_when_every_instrument_fails(self):
         t = time.time()
-        self.arb.down(t, app_ok=False)
+        self.arb.down(t, beyond_ok=False)
         self.assertTrue(self.arb.real_outage)
         # Logged at once; alarmed only once it has lasted — an outage the
         # user could do nothing about should not interrupt them.
         self.assertEqual(self.notices, [])
-        self.arb.tick(t + NOTIFY_AFTER_S + 0.1, app_ok=False)
+        self.arb.tick(t + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.assertEqual(len(self.notices), 1)
         self.arb.up(t + 30)
         self.assertEqual([e["kind"] for e in self.store.events()], ["outage"])
@@ -1445,28 +1445,28 @@ class WanArbitration(unittest.TestCase):
 
     def test_a_brief_outage_is_logged_and_never_alarms(self):
         t = time.time()
-        self.arb.down(t, app_ok=False)
-        self.arb.tick(t + 1, app_ok=False)
+        self.arb.down(t, beyond_ok=False)
+        self.arb.tick(t + 1, beyond_ok=False)
         self.arb.up(t + 2)                       # healed inside the window
         self.assertEqual(self.notices, [])       # neither alarm nor recovery
         self.assertEqual([e["kind"] for e in self.store.events()], ["outage"])
 
     def test_the_alarm_fires_once_not_every_tick(self):
         t = time.time()
-        self.arb.down(t, app_ok=False)
+        self.arb.down(t, beyond_ok=False)
         for i in range(10):
-            self.arb.tick(t + NOTIFY_AFTER_S + i, app_ok=False)
+            self.arb.tick(t + NOTIFY_AFTER_S + i, beyond_ok=False)
         self.assertEqual(len(self.notices), 1)
 
     def test_escalates_one_way_when_the_rest_stop_too(self):
         t = time.time()
-        self.arb.down(t, app_ok=True)
-        self.arb.tick(t + 2, app_ok=True)        # still quiet, still no alarm
+        self.arb.down(t, beyond_ok=True)
+        self.arb.tick(t + 2, beyond_ok=True)        # still quiet, still no alarm
         self.assertEqual(self.notices, [])
-        self.arb.tick(t + 5, app_ok=False)       # now it is an outage
+        self.arb.tick(t + 5, beyond_ok=False)       # now it is an outage
         self.assertTrue(self.arb.real_outage)
         self.assertEqual(self.notices, [])       # still inside the delay
-        self.arb.tick(t + 5 + NOTIFY_AFTER_S + 0.1, app_ok=False)
+        self.arb.tick(t + 5 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.assertEqual(len(self.notices), 1)
         self.arb.up(t + 60)
         evs = self.store.events()
@@ -1477,7 +1477,7 @@ class WanArbitration(unittest.TestCase):
 
     def test_quiet_never_charges_reliability(self):
         t = time.time()
-        self.arb.down(t, app_ok=True)
+        self.arb.down(t, beyond_ok=True)
         self.arb.up(t + 600)
         self.assertEqual(self.store.outage_stats(3600, now=t + 700),
                          (0.0, 0, 0.0))

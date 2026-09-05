@@ -15,6 +15,18 @@ import threading
 import time
 from collections import deque
 
+
+def nearest_rank(ordered, p: float):
+    """Nearest-rank percentile of a NON-EMPTY sorted sequence.
+
+    One implementation shared by the probe stats, the per-app socket stats
+    and the speed baseline, so the three cannot drift apart — they read the
+    same figure off the same rule. The index formula already collapses to
+    element 0 for a single-element input, so no length special-case.
+    """
+    i = min(len(ordered) - 1, max(0, int(round(p * (len(ordered) - 1)))))
+    return ordered[i]
+
 # [1787562260.703963] 64 bytes from 10.10.0.1: icmp_seq=1 ttl=64 time=9.13 ms
 RE_REPLY = re.compile(r"^\[(\d+\.\d+)\].*icmp_seq=(\d+).*time=([\d.]+)\s*ms")
 # [1787562369.690501] no answer yet for icmp_seq=1
@@ -95,12 +107,6 @@ class Series:
 
         ordered = sorted(rtts)
 
-        def pct(p):
-            if len(ordered) == 1:
-                return ordered[0]
-            idx = min(len(ordered) - 1, max(0, int(round(p * (len(ordered) - 1)))))
-            return ordered[idx]
-
         deltas = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))]
         last = next((x[1] for x in reversed(samples) if x[1] is not None), None)
 
@@ -108,8 +114,8 @@ class Series:
             "count": total,
             "loss": loss,
             "p50": round(statistics.median(ordered), 2),
-            "p75": round(pct(0.75), 2),
-            "p95": round(pct(0.95), 2),
+            "p75": round(nearest_rank(ordered, 0.75), 2),
+            "p95": round(nearest_rank(ordered, 0.95), 2),
             "max": round(ordered[-1], 2),
             "jitter": round(statistics.fmean(deltas), 2) if deltas else 0.0,
             "last": round(last, 2) if last is not None else None,
