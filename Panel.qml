@@ -273,7 +273,13 @@ Panel {
   }
 
   // ---- tabs ----------------------------------------------------------------
-  readonly property var tabNames: ["Overview", "Latency", "Speed", "Wi-Fi", "Apps", "Events"]
+  readonly property var tabNames: ["Overview", "Latency", "Speed", "Wi-Fi",
+                                   "Apps", "Events", "Setup"]
+  // Setup carries a glyph rather than a word: it is a destination you visit
+  // rarely, and giving it an equal seventh of the strip would cost the six
+  // tabs that are read constantly. Its name stays in tabNames so the IPC
+  // route (`showTab Setup`) and the arrow keys treat it like any other.
+  readonly property int setupTab: tabNames.length - 1
   property int currentTab: 0
 
   IpcHandler {
@@ -473,8 +479,12 @@ Panel {
               required property int index
               readonly property bool selected: root.currentTab === index
 
-              width: (parent.width - Style.space(6) * (root.tabNames.length - 1))
-                / root.tabNames.length
+              readonly property bool isSetup: index === root.setupTab
+              readonly property real setupWidth: Style.space(34)
+
+              width: isSetup ? setupWidth
+                : (parent.width - Style.space(6) * (root.tabNames.length - 1)
+                   - setupWidth) / (root.tabNames.length - 1)
               height: Style.space(26)
               color: selected
                 ? Style.selectedFillFor(root.fg, Color.accent)
@@ -487,7 +497,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 anchors.centerIn: parent
-                text: tabButton.modelData
+                text: tabButton.isSetup ? "󰒓" : tabButton.modelData  // nf-md-cog
                 color: tabButton.selected ? root.fg : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -495,6 +505,11 @@ Panel {
 
               HoverHandler { id: tabHover }
               TapHandler { onTapped: root.currentTab = tabButton.index }
+              // A glyph does not name itself.
+              PanelToolTip {
+                visible: tabButton.isSetup && tabHover.hovered
+                text: "Settings"
+              }
             }
           }
         }
@@ -506,7 +521,7 @@ Panel {
           width: parent.width
           active: root.opened
           sourceComponent: [overviewTab, latencyTab, speedTab, wifiTab,
-                            appsTab, eventsTab][root.currentTab]
+                            appsTab, eventsTab, settingsTab][root.currentTab]
         }
       }
     }
@@ -518,4 +533,5 @@ Panel {
   Component { id: wifiTab; WifiTab { panel: root } }
   Component { id: appsTab; AppsTab { panel: root } }
   Component { id: eventsTab; EventsTab { panel: root } }
+  Component { id: settingsTab; SettingsTab { panel: root } }
 }
