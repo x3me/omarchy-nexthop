@@ -36,9 +36,17 @@ OUTAGE_AFTER_LOSSES = 8
 # interruption the user may well have felt — a call breaking up, a stream
 # rebuffering — that used to leave no trace at all and cost Reliability
 # nothing, because only runs reaching OUTAGE_AFTER_LOSSES were ever
-# recorded. At the default 500 ms cadence three losses is 1.5 s: past a
-# single dropped ICMP, well short of the 4 s that makes an outage. Argue
-# with the number, not the rule.
+# recorded.
+#
+# CAUTION, and the comment first written here got this wrong: a "loss" is
+# NOT a lost probe. `watch_outages` runs every 0.5 s but asks whether any
+# probe replied in the last 3 s, so one loss already means ~3 s of unbroken
+# silence, three mean ~4.0 s and eight mean ~6.5 s. The band this threshold
+# opens is therefore only ~4.0-6.5 s wide, and an interruption shorter than
+# 3 s registers nothing at all — which is most of the blips it was meant to
+# catch. Lowering this number cannot help; the fix is to count losses from
+# the probe stream instead of from a rolling any-reply window, and that
+# touches the outage path so it wants its own change.
 DISRUPTION_AFTER_LOSSES = 3
 
 # Probes needed on each side of the idle/loaded split before their ratio is
