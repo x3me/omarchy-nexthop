@@ -1,7 +1,5 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
-import qs.Commons
 
 // Nexthop's headless half: keeps nexthopd running.
 //

@@ -20,7 +20,6 @@ Panel {
   manageIpc: false
 
   property var anchorItem: null
-  property bool openedFromHotkey: false
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
@@ -235,13 +234,11 @@ Panel {
 
   // ---- open / close --------------------------------------------------------
   function open() {
-    openedFromHotkey = false
     setCenterHoverRevealSuppressed(false)
     root.controller.show()
   }
 
   function openFromHotkey() {
-    openedFromHotkey = true
     root.controller.show()
     Qt.callLater(function() {
       if (root.opened) setCenterHoverRevealSuppressed(true)

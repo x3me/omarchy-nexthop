@@ -88,7 +88,6 @@ class NlEvents(threading.Thread):
     answers None — and the link log falls back to plain "Roamed to".
     """
 
-    daemon = True
     MAX_CAUSES = 64
     LINE_CAP = 1024
 

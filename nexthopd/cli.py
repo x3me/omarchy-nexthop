@@ -277,14 +277,6 @@ def cmd_peak(_args):
     return 0
 
 
-def fmt_ms(v):
-    return "--" if v is None else f"{v:.1f} ms"
-
-
-def fmt_pct(v):
-    return "--" if v is None else f"{v * 100:.2f}%"
-
-
 def cmd_report(args):
     """The paste-into-a-ticket summary. Plain text by design."""
     store = open_store()

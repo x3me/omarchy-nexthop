@@ -21,7 +21,6 @@ Column {
   id: tab
 
   required property var panel
-  readonly property var live: panel.live
 
   spacing: Style.space(12)
 

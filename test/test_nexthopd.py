@@ -2103,7 +2103,7 @@ class DisruptionProducer(unittest.TestCase):
 
     def run_losses(self, n, cadence=0.5, t0=None):
         t0 = time.time() if t0 is None else t0
-        w = LegWatch("local")
+        w = LegWatch()
         moves = []
         for i in range(n):
             moves.append(w.sample(False, t0 + i * cadence))
@@ -2169,7 +2169,7 @@ class DisruptionProducer(unittest.TestCase):
         # outage_stats drops any row whose end is not after its start, so a
         # blip must never round away to nothing.
         base = time.time()
-        w = LegWatch("local")
+        w = LegWatch()
         w.blip = (base + 0.4, base + 0.6)
         d = _FakeDaemonForDisruption(self.store)
         d.record_disruption("wan", w, beyond_ok=False)

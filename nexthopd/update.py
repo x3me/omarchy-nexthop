@@ -100,7 +100,6 @@ class UpdateWatch:
         self.enabled = enabled
         self.state = "unknown"
         self.checked_ts = None
-        self.remote = None
         self._next = None
 
     def _git(self, *args, capture: bool = True):
@@ -164,7 +163,6 @@ class UpdateWatch:
         remote = self._remote_head()
         if not remote:
             return "unknown"          # offline, no origin, or a junk answer
-        self.remote = remote
         if local == remote:
             return "current"
         # Do we already hold origin's commit? Only objects we have are

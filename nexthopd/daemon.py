@@ -21,7 +21,7 @@ from collections import deque
 
 from . import __version__, apps, linkevents, net, score, speedtest
 from .paths import (ensure_state_dir, live_path, recent_path, db_path,
-                    lock_path, state_dir)
+                    lock_path, apps_path)
 from .instruments import Bench, MergedSeries
 from .probes import Series, PingProbe, TcpProbe
 from .state import write_atomic
@@ -420,11 +420,9 @@ class LegWatch:
     """Outage state for one leg: counts consecutive losses, opens and
     closes events, and remembers what to say when it recovers."""
 
-    def __init__(self, leg: str):
-        self.leg = leg
+    def __init__(self):
         self.losses = 0
         self.down_since = None
-        self.event_id = None
         self.run_since = None      # when the current run of losses began
         self.blip = None           # (from, to) of a run that just recovered
 
@@ -788,8 +786,8 @@ class Daemon:
         # throughput charts held ~17 min under a 30-minute label.
         self.last_recent_flush = 0.0
         self.last_signal = None
-        self.watch_local = LegWatch("local")
-        self.watch_wan = LegWatch("wan")
+        self.watch_local = LegWatch()
+        self.watch_wan = LegWatch()
         self.wan_events = WanEventArbiter(self.store, self.notify)
         self.local_events = LocalEventArbiter(self.store, self.notify)
         self.captive = CaptiveWatch(net.reachability)
@@ -818,7 +816,6 @@ class Daemon:
         self.last_rollup = 0.0
         self.peak_requested = threading.Event()
         self.peak_running = False
-        self.peak_progress = {}
         self._lock_fh = None
 
     # ------------------------------------------------------------- lifecycle
@@ -1021,7 +1018,6 @@ class Daemon:
     def notify(self, summary: str, body: str, urgent: bool = False):
         if not self.config["notifyOutage"]:
             return
-        import shutil, subprocess
         cmd = None
         if shutil.which("omarchy-notification-send"):
             cmd = ["omarchy-notification-send", summary, body]
@@ -1337,6 +1333,15 @@ class Daemon:
                 "drain": score.drain_after_load(window, idle_st.get("p50"))}
 
     def compose_live(self, now: float) -> dict:
+        """live.json, twice a second.
+
+        Some keys here have no panel reader — `reach`, `lag.inflation`,
+        `pressure.source`, `metered.kind`, `update.state`, `sockets.rejected`
+        and a few more. They stay on purpose: `nexthop live` is how every
+        measurement in this file was verified, and a payload trimmed to what
+        the panel draws would leave the operator blind. Trim deliberately,
+        never because a grep found no reader.
+        """
         ls = Series.stats(self.local.since(30))
         ts = Series.stats(self.total.since(30))
         ws = score.wan_from(ts, ls)
@@ -1372,8 +1377,6 @@ class Daemon:
             if st.get("tx_packets"):
                 st["retry_pct"] = round(
                     100.0 * (st.get("tx_retries") or 0) / st["tx_packets"], 2)
-                st["failed_pct"] = round(
-                    100.0 * (st.get("tx_failed") or 0) / st["tx_packets"], 3)
         spd, speed_ctx = self.speed_score(now, network)
 
         band = score.lag_band(ts)
@@ -1553,7 +1556,7 @@ class Daemon:
         tcp_tx = sum(a["tx_bps"] for a in self.app_traffic.rates)
         iface_rx = self.rates[0] or 0.0
         iface_tx = self.rates[1] or 0.0
-        write_atomic(state_dir() / "apps.json", {
+        write_atomic(apps_path(), {
             "v": 1,
             "t": round(now, 1),
             "apps": self.app_traffic.top(8),

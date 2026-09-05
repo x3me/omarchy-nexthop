@@ -124,7 +124,6 @@ class PingProbe(threading.Thread):
     keeps trying while the series simply records losses.
     """
 
-    daemon = True
 
     def __init__(self, target: str, series: Series, interval_ms: int = 500,
                  name: str = "", loaded_fn=None):
@@ -271,7 +270,6 @@ class TcpProbe(threading.Thread):
     recorded beside it per minute (`lag_icmp`) so the switch stays auditable.
     """
 
-    daemon = True
     CONNECT_TIMEOUT_S = 2.0
 
     def __init__(self, target: str, series: Series, interval_s: float = 1.0,

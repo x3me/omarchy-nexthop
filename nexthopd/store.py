@@ -52,7 +52,6 @@ CREATE INDEX IF NOT EXISTS tests_kind_ts ON tests(kind, ts);
 class Store:
     def __init__(self, path: Path, read_only: bool = False):
         self.path = Path(path)
-        self.read_only = read_only
         if read_only:
             uri = f"file:{self.path}?mode=ro"
             self.db = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -201,17 +200,6 @@ class Store:
             "SELECT * FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?",
             (int(now - seconds), limit)).fetchall()
         return [dict(r) for r in rows]
-
-    def best_speed(self, days: int = 30, now: float = None):
-        """The best content result lately."""
-        now = now or time.time()
-        row = self.db.execute(
-            """SELECT MAX(down_mbps) AS d, MAX(up_mbps) AS u FROM tests
-               WHERE ts >= ? AND ok = 1""",
-            (int(now - days * 86400),)).fetchone()
-        if not row:
-            return None, None
-        return row["d"], row["u"]
 
     def baseline_speed(self, days: int = 30, network: str = "",
                        min_samples: int = 5, now: float = None,

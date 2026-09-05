@@ -19,14 +19,6 @@ Column {
     ? panel.appsData.apps : []
   readonly property var other: panel.appsData ? panel.appsData.other : null
 
-  readonly property real peakBps: {
-    var peak = 1024  // 1 KB/s floor so idle bars stay tiny, not full
-    for (var i = 0; i < apps.length; i++)
-      peak = Math.max(peak, apps[i].rx_bps + apps[i].tx_bps)
-    if (other) peak = Math.max(peak, other.rx_bps + other.tx_bps)
-    return peak
-  }
-
   function fmtRate(bps) {
     if (bps === null || bps === undefined) return "--"
     if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " MB/s"

@@ -20,12 +20,6 @@ var BOX_TOP = 2
 var BOX_HEIGHT = 16
 var PAD_X = 6
 
-/** Width the box will occupy for this label, so callers can place it. */
-function width(ctx, fontFamily, label) {
-    ctx.font = "10px " + fontFamily
-    return ctx.measureText(label).width + PAD_X * 2
-}
-
 /**
  * Draw the readout centred on `cx`, kept inside `canvasWidth`.
  * `fg` and `bg` are colour values; the border is fg at low alpha.
