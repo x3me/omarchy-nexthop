@@ -6,6 +6,7 @@ forks a day inside a laptop's idle budget; `ping -i` already does the timing
 for us, and `-O` makes it say so out loud when a packet goes missing.
 """
 
+import collections
 import re
 import shutil
 import socket
@@ -317,6 +318,28 @@ class TcpProbe(threading.Thread):
     """
 
     CONNECT_TIMEOUT_S = 2.0
+    # Linux and macOS both start TCP's retransmit timer at one second, so a
+    # handshake that comes back at or past this did not measure a slow path:
+    # its SYN was dropped and the kernel sent another. The number is the
+    # kernel's constant, not the network's round trip, and folding it into a
+    # latency percentile reports the line as slow when what happened is that
+    # a packet was lost.
+    #
+    # The connect timeout was already drawing this line, in the wrong place
+    # and for the wrong reason: a handshake needing TWO retransmits waits
+    # 1 s + 2 s, exceeds CONNECT_TIMEOUT_S and is recorded as loss, while one
+    # needing a single retransmit returns at ~1 s and was recorded as a round
+    # trip. The same event, accounted two opposite ways, with the boundary
+    # wherever the timeout happened to fall.
+    SYN_RETRANSMIT_MS = 900.0
+    # A retransmit is only distinguishable from a genuinely slow path by what
+    # this same probe usually sees, so the reclassification is withheld unless
+    # the path is demonstrably fast. On a line whose real round trip is near a
+    # second, a one-second sample IS the path and stays a latency sample.
+    RETRANSMIT_MAX_TYPICAL_MS = 200.0
+    # Enough recent replies to have a typical worth comparing against. Below
+    # this the sample is kept as measured rather than guessed at.
+    RETRANSMIT_TYPICAL_SAMPLES = 8
 
     def __init__(self, target: str, series: Series, interval_s: float = 1.0,
                  name: str = "", loaded_fn=None, port: int = 443):
@@ -328,6 +351,11 @@ class TcpProbe(threading.Thread):
         self.loaded_fn = loaded_fn
         self._stop = threading.Event()
         self.ever_connected = False
+        # The recent round trips this probe has actually seen, for the
+        # comparison above. Bounded, and its own — the series it feeds is
+        # merged with other instruments and cannot answer "what does THIS
+        # path usually do".
+        self._recent = collections.deque(maxlen=32)
 
     def stop(self):
         self._stop.set()
@@ -356,8 +384,25 @@ class TcpProbe(threading.Thread):
             sock.close()
         except OSError:
             pass
+        # The handshake completed, so the target is reachable, whatever the
+        # kernel had to do to get there.
         self.ever_connected = True
+        if self._is_retransmit(rtt):
+            # Loss on new connections, which is what it is. Recorded the same
+            # way a refused or timed-out connect already is, so it charges the
+            # loss term and Reliability rather than the latency percentiles.
+            self.series.add(started, None, self._loaded())
+            return
+        self._recent.append(rtt)
         self.series.add(started, round(rtt, 2), self._loaded())
+
+    def _is_retransmit(self, rtt_ms: float) -> bool:
+        """Did this handshake wait on the kernel's timer rather than the path?"""
+        if rtt_ms < self.SYN_RETRANSMIT_MS:
+            return False
+        if len(self._recent) < self.RETRANSMIT_TYPICAL_SAMPLES:
+            return False
+        return statistics.median(self._recent) <= self.RETRANSMIT_MAX_TYPICAL_MS
 
     def run(self):
         while not self._stop.is_set():

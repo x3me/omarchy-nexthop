@@ -15,6 +15,7 @@ from nexthopd import score  # noqa: E402
 from nexthopd.probes import (  # noqa: E402
     Series,
     PingProbe,
+    TcpProbe,
     RE_REPLY,
     RE_PENDING,
     RE_UNREACH)
@@ -134,6 +135,76 @@ class PingParsing(unittest.TestCase):
         stats = Series.stats(s.all())
         self.assertEqual(stats["count"], 2)
         self.assertEqual(stats["loss"], 0.5)
+
+
+class SynRetransmits(unittest.TestCase):
+    """A one-second handshake is the kernel's timer, not the path.
+
+    Found 2026-09-10 from the HopSense side and confirmed here in this
+    machine's own history: an internet-leg p95 sitting at 1032-1041 ms,
+    constant to within 1% across a twenty-minute episode, while p50 was
+    5.5 ms, p75 under 10, and `lag_icmp` never left 12-22 ms. Congestion does
+    not produce the same number twenty times; a timer does. Folded through
+    `lag = p75 + 1.5 * jitter` those samples read as 473 ms of lag and took
+    Responsiveness to 26 on a link ICMP called healthy.
+    """
+
+    def probe(self, typical_ms=8.0, samples=None):
+        s = Series()
+        p = TcpProbe("192.0.2.1", s, 1.0)
+        for _ in range(samples if samples is not None
+                       else p.RETRANSMIT_TYPICAL_SAMPLES):
+            p._recent.append(typical_ms)
+        return p
+
+    def test_a_one_second_handshake_on_a_fast_path_is_a_retransmit(self):
+        p = self.probe(typical_ms=8.0)
+        self.assertTrue(p._is_retransmit(1004.0))
+        self.assertTrue(p._is_retransmit(p.SYN_RETRANSMIT_MS))
+
+    def test_an_ordinary_round_trip_is_not(self):
+        p = self.probe(typical_ms=8.0)
+        for rtt in (8.0, 45.0, 300.0, 899.0):
+            self.assertFalse(p._is_retransmit(rtt), rtt)
+
+    def test_a_genuinely_slow_path_keeps_its_latency(self):
+        """The wrong-direction guard.
+
+        On a line whose real round trip is near a second, a one-second sample
+        IS the path. Calling it loss would score that line BETTER than it is,
+        because the loss term costs far less than a 1000 ms percentile — the
+        flattering direction, which is the one that gets shipped by accident.
+        """
+        p = self.probe(typical_ms=950.0)
+        self.assertFalse(p._is_retransmit(1004.0))
+
+    def test_nothing_is_reclassified_before_the_path_is_known(self):
+        p = self.probe(typical_ms=8.0, samples=0)
+        self.assertFalse(p._is_retransmit(1004.0))
+        p = self.probe(typical_ms=8.0,
+                       samples=TcpProbe.RETRANSMIT_TYPICAL_SAMPLES - 1)
+        self.assertFalse(p._is_retransmit(1004.0))
+
+    def test_the_typical_is_this_probe_own_and_stays_bounded(self):
+        # The series it feeds is merged with other instruments and cannot
+        # answer "what does THIS path usually do".
+        p = self.probe(typical_ms=8.0)
+        for i in range(500):
+            p._recent.append(float(i))
+        self.assertLessEqual(len(p._recent), 32)
+
+    def test_the_two_retransmit_case_was_already_loss(self):
+        """Why the old boundary was arbitrary.
+
+        Two retransmits wait 1 s + 2 s, which is past CONNECT_TIMEOUT_S, so
+        that handshake already timed out and was recorded as loss. One
+        retransmit came back inside the timeout and was recorded as latency.
+        The same event, accounted two opposite ways, and the line between them
+        was wherever the timeout happened to fall.
+        """
+        self.assertLess(TcpProbe.CONNECT_TIMEOUT_S * 1000.0, 3000.0)
+        self.assertLess(TcpProbe.SYN_RETRANSMIT_MS,
+                        TcpProbe.CONNECT_TIMEOUT_S * 1000.0)
 
 
 class Stats(unittest.TestCase):
