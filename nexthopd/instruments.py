@@ -34,7 +34,7 @@ tested.
 import statistics
 from collections import deque
 
-from .probes import Series
+from .probes import RECENT_MIN_SAMPLES, RECENT_WINDOW_S, Series
 
 DEAD_PENALTY = 2000.0     # loss = 1.0 and nothing else to say
 
@@ -72,9 +72,9 @@ class Bench:
     """Holds the pool, decides who sits in the two scored seats."""
 
     ACTIVE_N = 2
-    WINDOW_S = 300.0          # ranking window
+    WINDOW_S = RECENT_WINDOW_S  # ranking window, shared with TcpProbe
     RESELECT_EVERY_S = 300.0  # ordinary re-ranking cadence
-    MIN_SAMPLES = 8           # below this a window judges nothing
+    MIN_SAMPLES = RECENT_MIN_SAMPLES  # below this a window judges nothing
     MARGIN = 0.8              # challenger must be 20% better than the seat
     CONSECUTIVE_WINS = 2
     FLAP_WINDOW_S = 3600.0

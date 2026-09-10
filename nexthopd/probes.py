@@ -36,6 +36,25 @@ RE_PENDING = re.compile(r"^\[(\d+\.\d+)\]\s+no answer yet for icmp_seq=(\d+)")
 RE_UNREACH = re.compile(r"^\[(\d+\.\d+)\].*icmp_seq=(\d+).*(?:Unreachable|unreachable)")
 
 
+# How much recent history judges an instrument, and the fewest samples that
+# can carry a judgement at all.
+#
+# Shared, deliberately, by the two places that ask "what has this instrument
+# been doing lately": the bench, which ranks instruments over a window, and
+# TcpProbe, which needs its own recent p50 to tell a retransmit from a slow
+# path. They live here rather than on the bench because `instruments` imports
+# this module and not the other way round, and an alias in the direction the
+# imports already run is the only one Python will take.
+#
+# The point of aliasing rather than repeating the number: two literals plus a
+# test catches drift on the next test run, an alias makes the drift
+# impossible. `test_the_window_matches_what_the_bench_ranks_on` is kept even
+# though it now passes by construction — it catches someone replacing an
+# alias with a literal, which is the drift it was written against.
+RECENT_WINDOW_S = 300.0
+RECENT_MIN_SAMPLES = 8
+
+
 class Series:
     """A rolling window of (timestamp, rtt_ms or None) for one target.
 
@@ -334,11 +353,10 @@ class TcpProbe(threading.Thread):
     # One initial RTO, with slop for timer granularity and scheduling. The
     # first retransmit fires at 1000 ms on Linux, macOS and Windows alike.
     RETRANSMIT_MARGIN_MS = 900.0
-    # The baseline is this instrument's own recent p50, over the same window
-    # and sample floor the bench ranks instruments on, so "recent" means the
-    # same thing everywhere in the daemon.
-    RETRANSMIT_WINDOW_S = 300.0
-    RETRANSMIT_MIN_SAMPLES = 8
+    # The baseline is this instrument's own recent p50 over the shared window
+    # above — aliases, not copies, so "recent" cannot come to mean two things.
+    RETRANSMIT_WINDOW_S = RECENT_WINDOW_S
+    RETRANSMIT_MIN_SAMPLES = RECENT_MIN_SAMPLES
 
     def __init__(self, target: str, series: Series, interval_s: float = 1.0,
                  name: str = "", loaded_fn=None, port: int = 443):

@@ -243,10 +243,52 @@ class SynRetransmits(unittest.TestCase):
         self.assertIsNone(p._baseline_ms(1020.0 + TcpProbe.RETRANSMIT_WINDOW_S))
 
     def test_the_window_matches_what_the_bench_ranks_on(self):
-        # "Recent" should mean one thing across the daemon.
+        """"Recent" means one thing across the daemon.
+
+        These are aliases of the same constants now, so this passes by
+        construction — and it is kept for exactly that reason. What it catches
+        is someone replacing an alias with a literal, which is the drift it was
+        written against in the first place.
+        """
         from nexthopd.instruments import Bench
         self.assertEqual(TcpProbe.RETRANSMIT_WINDOW_S, Bench.WINDOW_S)
         self.assertEqual(TcpProbe.RETRANSMIT_MIN_SAMPLES, Bench.MIN_SAMPLES)
+
+    def test_an_even_count_takes_the_mean_of_the_middle_two(self):
+        """Pinned because a port has to choose, and the choice is invisible.
+
+        Rust has no `statistics.median`, so HopSense had to pick a convention
+        for an even sample count and matched this one. Left unpinned, the two
+        runtimes would differ by one sample's worth of RTT in a baseline
+        nobody ever looks at, for ever.
+        """
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        for i, rtt in enumerate((10.0, 20.0, 30.0, 40.0)):
+            p._recent.append((1000.0 + i, rtt))
+        p.RETRANSMIT_MIN_SAMPLES = 4
+        self.assertAlmostEqual(p._baseline_ms(1010.0), 25.0)
+
+    def test_the_deque_is_bounded_however_long_the_probe_runs(self):
+        # The window bounds what is READ; the deque bounds what is HELD, and a
+        # probe outlives many windows.
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        for i in range(3072):
+            p._recent.append((1000.0 + i, 8.5))
+        self.assertLessEqual(len(p._recent), 1024)
+
+    def test_the_floor_is_consulted_before_the_baseline_ever_is(self):
+        # Below the floor nothing is reclassified, baseline or no baseline.
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        self.assertEqual(p._classify(1000.0, 899.9), "reply")
+        self.assertEqual(p._classify(1000.0, 900.0), "unknown")
+
+    def test_a_baseline_needs_the_full_count_and_not_one_fewer(self):
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        for i in range(TcpProbe.RETRANSMIT_MIN_SAMPLES - 1):
+            p._recent.append((1000.0 + i, 8.5))
+        self.assertIsNone(p._baseline_ms(1010.0))
+        p._recent.append((1010.0, 8.5))
+        self.assertIsNotNone(p._baseline_ms(1010.0))
 
     def test_the_two_retransmit_case_was_already_loss(self):
         """Why the old boundary was arbitrary.
