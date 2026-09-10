@@ -1,4 +1,5 @@
-"""Tests for speedtest.py — target vetting, pass sizing, and JSON we did not write.
+"""Tests for speedtest.py — target vetting, rate accounting, pass sizing, and
+JSON we did not write.
 
 Run: python3 -m unittest discover -s test
 """
@@ -154,6 +155,141 @@ class RemoteJsonShapes(unittest.TestCase):
             r.stdout = body
             speedtest.subprocess.run = lambda *a, r=r, **k: r
             self.assertIsNone(speedtest._peak_ookla(), body)
+
+
+class PayloadTimedRate(unittest.TestCase):
+    """What the rate is divided by.
+
+    curl's own speed_download divides the bytes by the WHOLE request, setup
+    included. That biases every reading low by a share that grows with the
+    line rate, because the setup cost is fixed while the useful part of the
+    transfer keeps getting shorter — so the faster the connection, the worse
+    it reads. A user with an 893 Mbps line saw ~220 (issue #2), and the check
+    could not report above ~480 on a scale whose top anchors are 500 and 750.
+
+    The property worth pinning is not any one number: it is that the error no
+    longer depends on the line.
+    """
+
+    def rate(self, size, setup_s, payload_s):
+        from nexthopd import speedtest
+        return speedtest._rate_over_payload(size, setup_s + payload_s, setup_s)
+
+    def test_setup_time_is_not_counted_as_transfer(self):
+        # 1.5 MB (12 Mbit) carried in 100 ms, after 90 ms of connect and TLS.
+        self.assertAlmostEqual(self.rate(1_500_000, 0.09, 0.10), 120.0, places=6)
+
+    def test_the_error_no_longer_grows_with_the_line(self):
+        # The check's own shape: 3 MB per stream over four streams, one fixed
+        # 90 ms of setup, three very different lines. Timed over the payload
+        # each comes back as itself; timed over the whole request the gigabit
+        # one would read barely half its rate.
+        for line_mbps in (50.0, 400.0, 1000.0):
+            per_stream = line_mbps / 4
+            payload = (3_000_000 * 8 / 1e6) / per_stream
+            got = self.rate(3_000_000, 0.09, payload) * 4
+            self.assertAlmostEqual(got / line_mbps, 1.0, places=6,
+                                   msg="%s Mbps read as %s" % (line_mbps, got))
+
+    def test_the_shipping_sizing_can_time_a_gigabit_line(self):
+        # 3 MB over four streams is 96 ms of payload per stream at 1 Gbps —
+        # above the floor, so the figure stands. It stops being timeable a
+        # little under 2 Gbps, and is then withheld rather than guessed at.
+        from nexthopd import speedtest
+        per_stream_at_1g = (3_000_000 * 8 / 1e6) / (1000.0 / 4)
+        self.assertGreater(per_stream_at_1g, speedtest.MIN_TIMED_WINDOW_S)
+        per_stream_at_2g = (3_000_000 * 8 / 1e6) / (2000.0 / 4)
+        self.assertLess(per_stream_at_2g, speedtest.MIN_TIMED_WINDOW_S)
+
+    def test_a_window_too_short_to_time_is_withheld(self):
+        # 3 MB at 2 Gbps is 12 ms of payload. Dividing by a window that small
+        # publishes the timing error, not the line — and in the flattering
+        # direction. Withhold instead, the way every other figure here does.
+        self.assertIsNone(self.rate(3_000_000, 0.09, 0.012))
+
+    def test_the_floor_is_the_window_not_the_total(self):
+        # A long setup does not make a short payload measurable.
+        self.assertIsNone(self.rate(3_000_000, 5.0, 0.01))
+        self.assertIsNotNone(self.rate(3_000_000, 0.0, 0.20))
+
+    def test_nothing_transferred_is_not_a_rate(self):
+        self.assertIsNone(self.rate(0, 0.09, 1.0))
+
+    def test_an_impossible_window_is_withheld_not_negated(self):
+        from nexthopd import speedtest
+        self.assertIsNone(speedtest._rate_over_payload(1_000_000, 0.05, 0.20))
+
+
+class RateAccountingContract(unittest.TestCase):
+    """The curl invocations have to keep asking for the fields we divide by."""
+
+    def source(self, fn):
+        import inspect
+        return inspect.getsource(fn)
+
+    def test_downloads_are_timed_from_the_first_byte(self):
+        from nexthopd import speedtest
+        for fn in (speedtest._curl_timed_download, speedtest._parallel_download):
+            src = self.source(fn)
+            self.assertIn("%{time_starttransfer}", src)
+            self.assertNotIn("%{speed_download}", src)
+
+    def test_uploads_are_timed_from_the_handshake(self):
+        # Not time_starttransfer: on a POST that is the first byte of the
+        # RESPONSE, which arrives after the body has already gone. Measured
+        # against a local server: starttransfer landed part way through a
+        # 2 MB body, so it cannot mark where the payload began.
+        from nexthopd import speedtest
+        src = self.source(speedtest._curl_timed_upload)
+        self.assertIn("%{time_appconnect}", src)
+        self.assertNotIn("%{speed_upload}", src)
+
+
+class ParallelStreamAccounting(unittest.TestCase):
+    """Summing streams, when some of them cannot be timed."""
+
+    class FakeProc:
+        def __init__(self, out, rc=0):
+            self._out, self.returncode = out, rc
+
+        def communicate(self, timeout=None):
+            return self._out, None
+
+        def kill(self):
+            pass
+
+        def wait(self):
+            pass
+
+    def parallel(self, outputs):
+        from nexthopd import speedtest
+        queue = list(outputs)
+        real_popen = speedtest.subprocess.Popen
+        speedtest.subprocess.Popen = lambda *a, **k: self.FakeProc(queue.pop(0))
+        try:
+            return speedtest._parallel_download("https://x/y", len(outputs), 5)
+        finally:
+            speedtest.subprocess.Popen = real_popen
+
+    def test_streams_are_summed_over_their_own_payload_windows(self):
+        # Two streams, each 3 MB in 200 ms after 90 ms of setup: 120 Mbps each.
+        out = "3000000 0.29 0.09"
+        mbps, size = self.parallel([out, out])
+        self.assertAlmostEqual(mbps, 240.0, places=4)
+        self.assertEqual(size, 6_000_000)
+
+    def test_every_stream_untimeable_reports_no_rate_not_zero(self):
+        # Zero is a claim about the line. None is the absence of one, and it
+        # is what the score treats as "no Speed component" rather than as a
+        # connection that carries nothing.
+        mbps, size = self.parallel(["3000000 0.101 0.09", "3000000 0.101 0.09"])
+        self.assertIsNone(mbps)
+        self.assertEqual(size, 6_000_000)
+
+    def test_bytes_are_counted_even_when_the_rate_is_withheld(self):
+        # The data budget was spent whether or not it produced a number.
+        _, size = self.parallel(["3000000 0.101 0.09", "3000000 0.29 0.09"])
+        self.assertEqual(size, 6_000_000)
 
 
 if __name__ == "__main__":

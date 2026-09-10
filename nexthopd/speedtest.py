@@ -98,19 +98,49 @@ def _curl(args, timeout) -> Optional[subprocess.CompletedProcess]:
         return None
 
 
+# A transfer shorter than this carried too few bytes for its own duration to
+# be worth dividing by: the timing error, not the line, would set the answer.
+MIN_TIMED_WINDOW_S = 0.05
+
+
+def _rate_over_payload(size: float, t_total: float, t_payload_start: float):
+    """Mbps over the part of the request that actually carried bytes.
+
+    curl's own `speed_download` divides the bytes by the WHOLE request —
+    DNS, the TCP connect, the TLS handshake and the wait for the first byte
+    included. None of that carried payload, and none of it shrinks when the
+    line gets faster, so it is a fixed tax on a measurement whose useful part
+    keeps getting shorter: a 3 MB stream is ~240 ms of payload on a 400 Mbps
+    line and ~107 ms on a gigabit one, against the same ~70-90 ms of setup.
+    That is not noise. It is a bias that grows with the quantity being
+    measured, which made the check read a 900 Mbps line as roughly 220 and
+    put a ceiling near 480 on a scale whose top two anchors are 500 and 750.
+
+    Dividing by a window instead of by the total is only honest while the
+    window is long enough to divide by, so a sample too short to time is
+    withheld rather than published — the same rule the rest of the daemon
+    uses for a figure it cannot stand behind.
+    """
+    window = t_total - t_payload_start
+    if window < MIN_TIMED_WINDOW_S or size <= 0:
+        return None
+    return size * 8 / 1e6 / window
+
+
 def _curl_timed_download(url: str, timeout: float, resolve: str = None):
-    """(mbps, bytes) using curl's own transfer accounting."""
+    """(mbps, bytes), timed over the payload rather than the whole request."""
     pin = ["--resolve", resolve] if resolve else []
     r = _curl(pin + ["-o", "/dev/null",
-                     "-w", "%{speed_download} %{size_download}", url],
+                     "-w", "%{size_download} %{time_total} %{time_starttransfer}",
+                     url],
               timeout)
     if not r or r.returncode != 0:
         return None, 0
     try:
-        speed_bps, size = (float(x) for x in r.stdout.split())
+        size, t_total, t_start = (float(x) for x in r.stdout.split())
     except ValueError:
         return None, 0
-    return speed_bps * 8 / 1e6, int(size)
+    return _rate_over_payload(size, t_total, t_start), int(size)
 
 
 def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
@@ -122,7 +152,10 @@ def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
     cmd = ["curl", "-fsS", "--proto", "=https", "--max-time", str(int(timeout)),
            "-o", "/dev/null", "-X", "POST", "--data-binary", "@-",
            "-H", "Content-Type: application/octet-stream",
-           "-w", "%{speed_upload} %{size_upload}", url]
+           # Not time_starttransfer: on a POST that lands part way through
+           # the body, not after it. The TLS handshake completing is when
+           # this request starts putting bytes on the wire.
+           "-w", "%{size_upload} %{time_total} %{time_appconnect}", url]
     try:
         r = subprocess.run(cmd, input=b"\0" * n_bytes, capture_output=True,
                            timeout=timeout + 5, check=False)
@@ -131,10 +164,10 @@ def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
     if r.returncode != 0:
         return None, 0
     try:
-        speed_bps, size = (float(x) for x in r.stdout.decode().split())
+        size, t_total, t_app = (float(x) for x in r.stdout.decode().split())
     except (ValueError, UnicodeDecodeError):
         return None, 0
-    return speed_bps * 8 / 1e6, int(size)
+    return _rate_over_payload(size, t_total, t_app), int(size)
 
 
 def _parallel_download(url: str, streams: int, timeout: float):
@@ -153,7 +186,8 @@ def _parallel_download(url: str, streams: int, timeout: float):
             procs.append(subprocess.Popen(
                 ["curl", "-fsS", "--proto", "=https",
                  "--max-time", str(int(timeout)), "-o", "/dev/null",
-                 "-w", "%{speed_download} %{size_download}", url],
+                 "-w", "%{size_download} %{time_total} %{time_starttransfer}",
+                 url],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True))
         except OSError:
             pass
@@ -168,12 +202,18 @@ def _parallel_download(url: str, streams: int, timeout: float):
         if p.returncode != 0:
             continue
         try:
-            speed_bps, size = (float(x) for x in out.split())
+            size, t_total, t_start = (float(x) for x in out.split())
         except ValueError:
             continue
-        any_ok = True
-        total_mbps += speed_bps * 8 / 1e6
+        mbps = _rate_over_payload(size, t_total, t_start)
         total_bytes += int(size)
+        # A stream too short to time is dropped, not counted as zero: summing
+        # a withheld stream in as 0 would understate the line by exactly the
+        # bias this accounting exists to remove.
+        if mbps is None:
+            continue
+        any_ok = True
+        total_mbps += mbps
     return (total_mbps if any_ok else None), total_bytes
 
 
