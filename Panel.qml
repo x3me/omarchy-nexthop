@@ -244,8 +244,8 @@ Panel {
 
   // ---- open / close --------------------------------------------------------
   function open() {
-    setCenterHoverRevealSuppressed(false)
     root.controller.show()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function openFromHotkey() {
@@ -256,8 +256,14 @@ Panel {
   }
 
   function close() {
-    setCenterHoverRevealSuppressed(false)
+    // Hide first, and never the other way round. This used to call the bar
+    // before hiding, so when 4.0.3 made that call throw, the exception took
+    // the hide with it: the panel could not be closed by click, hotkey, IPC
+    // or a popout switch, and a KeyboardPanel's dismissal layer covers the
+    // whole screen. What the user can see must not depend on a host call we
+    // do not own.
     root.controller.hide()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function toggle() { root.opened ? root.close() : root.openFromHotkey() }
@@ -268,6 +274,9 @@ Panel {
     return false
   }
 
+  // 4.0.3 hands third-party widgets a PluginBarApi facade where this is a
+  // readonly property fed by a setter; the property still answers `in`, so
+  // asking whether it exists says nothing about whether it can be written.
   function setCenterHoverRevealSuppressed(value) {
     if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
       root.bar.setCenterHoverRevealSuppressed(value)
