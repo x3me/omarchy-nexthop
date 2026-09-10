@@ -138,60 +138,115 @@ class PingParsing(unittest.TestCase):
 
 
 class SynRetransmits(unittest.TestCase):
-    """A one-second handshake is the kernel's timer, not the path.
+    """A handshake rescued by a retransmitted SYN is loss, not latency.
 
     Found 2026-09-10 from the HopSense side and confirmed here in this
     machine's own history: an internet-leg p95 sitting at 1032-1041 ms,
     constant to within 1% across a twenty-minute episode, while p50 was
-    5.5 ms, p75 under 10, and `lag_icmp` never left 12-22 ms. Congestion does
-    not produce the same number twenty times; a timer does. Folded through
+    5.5 ms and `lag_icmp` never left 12-22 ms. Congestion does not produce
+    the same number twenty times; a timer does. Folded through
     `lag = p75 + 1.5 * jitter` those samples read as 473 ms of lag and took
     Responsiveness to 26 on a link ICMP called healthy.
+
+    The threshold is RELATIVE, and that is the whole design. `connect()`
+    returns one RTT after the SYN that survives, so a rescued handshake lands
+    at one RTO PLUS the path's own round trip — 1008 ms on an 8 ms path,
+    1150 ms on a 150 ms one. A fixed cutoff would label a congestion spike on
+    an ordinary intercontinental path as a lost packet, which is a different
+    fault with a different owner.
     """
 
-    def probe(self, typical_ms=8.0, samples=None):
-        s = Series()
-        p = TcpProbe("192.0.2.1", s, 1.0)
-        for _ in range(samples if samples is not None
-                       else p.RETRANSMIT_TYPICAL_SAMPLES):
-            p._recent.append(typical_ms)
+    def probe(self, baseline_ms=None, samples=None):
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        if baseline_ms is not None:
+            n = p.RETRANSMIT_MIN_SAMPLES if samples is None else samples
+            for i in range(n):
+                p._recent.append((1000.0 + i, baseline_ms))
         return p
 
-    def test_a_one_second_handshake_on_a_fast_path_is_a_retransmit(self):
-        p = self.probe(typical_ms=8.0)
-        self.assertTrue(p._is_retransmit(1004.0))
-        self.assertTrue(p._is_retransmit(p.SYN_RETRANSMIT_MS))
+    def test_a_second_above_a_fast_path_is_a_retransmit(self):
+        p = self.probe(baseline_ms=8.5)
+        self.assertEqual(p._classify(1100.0, 1045.0), "retransmit")
+        self.assertEqual(p._classify(1100.0, 1004.0), "retransmit")
 
     def test_an_ordinary_round_trip_is_not(self):
-        p = self.probe(typical_ms=8.0)
+        p = self.probe(baseline_ms=8.5)
         for rtt in (8.0, 45.0, 300.0, 899.0):
-            self.assertFalse(p._is_retransmit(rtt), rtt)
+            self.assertEqual(p._classify(1100.0, rtt), "reply", rtt)
 
-    def test_a_genuinely_slow_path_keeps_its_latency(self):
-        """The wrong-direction guard.
+    def test_a_congestion_spike_on_a_distant_path_stays_a_measurement(self):
+        """The case a fixed cutoff gets wrong.
 
-        On a line whose real round trip is near a second, a one-second sample
-        IS the path. Calling it loss would score that line BETTER than it is,
-        because the loss term costs far less than a 1000 ms percentile — the
-        flattering direction, which is the one that gets shipped by accident.
+        On a 150 ms path a real retransmit lands at ~1150 ms, so a 1045 ms
+        sample is 895 ms of something that is not a timer. 150-250 ms is
+        ordinary for a subscriber reaching another continent, so this band is
+        normal traffic rather than an edge case.
         """
-        p = self.probe(typical_ms=950.0)
-        self.assertFalse(p._is_retransmit(1004.0))
+        p = self.probe(baseline_ms=150.0)
+        self.assertEqual(p._classify(1100.0, 1045.0), "reply")
+        self.assertEqual(p._classify(1100.0, 1150.0), "retransmit")
 
-    def test_nothing_is_reclassified_before_the_path_is_known(self):
-        p = self.probe(typical_ms=8.0, samples=0)
-        self.assertFalse(p._is_retransmit(1004.0))
-        p = self.probe(typical_ms=8.0,
-                       samples=TcpProbe.RETRANSMIT_TYPICAL_SAMPLES - 1)
-        self.assertFalse(p._is_retransmit(1004.0))
+    def test_a_satellite_link_keeps_its_latency(self):
+        p = self.probe(baseline_ms=600.0)
+        self.assertEqual(p._classify(1100.0, 1045.0), "reply")
+        self.assertEqual(p._classify(1100.0, 1600.0), "retransmit")
 
-    def test_the_typical_is_this_probe_own_and_stays_bounded(self):
-        # The series it feeds is merged with other instruments and cannot
-        # answer "what does THIS path usually do".
-        p = self.probe(typical_ms=8.0)
-        for i in range(500):
-            p._recent.append(float(i))
-        self.assertLessEqual(len(p._recent), 32)
+    def test_before_a_baseline_it_is_neither(self):
+        # Inventing a loss and publishing a suspect latency are both claims.
+        p = self.probe(baseline_ms=8.5,
+                       samples=TcpProbe.RETRANSMIT_MIN_SAMPLES - 1)
+        self.assertEqual(p._classify(1100.0, 1045.0), "unknown")
+        self.assertEqual(p._classify(1100.0, 8.0), "reply")
+
+    def test_a_slow_path_bootstraps_instead_of_going_silent(self):
+        """The hazard in the third verdict, named.
+
+        On a link whose real round trip is past the floor, every sample lands
+        unclassified. A baseline deque that only accepted classified samples
+        would never reach its minimum, so the instrument would stay
+        unclassified for ever — nothing recorded, count never growing,
+        `penalty()` returning None, and the bench able neither to seat it nor
+        to call it dead. Silent and unrankable, invisible because it is not
+        failing but merely absent.
+        """
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        verdicts = []
+        for i in range(20):
+            v = p._classify(1000.0 + i, 1200.0)
+            verdicts.append(v)
+            if v in ("reply", "unknown"):
+                p._recent.append((1000.0 + i, 1200.0))
+        self.assertEqual(set(verdicts[:p.RETRANSMIT_MIN_SAMPLES]), {"unknown"})
+        self.assertEqual(set(verdicts[p.RETRANSMIT_MIN_SAMPLES:]), {"reply"})
+        self.assertAlmostEqual(p._baseline_ms(1020.0), 1200.0)
+
+    def test_retransmits_do_not_raise_the_bar_that_catches_them(self):
+        # Feeding them back would ratchet the threshold up on the
+        # instrument's own retransmits and the rule would stop firing.
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        for i in range(10):
+            p._recent.append((1000.0 + i, 8.5))
+        for i, rtt in enumerate((1045.0, 8.6, 1044.0, 8.4, 1046.0)):
+            v = p._classify(1010.0 + i, rtt)
+            if v == "reply":
+                p._recent.append((1010.0 + i, rtt))
+        self.assertAlmostEqual(p._baseline_ms(1015.0), 8.5, places=1)
+        self.assertEqual(p._classify(1015.0, 1045.0), "retransmit")
+
+    def test_the_baseline_window_is_a_duration_not_a_count(self):
+        # An instrument benched to a slower cadence would otherwise have
+        # "recent" silently mean a longer stretch of wall clock.
+        p = TcpProbe("192.0.2.1", Series(), 1.0)
+        for i in range(20):
+            p._recent.append((1000.0 + i, 8.5))
+        self.assertIsNotNone(p._baseline_ms(1020.0))
+        self.assertIsNone(p._baseline_ms(1020.0 + TcpProbe.RETRANSMIT_WINDOW_S))
+
+    def test_the_window_matches_what_the_bench_ranks_on(self):
+        # "Recent" should mean one thing across the daemon.
+        from nexthopd.instruments import Bench
+        self.assertEqual(TcpProbe.RETRANSMIT_WINDOW_S, Bench.WINDOW_S)
+        self.assertEqual(TcpProbe.RETRANSMIT_MIN_SAMPLES, Bench.MIN_SAMPLES)
 
     def test_the_two_retransmit_case_was_already_loss(self):
         """Why the old boundary was arbitrary.
@@ -203,7 +258,7 @@ class SynRetransmits(unittest.TestCase):
         was wherever the timeout happened to fall.
         """
         self.assertLess(TcpProbe.CONNECT_TIMEOUT_S * 1000.0, 3000.0)
-        self.assertLess(TcpProbe.SYN_RETRANSMIT_MS,
+        self.assertLess(TcpProbe.RETRANSMIT_MARGIN_MS,
                         TcpProbe.CONNECT_TIMEOUT_S * 1000.0)
 
 

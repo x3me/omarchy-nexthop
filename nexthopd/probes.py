@@ -331,15 +331,14 @@ class TcpProbe(threading.Thread):
     # needing a single retransmit returns at ~1 s and was recorded as a round
     # trip. The same event, accounted two opposite ways, with the boundary
     # wherever the timeout happened to fall.
-    SYN_RETRANSMIT_MS = 900.0
-    # A retransmit is only distinguishable from a genuinely slow path by what
-    # this same probe usually sees, so the reclassification is withheld unless
-    # the path is demonstrably fast. On a line whose real round trip is near a
-    # second, a one-second sample IS the path and stays a latency sample.
-    RETRANSMIT_MAX_TYPICAL_MS = 200.0
-    # Enough recent replies to have a typical worth comparing against. Below
-    # this the sample is kept as measured rather than guessed at.
-    RETRANSMIT_TYPICAL_SAMPLES = 8
+    # One initial RTO, with slop for timer granularity and scheduling. The
+    # first retransmit fires at 1000 ms on Linux, macOS and Windows alike.
+    RETRANSMIT_MARGIN_MS = 900.0
+    # The baseline is this instrument's own recent p50, over the same window
+    # and sample floor the bench ranks instruments on, so "recent" means the
+    # same thing everywhere in the daemon.
+    RETRANSMIT_WINDOW_S = 300.0
+    RETRANSMIT_MIN_SAMPLES = 8
 
     def __init__(self, target: str, series: Series, interval_s: float = 1.0,
                  name: str = "", loaded_fn=None, port: int = 443):
@@ -354,8 +353,15 @@ class TcpProbe(threading.Thread):
         # The recent round trips this probe has actually seen, for the
         # comparison above. Bounded, and its own — the series it feeds is
         # merged with other instruments and cannot answer "what does THIS
-        # path usually do".
-        self._recent = collections.deque(maxlen=32)
+        # path usually do". Held as (when, rtt) so the window is a duration
+        # rather than a count, which is what makes it survive a cadence
+        # change: a benched instrument probes at a fraction of the rate.
+        self._recent = collections.deque(maxlen=1024)
+        # Samples this probe declined to call latency, so the reclassification
+        # can be seen rather than inferred from a loss rate. A dropped SYN and
+        # a slow line are different faults with different owners.
+        self.retransmits = 0
+        self.unclassified = 0
 
     def stop(self):
         self._stop.set()
@@ -387,22 +393,64 @@ class TcpProbe(threading.Thread):
         # The handshake completed, so the target is reachable, whatever the
         # kernel had to do to get there.
         self.ever_connected = True
-        if self._is_retransmit(rtt):
+        verdict = self._classify(started, rtt)
+        if verdict == "retransmit":
             # Loss on new connections, which is what it is. Recorded the same
             # way a refused or timed-out connect already is, so it charges the
             # loss term and Reliability rather than the latency percentiles.
+            self.retransmits += 1
             self.series.add(started, None, self._loaded())
             return
-        self._recent.append(rtt)
+        if verdict == "unknown":
+            # Past the floor before this probe has a baseline to judge it
+            # against. It is either a retransmit or a genuinely slow path and
+            # nothing here can tell which, so it is not recorded as either —
+            # inventing a loss and publishing a suspect latency are both
+            # claims, and the honest move is to make neither.
+            #
+            # It still feeds the baseline, and that is not an oversight. A
+            # link whose real round trip is past the floor — p50 1200 ms, say
+            # — has every sample land here, so a deque that only accepted
+            # classified samples would never reach its minimum, the baseline
+            # would never form, and the instrument would stay unclassified
+            # for ever: nothing recorded, count never growing, `penalty()`
+            # returning None, and the bench able neither to seat it nor to
+            # call it dead. A silent unrankable instrument, invisible because
+            # it is not failing, merely absent.
+            self.unclassified += 1
+            self._recent.append((started, rtt))
+            return
+        self._recent.append((started, rtt))
         self.series.add(started, round(rtt, 2), self._loaded())
 
-    def _is_retransmit(self, rtt_ms: float) -> bool:
-        """Did this handshake wait on the kernel's timer rather than the path?"""
-        if rtt_ms < self.SYN_RETRANSMIT_MS:
-            return False
-        if len(self._recent) < self.RETRANSMIT_TYPICAL_SAMPLES:
-            return False
-        return statistics.median(self._recent) <= self.RETRANSMIT_MAX_TYPICAL_MS
+    def _baseline_ms(self, now: float):
+        """This instrument's own recent p50, or None while it has too few."""
+        cutoff = now - self.RETRANSMIT_WINDOW_S
+        recent = [rtt for t, rtt in self._recent if t >= cutoff]
+        if len(recent) < self.RETRANSMIT_MIN_SAMPLES:
+            return None
+        return statistics.median(recent)
+
+    def _classify(self, now: float, rtt_ms: float) -> str:
+        """"reply", "retransmit" or "unknown" for a handshake that completed.
+
+        A connect rescued by a retransmitted SYN is a lost packet, not a slow
+        path, and the threshold has to be relative or it mislabels distance as
+        loss: one full RTO ABOVE what this instrument usually sees. A satellite
+        link whose p50 is 600 ms gets a threshold of 1500, so a 1045 ms sample
+        there stays the measurement it is.
+        """
+        if rtt_ms < self.RETRANSMIT_MARGIN_MS:
+            return "reply"
+        baseline = self._baseline_ms(now)
+        if baseline is None:
+            return "unknown"
+        # Note what does NOT reach the baseline once one exists: a sample this
+        # returns "retransmit" for. Feeding those back would raise the
+        # threshold on the instrument's own retransmits and the rule would
+        # quietly stop firing exactly where it is needed most.
+        return "retransmit" if rtt_ms >= baseline + self.RETRANSMIT_MARGIN_MS \
+            else "reply"
 
     def run(self):
         while not self._stop.is_set():
