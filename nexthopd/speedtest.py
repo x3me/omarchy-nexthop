@@ -180,9 +180,10 @@ def _parallel_upload(url: str, per_stream: int, streams: int, timeout: float):
     procs = []
     for _ in range(streams):
         try:
-            procs.append(subprocess.Popen(
+            spawned = time.monotonic()
+            procs.append((subprocess.Popen(
                 _upload_argv(url, timeout), stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL), spawned))
         except OSError:
             pass
     # A pipe holds far less than a stream's body, so writing them in turn
@@ -198,27 +199,23 @@ def _parallel_upload(url: str, per_stream: int, streams: int, timeout: float):
             proc.wait()
 
     workers = [threading.Thread(target=feed, args=(i, proc), daemon=True)
-               for i, proc in enumerate(procs)]
+               for i, (proc, _) in enumerate(procs)]
     for w in workers:
         w.start()
     for w in workers:
         w.join(timeout + 15)
 
-    total_mbps, total_bytes, any_ok = 0.0, 0, False
-    for i, proc in enumerate(procs):
+    windows, total_bytes = [], 0
+    for i, (proc, spawned) in enumerate(procs):
         if proc.returncode != 0 or not outs[i]:
             continue
         try:
             size, t_total, t_app = (float(x) for x in outs[i].decode().split())
         except (ValueError, UnicodeDecodeError):
             continue
-        mbps = _rate_over_payload(size, t_total, t_app)
         total_bytes += int(size)
-        if mbps is None:
-            continue
-        any_ok = True
-        total_mbps += mbps
-    return (total_mbps if any_ok else None), total_bytes
+        windows.append((size, spawned + t_app, spawned + t_total))
+    return _aggregate_rate(windows), total_bytes
 
 
 def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
@@ -247,6 +244,42 @@ def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
     return _rate_over_payload(size, t_total, t_app), int(size)
 
 
+def _aggregate_rate(windows):
+    """Mbps carried by a set of parallel streams.
+
+    NOT the sum of their individual rates. Streams do not start or finish
+    together — TLS handshakes complete tens to hundreds of milliseconds apart
+    — so a stream that outlives the others has the line to itself and measures
+    all of it. Adding that to what its siblings measured while sharing counts
+    the same link two, three, four times. Observed on this ~450 Mbps line:
+    summing gave 647 / 629 / 538 Mbps for transfers that actually carried
+    323 / 276 / 269.
+
+    The honest figure is what crossed the wire divided by the time the wire
+    spent carrying it: total bytes over the union of the streams' payload
+    windows. The union rather than first-start-to-last-finish, so a gap
+    between streams is not billed as throughput.
+
+    `windows` is (bytes, absolute start, absolute end) per stream.
+    """
+    windows = [w for w in windows if w[0] > 0 and w[2] > w[1]]
+    if not windows:
+        return None
+    total_bytes = sum(w[0] for w in windows)
+    spans = sorted((w[1], w[2]) for w in windows)
+    union, cur_s, cur_e = 0.0, spans[0][0], spans[0][1]
+    for s, e in spans[1:]:
+        if s > cur_e:
+            union += cur_e - cur_s
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    union += cur_e - cur_s
+    if union < MIN_TIMED_WINDOW_S:
+        return None
+    return total_bytes * 8 / 1e6 / union
+
+
 def _parallel_download(url: str, streams: int, timeout: float):
     """Sum of concurrent stream rates.
 
@@ -260,16 +293,21 @@ def _parallel_download(url: str, streams: int, timeout: float):
     procs = []
     for _ in range(streams):
         try:
-            procs.append(subprocess.Popen(
+            # curl times everything from its own start, and the children are
+            # spawned a few milliseconds apart, so their clocks have to be
+            # put on a common origin before their windows can be compared.
+            spawned = time.monotonic()
+            procs.append((subprocess.Popen(
                 ["curl", "-fsS", "--proto", "=https",
                  "--max-time", str(int(timeout)), "-o", "/dev/null",
                  "-w", "%{size_download} %{time_total} %{time_starttransfer}",
                  url],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True))
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True),
+                spawned))
         except OSError:
             pass
-    total_mbps, total_bytes, any_ok = 0.0, 0, False
-    for p in procs:
+    windows, total_bytes = [], 0
+    for p, spawned in procs:
         try:
             out, _ = p.communicate(timeout=timeout + 10)
         except subprocess.TimeoutExpired:
@@ -282,36 +320,84 @@ def _parallel_download(url: str, streams: int, timeout: float):
             size, t_total, t_start = (float(x) for x in out.split())
         except ValueError:
             continue
-        mbps = _rate_over_payload(size, t_total, t_start)
         total_bytes += int(size)
-        # A stream too short to time is dropped, not counted as zero: summing
-        # a withheld stream in as 0 would understate the line by exactly the
-        # bias this accounting exists to remove.
-        if mbps is None:
-            continue
-        any_ok = True
-        total_mbps += mbps
-    return (total_mbps if any_ok else None), total_bytes
+        windows.append((size, spawned + t_start, spawned + t_total))
+    return _aggregate_rate(windows), total_bytes
 
 
-def content_test(down_bytes: int = 12_000_000, up_bytes: int = 4_000_000,
+# Each stream aims for about this much time actually carrying bytes: long
+# enough that TCP's ramp-up is a small share of what is timed, short enough
+# that the check stays something nobody notices.
+CONTENT_TARGET_S = 0.5
+# A stream never goes below this, so a hint that came in low cannot shrink
+# the next transfer into a degenerate one.
+CONTENT_STREAM_FLOOR = 500_000
+# And never above this, which is what bounds the hourly data budget. Only a
+# fast line reaches either cap; everything slower asks for less and gets it.
+CONTENT_DOWN_STREAM_CAP = 3_000_000
+CONTENT_UP_STREAM_CAP = 2_000_000
+
+
+def content_stream_bytes(hint_mbps, streams: int, cap: int) -> int:
+    """Bytes for one stream: about CONTENT_TARGET_S of payload at the rate
+    this line last showed, bounded both ways.
+
+    A fixed size cannot serve both ends of the range it has to. Twelve MB is
+    a quarter of a second on a fast line and nine seconds of a saturated link
+    on a 10 Mbps one — the users least able to spare it were paying the most
+    for it, hourly. Sizing by time inverts that: the cap is reached only by
+    lines that can afford it, and a slow line asks for a fraction.
+
+    With no hint — the first check on a network — the cap is what it sends,
+    because there is nothing yet to size against and one honest measurement
+    is what produces the hint for every check after it.
+    """
+    if not hint_mbps or hint_mbps <= 0:
+        return cap
+    per_stream_mbps = float(hint_mbps) / max(1, streams)
+    want = int(per_stream_mbps / 8 * CONTENT_TARGET_S * 1e6)
+    return max(CONTENT_STREAM_FLOOR, min(cap, want))
+
+
+def content_test(down_hint_mbps=None, up_hint_mbps=None,
                  streams: int = 4) -> dict:
-    """The scheduled check: ~16 MB total, a handful of seconds.
+    """The scheduled check.
 
-    Both directions are carried by `streams` parallel connections, each with
-    the same 1 MB floor. The floor is not a detail: splitting a fixed budget
-    more ways makes every stream shorter, and a stream too short to time is
-    withheld — so a budget small enough to be split into slivers reads worse
-    than no split at all, and on the fastest lines could report nothing.
-    Upload's budget grew from 2 MB to 4 MB to stay above it.
+    Both directions are carried by `streams` parallel connections, each sized
+    for a target duration rather than by dividing a fixed budget. Dividing a
+    budget was how the download bug worked from one side and the upload's from
+    the other: more streams meant shorter streams, and a stream too short to
+    time is withheld.
+
+    Costs up to ~20 MB on a line fast enough to reach both caps, and a
+    fraction of that below — about 2 MB on a 25 Mbps line, where the old fixed
+    16 MB took nine seconds of the link every hour.
     """
     started = time.time()
-    per_stream = max(1_000_000, down_bytes // streams)
-    up_per_stream = max(1_000_000, up_bytes // streams)
+    per_stream = content_stream_bytes(down_hint_mbps, streams,
+                                      CONTENT_DOWN_STREAM_CAP)
+    up_per_stream = content_stream_bytes(up_hint_mbps, streams,
+                                         CONTENT_UP_STREAM_CAP)
     down_mbps, down_n = _parallel_download(
         CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=30)
+    if down_mbps is None and per_stream < CONTENT_DOWN_STREAM_CAP:
+        # Sized from history, and the line turned out to be faster than that
+        # history says — so fast that the streams finished inside the window
+        # too short to time, and were withheld. Nothing is stored for a
+        # withheld check, so the hint would never learn better and every
+        # check after this one would ask for the same too-short transfer and
+        # report nothing, forever. One pass at the cap re-anchors it.
+        retry_mbps, retry_n = _parallel_download(
+            CLOUDFLARE_DOWN.format(n=CONTENT_DOWN_STREAM_CAP), streams,
+            timeout=30)
+        down_mbps, down_n = retry_mbps, down_n + retry_n
+
     up_mbps, up_n = _parallel_upload(CLOUDFLARE_UP, up_per_stream, streams,
                                      timeout=30)
+    if up_mbps is None and up_per_stream < CONTENT_UP_STREAM_CAP:
+        retry_mbps, retry_n = _parallel_upload(
+            CLOUDFLARE_UP, CONTENT_UP_STREAM_CAP, streams, timeout=30)
+        up_mbps, up_n = retry_mbps, up_n + retry_n
     return {
         "kind": "content",
         "engine": "cloudflare",

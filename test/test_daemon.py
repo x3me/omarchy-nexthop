@@ -24,6 +24,7 @@ from nexthopd.daemon import (  # noqa: E402
     PEAK_FRESH_S,
     CaptiveWatch,
     Config,
+    Daemon,
     LegState,
     LegWatch,
     LocalEventArbiter,
@@ -1001,6 +1002,50 @@ class LiveJsonContract(unittest.TestCase):
         keys, _ = self.published()
         # The version handover and the liveness watch cannot work without these.
         self.assertTrue({"t", "pid", "pid_start", "daemon_version", "state"} <= keys)
+
+
+class ContentHint(unittest.TestCase):
+    """What the daemon hands the check to size itself with."""
+
+    class Store:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def tests(self, limit=20, kind=None):
+            return self.rows[:limit]
+
+    def hint(self, rows, network):
+        d = Daemon.__new__(Daemon)
+        d.store = self.Store(rows)
+        return Daemon._content_hint(d, network)
+
+    def row(self, network, down, up, ok=True):
+        return {"ok": ok, "network": network, "down_mbps": down, "up_mbps": up}
+
+    def test_nothing_stored_gives_no_hint(self):
+        self.assertEqual(self.hint([], "home"), (None, None))
+
+    def test_only_this_network_counts(self):
+        rows = [self.row("cafe", 900.0, 400.0), self.row("home", 90.0, 20.0)]
+        self.assertEqual(self.hint(rows, "home"), (90.0, 20.0))
+
+    def test_the_best_recent_reading_wins_not_the_last(self):
+        # A check that came in low must not shrink the next transfer, which
+        # would read lower again: sizing off the last reading is a ratchet.
+        rows = [self.row("home", 40.0, 5.0),
+                self.row("home", 380.0, 90.0),
+                self.row("home", 350.0, 88.0)]
+        self.assertEqual(self.hint(rows, "home"), (380.0, 90.0))
+
+    def test_failed_and_empty_readings_are_skipped(self):
+        rows = [self.row("home", 900.0, 400.0, ok=False),
+                self.row("home", None, None),
+                self.row("home", 120.0, 30.0)]
+        self.assertEqual(self.hint(rows, "home"), (120.0, 30.0))
+
+    def test_a_direction_with_no_readings_stays_none(self):
+        rows = [self.row("home", 120.0, None)]
+        self.assertEqual(self.hint(rows, "home"), (120.0, None))
 
 
 if __name__ == "__main__":

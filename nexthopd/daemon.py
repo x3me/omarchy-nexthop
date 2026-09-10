@@ -1355,9 +1355,12 @@ class Daemon:
         network = snap.get("ssid") or snap.get("name") or ""
         self.content_running = True
 
+        down_hint, up_hint = self._content_hint(network)
+
         def run():
             try:
-                r = speedtest.content_test()
+                r = speedtest.content_test(down_hint_mbps=down_hint,
+                                           up_hint_mbps=up_hint)
                 after = self.link.latest
                 if (after.get("ssid") or after.get("name") or "") != network:
                     # The network changed under the transfer, so the sample
@@ -1378,6 +1381,29 @@ class Daemon:
                 self.content_running = False
 
         threading.Thread(target=run, daemon=True, name="content-test").start()
+
+    def _content_hint(self, network: str):
+        """What this network has shown, so the next check can size itself.
+
+        The best of the recent checks rather than the last. Sizing from a
+        reading that happened to come in low would make the next transfer
+        shorter, which reads lower again — a ratchet the floor alone would
+        stop only at the bottom. The best recent reading is also the honest
+        answer to "what can this line do", which is the question the size is
+        being chosen against.
+
+        None for a network with no history: the first check sends the cap and
+        produces the hint that every check after it uses.
+        """
+        downs, ups = [], []
+        for t in self.store.tests(limit=8, kind="content"):
+            if not t["ok"] or (t["network"] or "") != network:
+                continue
+            if t["down_mbps"]:
+                downs.append(t["down_mbps"])
+            if t["up_mbps"]:
+                ups.append(t["up_mbps"])
+        return (max(downs) if downs else None), (max(ups) if ups else None)
 
     def tests_idle(self) -> bool:
         """May a bandwidth test start? One at a time.

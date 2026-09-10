@@ -271,12 +271,35 @@ class ParallelStreamAccounting(unittest.TestCase):
         finally:
             speedtest.subprocess.Popen = real_popen
 
-    def test_streams_are_summed_over_their_own_payload_windows(self):
-        # Two streams, each 3 MB in 200 ms after 90 ms of setup: 120 Mbps each.
+    def test_overlapping_streams_are_the_bytes_over_the_time_they_took(self):
+        # Two streams, each 3 MB carried in the same 200 ms window: 6 MB in
+        # 0.2 s is 240 Mbps. Note this is NOT 120 + 120 by coincidence of
+        # them overlapping exactly — see the staggered case below.
         out = "3000000 0.29 0.09"
         mbps, size = self.parallel([out, out])
-        self.assertAlmostEqual(mbps, 240.0, places=4)
+        self.assertAlmostEqual(mbps, 240.0, delta=1.0)
         self.assertEqual(size, 6_000_000)
+
+    def test_a_stream_that_outlives_the_others_does_not_double_the_line(self):
+        """The defect this replaced.
+
+        Streams finish tens to hundreds of milliseconds apart, and one left
+        running alone measures the whole line. Summing that with what its
+        siblings measured while sharing counts the same wire twice. Here: one
+        stream carries 3 MB in 0.2 s, a second carries 3 MB in a 0.2 s window
+        that starts after the first has finished. Six MB crossed the wire in
+        0.4 s, which is 120 Mbps. Summing would have said 240.
+        """
+        mbps, size = self.parallel(["3000000 0.29 0.09", "3000000 0.49 0.29"])
+        self.assertAlmostEqual(mbps, 120.0, delta=2.0)
+        self.assertEqual(size, 6_000_000)
+
+    def test_a_gap_between_streams_is_not_billed_as_throughput(self):
+        # Union, not first-start-to-last-finish: nothing crossed the wire in
+        # the idle second between them, and it must not be charged as if the
+        # line were slow.
+        mbps, _ = self.parallel(["3000000 0.29 0.09", "3000000 1.49 1.29"])
+        self.assertAlmostEqual(mbps, 120.0, delta=2.0)
 
     def test_every_stream_untimeable_reports_no_rate_not_zero(self):
         # Zero is a claim about the line. None is the absence of one, and it
@@ -334,11 +357,17 @@ class ParallelUploadAccounting(unittest.TestCase):
             speedtest.subprocess.Popen = real
         return got, made
 
-    def test_streams_are_summed_over_their_own_payload_windows(self):
-        out = b"1000000 0.29 0.09"          # 8 Mbit in 200 ms -> 40 Mbps
+    def test_overlapping_streams_are_the_bytes_over_the_time_they_took(self):
+        out = b"1000000 0.29 0.09"          # 4 MB in a shared 200 ms window
         (mbps, size), _ = self.parallel([out, out, out, out])
-        self.assertAlmostEqual(mbps, 160.0, places=4)
+        self.assertAlmostEqual(mbps, 160.0, delta=1.0)
         self.assertEqual(size, 4_000_000)
+
+    def test_a_stream_that_outlives_the_others_does_not_double_the_line(self):
+        (mbps, size), _ = self.parallel(
+            [b"1000000 0.29 0.09", b"1000000 0.49 0.29"])
+        self.assertAlmostEqual(mbps, 40.0, delta=1.0)
+        self.assertEqual(size, 2_000_000)
 
     def test_every_stream_is_fed_the_same_buffer(self):
         # One body, N readers: the memory cost is a stream's worth, not N.
@@ -385,56 +414,169 @@ class ParallelUploadAccounting(unittest.TestCase):
         self.assertNotIn("%{time_starttransfer}", joined)
 
 
-class ContentBudgetSurvivesTheSplit(unittest.TestCase):
-    """Splitting a fixed budget more ways is how the download bug worked.
+class ContentStreamSizing(unittest.TestCase):
+    """Each stream is sized for a duration, not by dividing a budget.
 
-    Every stream must stay long enough to be timeable, or parallelising makes
-    the reading worse — and on the fastest lines would withhold it entirely.
+    Dividing a fixed budget is how both speed defects worked: more streams
+    meant shorter streams, and a stream too short to time is withheld. It also
+    charged the wrong people — 16 MB is a quarter-second on a fast line and
+    nine seconds of a saturated link on a 10 Mbps one, every hour.
     """
 
-    def sizing(self):
-        import inspect
+    def sized(self, hint, cap=None, streams=4):
         from nexthopd import speedtest
-        sig = inspect.signature(speedtest.content_test)
-        streams = sig.parameters["streams"].default
-        return (speedtest,
-                max(1_000_000, sig.parameters["down_bytes"].default // streams),
-                max(1_000_000, sig.parameters["up_bytes"].default // streams),
-                streams)
+        if cap is None:
+            cap = speedtest.CONTENT_DOWN_STREAM_CAP
+        return speedtest.content_stream_bytes(hint, streams, cap)
+
+    def test_a_slow_line_is_asked_for_far_less(self):
+        from nexthopd import speedtest
+        # 10 Mbps over four streams: 2.5 Mbps a stream, half a second of it.
+        self.assertEqual(self.sized(10.0), speedtest.CONTENT_STREAM_FLOOR)
+        # 100 Mbps: 25 Mbps a stream, so about 1.5 MB - still under the cap.
+        self.assertLess(self.sized(100.0), speedtest.CONTENT_DOWN_STREAM_CAP)
+        self.assertGreater(self.sized(100.0), speedtest.CONTENT_STREAM_FLOOR)
+
+    def test_a_fast_line_reaches_the_cap_and_stops(self):
+        from nexthopd import speedtest
+        self.assertEqual(self.sized(1000.0), speedtest.CONTENT_DOWN_STREAM_CAP)
+        self.assertEqual(self.sized(10000.0), speedtest.CONTENT_DOWN_STREAM_CAP)
+
+    def test_the_size_never_leaves_its_bounds(self):
+        from nexthopd import speedtest
+        for hint in (0.001, 1, 10, 50, 250, 900, 5000):
+            n = self.sized(hint)
+            self.assertGreaterEqual(n, speedtest.CONTENT_STREAM_FLOOR)
+            self.assertLessEqual(n, speedtest.CONTENT_DOWN_STREAM_CAP)
+
+    def test_no_hint_sends_the_cap(self):
+        # The first check on a network has nothing to size against, and it is
+        # the one that produces the hint every later check uses.
+        from nexthopd import speedtest
+        for hint in (None, 0, -5):
+            self.assertEqual(self.sized(hint), speedtest.CONTENT_DOWN_STREAM_CAP)
+
+    def test_a_stream_sized_for_a_rate_can_be_timed_at_that_rate(self):
+        """The property that makes the whole thing safe.
+
+        Whatever the hint, the stream it produces carries payload for longer
+        than MIN_TIMED_WINDOW_S at that same rate — so sizing can never
+        produce a transfer its own accounting would then withhold.
+        """
+        from nexthopd import speedtest
+        for cap in (speedtest.CONTENT_DOWN_STREAM_CAP,
+                    speedtest.CONTENT_UP_STREAM_CAP):
+            for hint in (1, 10, 100, 400, 900, 1200):
+                n = self.sized(hint, cap=cap)
+                payload_s = (n * 8 / 1e6) / (hint / 4)
+                self.assertGreaterEqual(
+                    payload_s, speedtest.MIN_TIMED_WINDOW_S,
+                    "hint %s Mbps, cap %s -> %s bytes is %.3f s" % (
+                        hint, cap, n, payload_s))
 
     def test_the_line_speed_each_direction_can_still_time(self):
-        """The ceiling this sizing carries, pinned rather than hoped for.
+        """The ceiling, pinned. Past it the figure is withheld, not guessed.
 
-        A stream stops being timeable once its payload takes less than
-        MIN_TIMED_WINDOW_S, and past that the figure is withheld — the right
-        failure, but a real limit. Download's 3 MB a stream holds to about
-        1.9 Gbps; upload's 1 MB holds to about 640 Mbps. Symmetric gigabit is
-        past the upload ceiling, and matching the download's headroom would
-        cost 12 MB of upload an hour, which is not worth it for the lines it
-        would serve. Change the sizing and this number moves: that is the point
-        of writing it down.
+        Raising the upload cap moved this from ~640 Mbps to ~1.28 Gbps, which
+        covers the 820 Mbps line reported in issue #2 — and it costs nothing
+        on a slower line, because the cap is now a ceiling rather than a
+        constant everyone pays.
         """
-        speedtest, down_per, up_per, streams = self.sizing()
-
-        def ceiling_mbps(per_stream):
-            return (per_stream * 8 / 1e6) / speedtest.MIN_TIMED_WINDOW_S * streams
-
-        self.assertAlmostEqual(ceiling_mbps(down_per), 1920.0, places=1)
-        self.assertAlmostEqual(ceiling_mbps(up_per), 640.0, places=1)
-
-    def test_no_stream_falls_below_the_floor(self):
-        _, down_per, up_per, _ = self.sizing()
-        self.assertGreaterEqual(down_per, 1_000_000)
-        self.assertGreaterEqual(up_per, 1_000_000)
-
-    def test_the_upload_budget_is_not_slivered_by_the_split(self):
-        # 2 MB over four streams would be 500 kB each, which stops being
-        # timeable at 80 Mbps a stream — on exactly the fast lines this is for.
-        import inspect
         from nexthopd import speedtest
-        up = inspect.signature(speedtest.content_test).parameters["up_bytes"].default
-        streams = inspect.signature(speedtest.content_test).parameters["streams"].default
-        self.assertGreaterEqual(up // streams, 1_000_000)
+        streams = 4
+
+        def ceiling(cap):
+            return (cap * 8 / 1e6) / speedtest.MIN_TIMED_WINDOW_S * streams
+
+        self.assertAlmostEqual(ceiling(speedtest.CONTENT_DOWN_STREAM_CAP),
+                               1920.0, places=1)
+        self.assertAlmostEqual(ceiling(speedtest.CONTENT_UP_STREAM_CAP),
+                               1280.0, places=1)
+
+    def test_the_whole_check_stays_within_its_declared_budget(self):
+        """What the README promises: up to ~20 MB, and only on a fast line."""
+        from nexthopd import speedtest
+        streams = 4
+        worst = (speedtest.CONTENT_DOWN_STREAM_CAP
+                 + speedtest.CONTENT_UP_STREAM_CAP) * streams
+        self.assertLessEqual(worst, 20_000_000)
+        typical = (self.sized(100.0, speedtest.CONTENT_DOWN_STREAM_CAP)
+                   + self.sized(20.0, speedtest.CONTENT_UP_STREAM_CAP)) * streams
+        self.assertLess(typical, worst / 2)
+
+
+class AHintThatUnderSizesHealsItself(unittest.TestCase):
+    """The deadlock this avoids.
+
+    A stream sized from a stale-low hint can finish inside the window too
+    short to time, and be withheld. Nothing is stored for a withheld check,
+    so the hint never learns better — every check after it would ask for the
+    same too-short transfer and report nothing, on a line that is simply
+    faster than its own history. Observed for real: a 25 Mbps hint on this
+    ~450 Mbps line returned `down: None`.
+    """
+
+    def run_check(self, down_results, up_results, **kwargs):
+        from nexthopd import speedtest
+        d_calls, u_calls = [], []
+        real_d, real_u = speedtest._parallel_download, speedtest._parallel_upload
+
+        def fake_down(url, streams, timeout):
+            d_calls.append(url)
+            return down_results.pop(0)
+
+        def fake_up(url, per_stream, streams, timeout):
+            u_calls.append(per_stream)
+            return up_results.pop(0)
+
+        speedtest._parallel_download = fake_down
+        speedtest._parallel_upload = fake_up
+        try:
+            return speedtest.content_test(**kwargs), d_calls, u_calls
+        finally:
+            speedtest._parallel_download = real_d
+            speedtest._parallel_upload = real_u
+
+    def test_a_withheld_download_is_retried_once_at_the_cap(self):
+        from nexthopd import speedtest
+        r, d_calls, _ = self.run_check(
+            [(None, 2_000_000), (420.0, 12_000_000)],
+            [(90.0, 2_000_000)],
+            down_hint_mbps=25.0, up_hint_mbps=20.0)
+        self.assertEqual(len(d_calls), 2)
+        self.assertIn(str(speedtest.CONTENT_DOWN_STREAM_CAP), d_calls[1])
+        self.assertEqual(r["down_mbps"], 420.0)
+        # Both passes were paid for; the budget must say so.
+        self.assertEqual(r["bytes"], 2_000_000 + 12_000_000 + 2_000_000)
+
+    def test_a_withheld_upload_is_retried_once_at_the_cap(self):
+        from nexthopd import speedtest
+        r, _, u_calls = self.run_check(
+            [(420.0, 12_000_000)],
+            [(None, 1_000_000), (95.0, 8_000_000)],
+            down_hint_mbps=900.0, up_hint_mbps=20.0)
+        self.assertEqual(len(u_calls), 2)
+        self.assertEqual(u_calls[1], speedtest.CONTENT_UP_STREAM_CAP)
+        self.assertEqual(r["up_mbps"], 95.0)
+
+    def test_a_check_already_at_the_cap_is_not_retried(self):
+        # Nothing larger to ask for: retrying would spend the budget twice
+        # to arrive at the same answer.
+        r, d_calls, _ = self.run_check(
+            [(None, 12_000_000)], [(None, 8_000_000)])
+        self.assertEqual(len(d_calls), 1)
+        self.assertIsNone(r["down_mbps"])
+        self.assertFalse(r["ok"])
+
+    def test_a_genuinely_slow_line_is_not_retried(self):
+        # A small transfer that produced a number is a good measurement, not
+        # a failed one. This is the common case and it must stay cheap.
+        r, d_calls, u_calls = self.run_check(
+            [(9.5, 2_000_000)], [(2.1, 2_000_000)],
+            down_hint_mbps=10.0, up_hint_mbps=2.0)
+        self.assertEqual(len(d_calls), 1)
+        self.assertEqual(len(u_calls), 1)
+        self.assertEqual(r["bytes"], 4_000_000)
 
 
 class PeakUploadCostIsUnchangedByParallelism(unittest.TestCase):
