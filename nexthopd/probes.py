@@ -145,6 +145,13 @@ class PingProbe(threading.Thread):
         self._proc = None
         # seq -> timestamp first seen unanswered, drained by _expire()
         self._pending = {}
+        # seq -> when it was charged as lost. A packet the grace period gave
+        # up on can still be reported afterwards — the gateway's Destination
+        # Host Unreachable for it arrives later than the grace, in the real
+        # recording by 0.35 s — and without this it would be charged twice.
+        # Held for one further grace period, which is as long as a late report
+        # can be believed to belong to that packet.
+        self._charged = {}
 
     def _loaded(self) -> bool:
         try:
@@ -177,6 +184,17 @@ class PingProbe(threading.Thread):
             except OSError:
                 pass
 
+    def _reset_tracking(self):
+        """Forget both maps together.
+
+        `ping` numbers from 1 again on every respawn, so a seq remembered past
+        the process that produced it would suppress a real loss on the next
+        one — turning a guard against overcharging into an undercount, which
+        is the same defect facing the other way.
+        """
+        self._pending.clear()
+        self._charged.clear()
+
     def _expire(self, now: float):
         """A packet still unanswered after the grace period is a lost packet.
 
@@ -188,7 +206,13 @@ class PingProbe(threading.Thread):
         for seq, t in list(self._pending.items()):
             if now - t > grace:
                 del self._pending[seq]
+                self._charged[seq] = now
                 self.series.add(t, None, self._loaded())
+        # Bounded by the same clock that fills it: a seq stops being
+        # remembered once no report about it could still arrive.
+        for seq, t in list(self._charged.items()):
+            if now - t > grace:
+                del self._charged[seq]
 
     def run(self):
         backoff = 1.0
@@ -208,7 +232,7 @@ class PingProbe(threading.Thread):
     def _run_once(self):
         cmd = ["ping", "-n", "-O", "-D", "-i", f"{self.interval:g}",
                "-W", "1", self.target]
-        self._pending.clear()
+        self._reset_tracking()
         self._proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1,
@@ -221,7 +245,7 @@ class PingProbe(threading.Thread):
             # ping exited: whatever was outstanding never arrived.
             for seq, t in self._pending.items():
                 self.series.add(t, None, self._loaded())
-            self._pending.clear()
+            self._reset_tracking()
         finally:
             proc, self._proc = self._proc, None
             if proc:
@@ -243,7 +267,11 @@ class PingProbe(threading.Thread):
         if m:
             t, seq, rtt = float(m.group(1)), int(m.group(2)), float(m.group(3))
             self._pending.pop(seq, None)
-            self.series.add(t, rtt, self._loaded())
+            # A reply this late cannot un-lose the packet — the window it
+            # belonged to has already been read — and recording the RTT as
+            # well would put two samples on the wire's one packet.
+            if seq not in self._charged:
+                self.series.add(t, rtt, self._loaded())
             self._expire(t)
             return
 
@@ -251,14 +279,19 @@ class PingProbe(threading.Thread):
         if m:
             t, seq = float(m.group(1)), int(m.group(2))
             self._pending.pop(seq, None)
-            self.series.add(t, None, self._loaded())
+            if seq not in self._charged:
+                self.series.add(t, None, self._loaded())
             self._expire(t)
             return
 
         m = RE_PENDING.match(line)
         if m:
             t, seq = float(m.group(1)), int(m.group(2))
-            self._pending.setdefault(seq, t)
+            # `ping -O` repeats "no answer yet" for the same seq, so one that
+            # has already been charged must not be put back on the pending
+            # list to be charged a second time.
+            if seq not in self._charged:
+                self._pending.setdefault(seq, t)
             self._expire(t)
 
 

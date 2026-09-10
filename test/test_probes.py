@@ -53,6 +53,77 @@ class PingParsing(unittest.TestCase):
         self.assertEqual(stats["count"], 1)
         self.assertEqual(stats["loss"], 1.0)
 
+    def test_a_loss_charged_at_expiry_is_not_charged_again(self):
+        """The real recording, replayed whole.
+
+        seq 1 goes unanswered, the grace period gives up on it, and the
+        gateway's Destination Host Unreachable for that same seq arrives
+        0.35 s after that. One packet left, so one loss is recorded. Before
+        this, the series held two — and overcharging is the direction that
+        matters, because undercharging a loss is the safe error and this was
+        the other one.
+        """
+        s = Series()
+        p = PingProbe("192.0.2.1", s, 500)
+        for line in (FIXTURES / "ping-losses.txt").read_text().splitlines():
+            p._consume(line + "\n")
+        rows = s.all()
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0][1])
+
+    def test_a_reply_after_the_grace_period_adds_nothing(self):
+        """A packet already called lost cannot be un-lost by a late reply.
+
+        The window it belonged to has been read and scored. Recording the RTT
+        now would put two samples on the wire's one packet, and flatter the
+        sample count of every window that reads it.
+        """
+        s = Series()
+        p = PingProbe("192.0.2.1", s, 500)
+        p._consume("[100.0] no answer yet for icmp_seq=4\n")
+        p._consume("[110.0] no answer yet for icmp_seq=9\n")   # expires seq 4
+        p._consume("[110.5] 64 bytes from 1.1.1.1: icmp_seq=4 ttl=60 time=9.0 ms\n")
+        rows = s.all()
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0][1])
+
+    def test_a_repeated_pending_line_cannot_recharge_a_lost_seq(self):
+        """`ping -O` repeats "no answer yet" for the same seq — the recording
+        does it for seq 5 — so a charged seq must not go back on the list."""
+        s = Series()
+        p = PingProbe("192.0.2.1", s, 500)
+        p._consume("[100.0] no answer yet for icmp_seq=4\n")
+        p._consume("[110.0] no answer yet for icmp_seq=4\n")   # charges it
+        p._consume("[110.5] no answer yet for icmp_seq=4\n")   # must not re-arm
+        p._consume("[113.0] no answer yet for icmp_seq=4\n")   # would re-charge
+        self.assertEqual(len(s.all()), 1)
+
+    def test_a_new_ping_process_can_lose_seq_1_again(self):
+        """`ping` numbers from 1 on every respawn.
+
+        Remembering a charged seq past the process that produced it would
+        suppress a genuine loss on the next one, which is the same defect
+        facing the other way.
+        """
+        s = Series()
+        p = PingProbe("192.0.2.1", s, 500)
+        p._consume("[100.0] no answer yet for icmp_seq=1\n")
+        p._consume("[110.0] no answer yet for icmp_seq=9\n")   # charges seq 1
+        self.assertEqual(len(s.all()), 1)
+        p._reset_tracking()                                    # ping respawned
+        p._consume("[200.0] no answer yet for icmp_seq=1\n")
+        p._consume("[210.0] no answer yet for icmp_seq=2\n")   # charges it again
+        self.assertEqual(len(s.all()), 2)
+
+    def test_the_charged_map_does_not_grow_without_bound(self):
+        """It is drained by the same clock that fills it."""
+        s = Series()
+        p = PingProbe("192.0.2.1", s, 500)
+        for seq in range(1, 40):
+            p._consume("[%d.0] no answer yet for icmp_seq=%d\n" % (100 + seq, seq))
+        self.assertLess(len(p._charged), 5)
+        self.assertLess(len(p._pending), 5)
+
     def test_probe_expires_silent_losses(self):
         """A pending seq that never resolves is counted after the grace period."""
         s = Series()
