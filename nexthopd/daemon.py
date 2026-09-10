@@ -99,6 +99,31 @@ LEG_STREAM_WINDOW_S = 12.0
 # Probes needed on each side of the idle/loaded split before their ratio is
 # reported. Below this the comparison is sampling noise.
 MIN_LOAD_SPLIT_SAMPLES = 10
+# What counts as a busy link, for the loaded/idle latency split only.
+#
+# This used to borrow `LinkWatch.TRAFFIC_FLOOR_BPS`, whose own comment says it
+# exists so Wi-Fi power save does not fire spurious rate-drop events. That is
+# a question about the radio; this is a question about the line, and one
+# constant cannot answer both. At 25 kB/s it answered neither: on this laptop
+# the median minute carries 18 kB/s and p75 is 42 kB/s, so the floor sat
+# inside the IDLE distribution and tagged 36.6% of all minutes "loaded".
+#
+# The proof it measured nothing is in the stored history: across 8,971
+# minutes carrying both figures, the loaded half was FASTER than the idle
+# half 57% of the time, with medians 18.7 and 18.8 ms. A link cannot answer
+# faster while busy; a coin flip is what two buckets holding the same thing
+# look like. Selecting minutes by how much they actually carried recovers the
+# signal, and only well up the range: at 250 kB/s inversions are 51%, at
+# 1 MB/s 50%, at 2.5 MB/s 47%, and only at 5 MB/s do they fall to 29% with
+# loaded 19.9 ms against idle 16.6 — the direction physics requires.
+#
+# 5 MB/s is a tenth of what this line carries, and a tenth is the number
+# worth keeping rather than the 5, because a fixed rate cannot serve a
+# 10 Mbps line and a gigabit one at once — the same lesson the content check
+# learned about fixed transfer sizes. Below the floor nothing is called busy,
+# so a line whose capacity is unknown does not tag its own background chatter.
+LOAD_FRACTION_OF_LINE = 0.10
+LOAD_FLOOR_BPS = 125_000
 # Queueing can only ADD delay, so a loaded/idle ratio below 1 says the link
 # answered faster while busy, which is not a measurement. The sample floor
 # above does not catch it: 0.87 was published live on 716 samples per side.
@@ -1126,6 +1151,30 @@ class Daemon:
 
     # ------------------------------------------------------------ measuring
 
+    def load_floor_bps(self, now: float) -> float:
+        """Bytes per second above which this line counts as busy.
+
+        A tenth of what the line has been measured to carry, floored. Read
+        from the same baseline the Speed score uses — this network's own p90
+        download — and cached for a minute, because it moves at content-check
+        cadence and this is asked twice a second.
+        """
+        cache = getattr(self, "_load_floor_cache", None)
+        if not cache or now - cache[0] > 60:
+            snap = self.link.latest if self.link else {}
+            network = snap.get("ssid") or snap.get("name") or ""
+            try:
+                baseline = self.store.baseline_speed(network=network, now=now,
+                                                     fallback=False)
+            except Exception:
+                baseline = None
+            floor = LOAD_FLOOR_BPS
+            if baseline:
+                floor = max(floor, baseline * 1e6 / 8 * LOAD_FRACTION_OF_LINE)
+            cache = (now, floor)
+            self._load_floor_cache = cache
+        return cache[1]
+
     def throughput(self, now: float, iface: str):
         c = net.counters(iface)
         if c is None:
@@ -1149,7 +1198,7 @@ class Daemon:
             if dt > 0 and rx1 >= rx0 and tx1 >= tx0:
                 self.rates = ((rx1 - rx0) / dt, (tx1 - tx0) / dt)
                 self.link_loaded = ((self.rates[0] or 0.0) + (self.rates[1] or 0.0)
-                                    >= LinkWatch.TRAFFIC_FLOOR_BPS)
+                                    >= self.load_floor_bps(now))
             else:
                 # Counter reset (interface bounced) — start the window over.
                 self.counter_samples = [self.counter_samples[-1]]

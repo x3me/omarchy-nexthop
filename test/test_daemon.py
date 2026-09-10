@@ -25,6 +25,7 @@ from nexthopd.daemon import (  # noqa: E402
     CaptiveWatch,
     Config,
     Daemon,
+    LOAD_FLOOR_BPS,
     LegState,
     LegWatch,
     LocalEventArbiter,
@@ -1046,6 +1047,74 @@ class ContentHint(unittest.TestCase):
     def test_a_direction_with_no_readings_stays_none(self):
         rows = [self.row("home", 120.0, None)]
         self.assertEqual(self.hint(rows, "home"), (120.0, None))
+
+
+class LoadFloor(unittest.TestCase):
+    """What counts as a busy link, for the loaded/idle latency split.
+
+    The split used to borrow the Wi-Fi power-save floor of 25 kB/s, which on
+    this laptop sat inside the idle distribution: median minute 18 kB/s, p75
+    42 kB/s, and 36.6% of all minutes tagged loaded. Across 8,971 stored
+    minutes the loaded half read FASTER than the idle half 57% of the time —
+    a link cannot answer faster while busy, and a coin flip is what two
+    buckets holding the same thing look like.
+    """
+
+    class Link:
+        latest = {"ssid": "home"}
+
+    class Store:
+        def __init__(self, mbps):
+            self.mbps = mbps
+            self.calls = 0
+
+        def baseline_speed(self, **kw):
+            self.calls += 1
+            return self.mbps
+
+    def daemon(self, mbps):
+        d = Daemon.__new__(Daemon)
+        d.link = self.Link()
+        d.store = self.Store(mbps)
+        return d
+
+    def test_the_floor_is_a_tenth_of_what_the_line_carries(self):
+        d = self.daemon(400.0)                       # 400 Mbps = 50 MB/s
+        self.assertAlmostEqual(d.load_floor_bps(1000.0), 5_000_000.0, delta=1)
+
+    def test_a_slow_line_is_not_held_to_a_fast_line_s_bar(self):
+        # The whole reason the number is a fraction: 5 MB/s is a tenth of
+        # this laptop's line and more than a 10 Mbps line can ever carry, so
+        # a fixed rate would switch the split off entirely down there.
+        d = self.daemon(10.0)
+        floor = d.load_floor_bps(1000.0)
+        self.assertLess(floor, 10.0 * 1e6 / 8)
+        self.assertGreaterEqual(floor, LOAD_FLOOR_BPS)
+
+    def test_an_unmeasured_line_falls_back_to_the_floor(self):
+        self.assertEqual(self.daemon(None).load_floor_bps(1000.0), LOAD_FLOOR_BPS)
+
+    def test_background_chatter_never_reaches_the_floor(self):
+        # The stored median minute and p75 on this machine.
+        d = self.daemon(400.0)
+        floor = d.load_floor_bps(1000.0)
+        for chatter in (18_020, 42_290, 182_094):
+            self.assertLess(chatter, floor)
+
+    def test_it_is_read_once_a_minute_not_twice_a_second(self):
+        d = self.daemon(400.0)
+        for tick in range(0, 120, 1):
+            d.load_floor_bps(1000.0 + tick * 0.5)
+        self.assertLessEqual(d.store.calls, 2)
+
+    def test_a_store_that_throws_does_not_stop_the_probes(self):
+        d = self.daemon(400.0)
+
+        def boom(**kw):
+            raise RuntimeError("db is busy")
+
+        d.store.baseline_speed = boom
+        self.assertEqual(d.load_floor_bps(1000.0), LOAD_FLOOR_BPS)
 
 
 if __name__ == "__main__":
