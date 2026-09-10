@@ -117,6 +117,15 @@ MIN_LOAD_SPLIT_SAMPLES = 10
 # 1 MB/s 50%, at 2.5 MB/s 47%, and only at 5 MB/s do they fall to 29% with
 # loaded 19.9 ms against idle 16.6 — the direction physics requires.
 #
+# That selection is weaker than it looks and the fraction below rests mostly
+# on the 57% above, not on it. A minute's stored `rx_bps` is `self.rates`,
+# the 3-second sliding window, so it describes the END of a minute rather
+# than the minute: of 151 content checks, the median stored rate in the
+# check's own minute is 29 kB/s, below even the whole-minute average of
+# 233 kB/s, because a sub-second check rarely lands in the stored window.
+# The probes' own load flags — which is what the 57% is built from — are
+# unaffected, since each probe carries the tag it was measured under.
+#
 # 5 MB/s is a tenth of what this line carries, and a tenth is the number
 # worth keeping rather than the 5, because a fixed rate cannot serve a
 # 10 Mbps line and a gigabit one at once — the same lesson the content check
