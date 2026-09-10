@@ -1637,25 +1637,48 @@ class Daemon:
                 # How fast the queue emptied once traffic stopped. Depth is
                 # what everyone reports; duration is what a user feels after
                 # the download finishes.
-                "drain": self._drain(lists, splits)}
+                "drain": self._drain(lists, splits, self._active_keys())}
+
+    def _active_keys(self):
+        """Seated instrument keys, in the order `_active_series` yields them."""
+        return [i.key for i in self.bench.actives()
+                if i.key in self._instrument_series]
 
     @staticmethod
-    def _drain(lists, splits) -> dict:
+    def _drain(lists, splits, keys=None) -> dict:
         """drain_after_load per instrument, each against its own idle
         floor, the slowest one reported. Two instruments with different
         base round trips cannot share a baseline: measured against the
         lower one's floor the higher one never settles, and the lower one
         settles the moment its first post-load sample lands. The queue
         they drained through is the same, so the pessimistic view is the
-        honest one."""
-        worst = {"ms": None, "settled": None}
-        for samples, (idle, _) in zip(lists, splits):
+        honest one.
+
+        That last sentence is under review and the numbers beside `ms` are
+        why. Each instrument's value is the gap to its next observation, so
+        it is an UPPER BOUND floored at that instrument's own cadence —
+        which means taking the largest reliably selects whichever instrument
+        looks least often, and publishes it as the line being slow to drain.
+        `min_ms` is the tightest bound the same window offers and `src` names
+        the instrument the published value came from. Both are recorded per
+        minute so the choice can be settled from stored history rather than
+        argued from first principles, which is how it has been argued so far.
+        """
+        out = {"ms": None, "settled": None, "min_ms": None, "src": None}
+        keys = keys or []
+        for i, (samples, (idle, _)) in enumerate(zip(lists, splits)):
             base = Series.stats(idle).get("p50") if idle else None
             d = score.drain_after_load(samples, base)
-            if d.get("ms") is not None and (worst["ms"] is None
-                                            or d["ms"] > worst["ms"]):
-                worst = d
-        return worst
+            ms = d.get("ms")
+            if ms is None:
+                continue
+            if out["ms"] is None or ms > out["ms"]:
+                out["ms"] = ms
+                out["settled"] = d.get("settled")
+                out["src"] = keys[i] if i < len(keys) else None
+            if out["min_ms"] is None or ms < out["min_ms"]:
+                out["min_ms"] = ms
+        return out
 
     def compose_live(self, now: float) -> dict:
         """live.json, twice a second.
@@ -1882,6 +1905,16 @@ class Daemon:
                 "resp": resp, "rel": rel, "spd": spd, "idx": idx,
                 "lag_idle": bloat["idle"], "lag_loaded": bloat["loaded"],
                 "lag_icmp": icmp_lag,
+                # Stored so a published figure can be checked afterwards.
+                # `settled` as 1/0 rather than a bool: the column is REAL like
+                # its neighbours, and None stays None so "never measured" and
+                # "measured, did not settle" remain different answers.
+                "drain_ms": (bloat.get("drain") or {}).get("ms"),
+                "drain_min_ms": (bloat.get("drain") or {}).get("min_ms"),
+                "drain_settled": (
+                    None if (bloat.get("drain") or {}).get("settled") is None
+                    else float(bool((bloat["drain"])["settled"]))),
+                "drain_src": (bloat.get("drain") or {}).get("src"),
             },
             iface=self.route.get("iface", ""),
             network=snap_link.get("ssid", ""),

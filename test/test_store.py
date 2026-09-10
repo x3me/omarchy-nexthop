@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s test
 """
 
+import sqlite3
 import sys
 import tempfile
 import time
@@ -306,6 +307,81 @@ class RollupNetworkLabel(unittest.TestCase):
         self.assertEqual(by_ts[hour]["network"], "")
         self.assertEqual(by_ts[hour]["iface"], "wlo1")
         self.assertEqual(by_ts[hour + 3600]["network"], "Office")
+
+
+class DrainIsStored(unittest.TestCase):
+    """The drain was published and never stored, so it could not be audited.
+
+    That is why the distribution proving it is quantised by probe cadence had
+    to come from the other implementation: this one had no history to look at.
+    """
+
+    def store(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        s = Store(Path(d.name) / "t.db")
+        self.addCleanup(s.close)
+        return s
+
+    def test_a_minute_carries_the_drain_and_what_produced_it(self):
+        s = self.store()
+        s.put_minute(60, {"lag": 12.0, "drain_ms": 2000.0,
+                          "drain_min_ms": 1000.0, "drain_settled": 1.0,
+                          "drain_src": "tcp-anchor"},
+                     iface="wlan0", network="home", probes="icmp+tcp")
+        rows, _ = s.series(seconds=3600, now=120, resolution="minute")
+        row = rows[0]
+        self.assertEqual(row["drain_ms"], 2000.0)
+        self.assertEqual(row["drain_min_ms"], 1000.0)
+        self.assertEqual(row["drain_settled"], 1.0)
+        self.assertEqual(row["drain_src"], "tcp-anchor")
+
+    def test_never_measured_and_did_not_settle_stay_different(self):
+        # None is "no drain in this minute"; 0.0 is "measured, never came
+        # back inside the window". Collapsing them would turn a censored
+        # observation into a real one.
+        s = self.store()
+        s.put_minute(60, {"drain_ms": 30000.0, "drain_settled": 0.0}, network="home")
+        s.put_minute(120, {"lag": 9.0}, network="home")
+        got, _ = s.series(seconds=3600, now=180, resolution="minute")
+        rows = {r["ts"]: r for r in got}
+        self.assertEqual(rows[60]["drain_settled"], 0.0)
+        self.assertIsNone(rows[120]["drain_settled"])
+        self.assertIsNone(rows[120]["drain_ms"])
+
+    def test_the_drain_does_not_roll_up_into_an_hour(self):
+        """A mean of drains destroys the only thing it is stored for.
+
+        The value is quantised by probe cadence, so what has to survive is
+        the distribution. Sixty of them averaged has none of that in it —
+        the same objection the rollup already carries for percentiles, but
+        binding harder, because here the spread IS the finding.
+        """
+        from nexthopd.store import SAMPLE_COLUMNS
+        for c in ("drain_ms", "drain_min_ms", "drain_settled", "drain_src"):
+            self.assertNotIn(c, SAMPLE_COLUMNS)
+        s = self.store()
+        cols = [r[1] for r in s.db.execute("PRAGMA table_info(hour)")]
+        for c in ("drain_ms", "drain_min_ms", "drain_settled", "drain_src"):
+            self.assertNotIn(c, cols)
+
+    def test_an_older_database_gains_the_columns(self):
+        # Additive migration only, as every schema change here has been.
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = Path(d.name) / "old.db"
+        old = sqlite3.connect(path)
+        old.execute("CREATE TABLE minute (ts INTEGER PRIMARY KEY, lag REAL)")
+        old.execute("CREATE TABLE hour (ts INTEGER PRIMARY KEY, lag REAL)")
+        old.execute("CREATE TABLE tests (ts INTEGER, kind TEXT)")
+        old.execute("CREATE TABLE events (ts INTEGER, kind TEXT)")
+        old.commit()
+        old.close()
+        s = Store(path)
+        self.addCleanup(s.close)
+        cols = [r[1] for r in s.db.execute("PRAGMA table_info(minute)")]
+        for c in ("drain_ms", "drain_min_ms", "drain_settled", "drain_src"):
+            self.assertIn(c, cols)
 
 
 if __name__ == "__main__":

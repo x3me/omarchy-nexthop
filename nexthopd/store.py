@@ -36,11 +36,36 @@ SAMPLE_COLUMNS = [
     "lag_icmp",
 ]
 
+# Minute-only, and deliberately not in SAMPLE_COLUMNS: `rollup_hours` averages
+# everything in that list, and a mean of drains destroys the one thing the
+# drain is being stored for. Its value is quantised by probe cadence, so what
+# has to survive is the DISTRIBUTION — sixty of them averaged is a number with
+# none of that in it.
+#
+# 0.2.37. Until now the drain was published to live.json and stored nowhere,
+# so a figure on screen could never be checked afterwards; the distribution
+# that showed it was quantised had to come from the other implementation
+# because this one had no history to look at.
+#
+# Three numbers rather than one. `drain_settled` says whether the link
+# recovered or the window merely ended, so a censored floor is not read as a
+# measurement. `drain_min_ms` is the tightest bound across the seated
+# instruments beside the loosest, which is what is published today — carrying
+# both is what lets the choice between them be settled from history instead of
+# argued. `drain_src` names the instrument the published value came from,
+# because each instrument's value is floored at its own cadence and knowing
+# which one won is the difference between an auditable figure and a guess.
+MINUTE_ONLY_REAL = ["drain_ms", "drain_min_ms", "drain_settled"]
+MINUTE_ONLY_TEXT = ["drain_src"]
+
 _COLS_SQL = ", ".join(f"{c} REAL" for c in SAMPLE_COLUMNS)
+_MINUTE_EXTRA_SQL = ", ".join(
+    [f"{c} REAL" for c in MINUTE_ONLY_REAL] + [f"{c} TEXT" for c in MINUTE_ONLY_TEXT])
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS minute (
-  ts INTEGER PRIMARY KEY, {_COLS_SQL}, iface TEXT, network TEXT, probes TEXT
+  ts INTEGER PRIMARY KEY, {_COLS_SQL}, {_MINUTE_EXTRA_SQL},
+  iface TEXT, network TEXT, probes TEXT
 );
 CREATE TABLE IF NOT EXISTS hour (
   ts INTEGER PRIMARY KEY, {_COLS_SQL}, iface TEXT, network TEXT
@@ -111,11 +136,15 @@ class Store:
                               ("minute", "local_p75"), ("hour", "local_p75"),
                               ("minute", "local_max"), ("hour", "local_max"),
                               ("minute", "wan_p75"), ("hour", "wan_p75"),
-                              ("minute", "wan_max"), ("hour", "wan_max")):
+                              ("minute", "wan_max"), ("hour", "wan_max"),
+                              ("minute", "drain_ms"),
+                              ("minute", "drain_min_ms"),
+                              ("minute", "drain_settled"),
+                              ("minute", "drain_src")):
             try:
                 self.db.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} "
-                    f"{'TEXT' if column in ('network', 'probes') else 'REAL'}")
+                    f"{'TEXT' if column in ('network', 'probes', 'drain_src') else 'REAL'}")
             except sqlite3.OperationalError:
                 pass  # column already there
 
@@ -131,8 +160,11 @@ class Store:
     @_locked
     def put_minute(self, ts: int, values: dict, iface: str = "",
                    network: str = "", probes: str = ""):
-        cols = ["ts"] + SAMPLE_COLUMNS + ["iface", "network", "probes"]
-        row = ([int(ts)] + [values.get(c) for c in SAMPLE_COLUMNS]
+        extra = MINUTE_ONLY_REAL + MINUTE_ONLY_TEXT
+        cols = ["ts"] + SAMPLE_COLUMNS + extra + ["iface", "network", "probes"]
+        row = ([int(ts)]
+               + [values.get(c) for c in SAMPLE_COLUMNS]
+               + [values.get(c) for c in extra]
                + [iface, network, probes])
         placeholders = ", ".join("?" * len(cols))
         self.db.execute(
