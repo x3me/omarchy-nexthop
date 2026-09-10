@@ -342,7 +342,10 @@ class NlEventRecording(unittest.TestCase):
                                     "channel": 1, "signal_dbm": -30})
         watch.sample(1788278083.0, {"bssid": self.NEW, "ssid": "x",
                                     "channel": 149, "signal_dbm": -40})
-        evs = store.events()
+        # Read the log on the recording's own clock. store.events() windows
+        # on wall-clock now, so anchoring it anywhere else makes this test
+        # pass until the fixture is a week old and fail every day after.
+        evs = store.events(now=1788278083.0)
         self.assertEqual([e["kind"] for e in evs], ["kick"])
         self.assertEqual(
             evs[0]["detail"],
