@@ -19,6 +19,7 @@ import json
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from typing import Optional
 from urllib.parse import urlparse
@@ -143,10 +144,86 @@ def _curl_timed_download(url: str, timeout: float, resolve: str = None):
     return _rate_over_payload(size, t_total, t_start), int(size)
 
 
+def _upload_argv(url: str, timeout: float):
+    """The one upload invocation, shared by the single and parallel forms.
+
+    The body is piped in — pointing curl at /dev/zero directly would have it
+    read the file to its end, which /dev/zero does not have."""
+    return ["curl", "-fsS", "--proto", "=https", "--max-time", str(int(timeout)),
+            "-o", "/dev/null", "-X", "POST", "--data-binary", "@-",
+            "-H", "Content-Type: application/octet-stream",
+            # Not time_starttransfer: on a POST that is the first byte of the
+            # RESPONSE, and against speed.cloudflare.com it arrives right after
+            # the handshake (the 100-continue), not after the body. The TLS
+            # handshake completing is when this request starts putting bytes
+            # on the wire.
+            "-w", "%{size_upload} %{time_total} %{time_appconnect}", url]
+
+
+def _parallel_upload(url: str, per_stream: int, streams: int, timeout: float):
+    """Sum of concurrent upload stream rates.
+
+    The download learned in 0.1.x that one TCP stream cannot fill a fast line —
+    a single-stream check read this 450 Mbps connection as 54 — and grew
+    `_parallel_download` for it. The upload never did, in either the hourly
+    check or the peak, so both were reading one stream's ceiling and calling
+    it the line. Measured here: the same 2 MB carried by four streams instead
+    of one read 36% higher, and 4 MB over four streams read more than twice
+    what the shipping 2 MB over one did.
+
+    Every stream is handed the same immutable buffer, so the memory cost is
+    one stream's worth of zeros rather than N.
+    """
+    if not shutil.which("curl"):
+        return None, 0
+    body = b"\0" * per_stream
+    procs = []
+    for _ in range(streams):
+        try:
+            procs.append(subprocess.Popen(
+                _upload_argv(url, timeout), stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
+        except OSError:
+            pass
+    # A pipe holds far less than a stream's body, so writing them in turn
+    # would serialise the very thing being parallelised: each child gets a
+    # thread that feeds it and collects its result.
+    outs = [None] * len(procs)
+
+    def feed(i, proc):
+        try:
+            outs[i] = proc.communicate(input=body, timeout=timeout + 10)[0]
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    workers = [threading.Thread(target=feed, args=(i, proc), daemon=True)
+               for i, proc in enumerate(procs)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout + 15)
+
+    total_mbps, total_bytes, any_ok = 0.0, 0, False
+    for i, proc in enumerate(procs):
+        if proc.returncode != 0 or not outs[i]:
+            continue
+        try:
+            size, t_total, t_app = (float(x) for x in outs[i].decode().split())
+        except (ValueError, UnicodeDecodeError):
+            continue
+        mbps = _rate_over_payload(size, t_total, t_app)
+        total_bytes += int(size)
+        if mbps is None:
+            continue
+        any_ok = True
+        total_mbps += mbps
+    return (total_mbps if any_ok else None), total_bytes
+
+
 def _curl_timed_upload(url: str, n_bytes: int, timeout: float):
-    """Upload n_bytes of zeros. The body is piped in — pointing curl at
-    /dev/zero directly would have it read the file to its end, which
-    /dev/zero does not have."""
+    """One upload stream. Kept for the peak's estimate pass, which only needs
+    a rough rate to size the real one."""
     if not shutil.which("curl"):
         return None, 0
     cmd = ["curl", "-fsS", "--proto", "=https", "--max-time", str(int(timeout)),
@@ -217,14 +294,24 @@ def _parallel_download(url: str, streams: int, timeout: float):
     return (total_mbps if any_ok else None), total_bytes
 
 
-def content_test(down_bytes: int = 12_000_000, up_bytes: int = 2_000_000,
+def content_test(down_bytes: int = 12_000_000, up_bytes: int = 4_000_000,
                  streams: int = 4) -> dict:
-    """The scheduled check: ~14 MB total, a handful of seconds."""
+    """The scheduled check: ~16 MB total, a handful of seconds.
+
+    Both directions are carried by `streams` parallel connections, each with
+    the same 1 MB floor. The floor is not a detail: splitting a fixed budget
+    more ways makes every stream shorter, and a stream too short to time is
+    withheld — so a budget small enough to be split into slivers reads worse
+    than no split at all, and on the fastest lines could report nothing.
+    Upload's budget grew from 2 MB to 4 MB to stay above it.
+    """
     started = time.time()
     per_stream = max(1_000_000, down_bytes // streams)
+    up_per_stream = max(1_000_000, up_bytes // streams)
     down_mbps, down_n = _parallel_download(
         CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=30)
-    up_mbps, up_n = _curl_timed_upload(CLOUDFLARE_UP, up_bytes, timeout=30)
+    up_mbps, up_n = _parallel_upload(CLOUDFLARE_UP, up_per_stream, streams,
+                                     timeout=30)
     return {
         "kind": "content",
         "engine": "cloudflare",
@@ -318,8 +405,14 @@ def _peak_cloudflare() -> Optional[dict]:
     if up_est:
         best_up = up_est
         if _pass_seconds(up_est, size) < PEAK_TARGET_S * 0.6:
-            n = _sized_pass(up_est, PEAK_UP_FLOOR, PEAK_UP_CAP)
-            mbps, size = _curl_timed_upload(CLOUDFLARE_UP, n, timeout=40)
+            # Per stream, as the download pass already sizes itself: the same
+            # total goes up, split four ways, so this costs no more data than
+            # the single stream it replaces and stops reading one stream's
+            # ceiling as the line.
+            n = _sized_pass(up_est / PEAK_STREAMS, PEAK_UP_FLOOR // PEAK_STREAMS,
+                            PEAK_UP_CAP // PEAK_STREAMS)
+            mbps, size = _parallel_upload(CLOUDFLARE_UP, n, PEAK_STREAMS,
+                                          timeout=40)
             total += size
             if mbps:
                 best_up = max(best_up, mbps)

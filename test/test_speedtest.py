@@ -292,5 +292,175 @@ class ParallelStreamAccounting(unittest.TestCase):
         self.assertEqual(size, 6_000_000)
 
 
+class ParallelUploadAccounting(unittest.TestCase):
+    """Upload was measured on one stream, in both the check and the peak.
+
+    The download learned in 0.1.x that a single TCP stream reads its own
+    ceiling rather than the line's, and grew `_parallel_download` for it. The
+    upload never did. Measured against speed.cloudflare.com on a ~450 Mbps
+    line: the same 2 MB carried by four streams read 36% higher than by one.
+    """
+
+    class FakeProc:
+        def __init__(self, out, rc=0):
+            self._out, self.returncode, self.fed = out, rc, None
+
+        def communicate(self, input=None, timeout=None):
+            self.fed = input
+            return self._out, None
+
+        def kill(self):
+            pass
+
+        def wait(self):
+            pass
+
+    def parallel(self, outputs, per_stream=1_000_000):
+        from nexthopd import speedtest
+        queue = list(outputs)
+        made = []
+        real = speedtest.subprocess.Popen
+
+        def fake(*a, **k):
+            proc = self.FakeProc(queue.pop(0))
+            made.append(proc)
+            return proc
+
+        speedtest.subprocess.Popen = fake
+        try:
+            got = speedtest._parallel_upload("https://x/y", per_stream,
+                                             len(outputs), 5)
+        finally:
+            speedtest.subprocess.Popen = real
+        return got, made
+
+    def test_streams_are_summed_over_their_own_payload_windows(self):
+        out = b"1000000 0.29 0.09"          # 8 Mbit in 200 ms -> 40 Mbps
+        (mbps, size), _ = self.parallel([out, out, out, out])
+        self.assertAlmostEqual(mbps, 160.0, places=4)
+        self.assertEqual(size, 4_000_000)
+
+    def test_every_stream_is_fed_the_same_buffer(self):
+        # One body, N readers: the memory cost is a stream's worth, not N.
+        out = b"1000000 0.29 0.09"
+        _, made = self.parallel([out, out, out])
+        self.assertEqual(len(made), 3)
+        self.assertEqual(len(made[0].fed), 1_000_000)
+        for proc in made[1:]:
+            self.assertIs(proc.fed, made[0].fed)
+
+    def test_every_stream_untimeable_reports_no_rate_not_zero(self):
+        out = b"1000000 0.101 0.09"          # 11 ms window: below the floor
+        (mbps, size), _ = self.parallel([out, out])
+        self.assertIsNone(mbps)
+        self.assertEqual(size, 2_000_000)
+
+    def test_a_failed_stream_costs_its_own_share_and_no_more(self):
+        from nexthopd import speedtest
+        queue = [b"1000000 0.29 0.09", b""]
+        made = []
+        real = speedtest.subprocess.Popen
+
+        def fake(*a, **k):
+            proc = self.FakeProc(queue.pop(0), rc=0 if len(made) == 0 else 1)
+            made.append(proc)
+            return proc
+
+        speedtest.subprocess.Popen = fake
+        try:
+            mbps, size = speedtest._parallel_upload("https://x/y", 1_000_000, 2, 5)
+        finally:
+            speedtest.subprocess.Popen = real
+        self.assertAlmostEqual(mbps, 40.0, places=4)
+        self.assertEqual(size, 1_000_000)
+
+    def test_the_upload_invocation_keeps_its_scheme_floor_and_timing_field(self):
+        from nexthopd import speedtest
+        argv = speedtest._upload_argv("https://x/y", 30)
+        self.assertIn("--proto", argv)
+        self.assertIn("=https", argv)
+        joined = " ".join(argv)
+        self.assertIn("%{time_appconnect}", joined)
+        self.assertNotIn("%{speed_upload}", joined)
+        self.assertNotIn("%{time_starttransfer}", joined)
+
+
+class ContentBudgetSurvivesTheSplit(unittest.TestCase):
+    """Splitting a fixed budget more ways is how the download bug worked.
+
+    Every stream must stay long enough to be timeable, or parallelising makes
+    the reading worse — and on the fastest lines would withhold it entirely.
+    """
+
+    def sizing(self):
+        import inspect
+        from nexthopd import speedtest
+        sig = inspect.signature(speedtest.content_test)
+        streams = sig.parameters["streams"].default
+        return (speedtest,
+                max(1_000_000, sig.parameters["down_bytes"].default // streams),
+                max(1_000_000, sig.parameters["up_bytes"].default // streams),
+                streams)
+
+    def test_the_line_speed_each_direction_can_still_time(self):
+        """The ceiling this sizing carries, pinned rather than hoped for.
+
+        A stream stops being timeable once its payload takes less than
+        MIN_TIMED_WINDOW_S, and past that the figure is withheld — the right
+        failure, but a real limit. Download's 3 MB a stream holds to about
+        1.9 Gbps; upload's 1 MB holds to about 640 Mbps. Symmetric gigabit is
+        past the upload ceiling, and matching the download's headroom would
+        cost 12 MB of upload an hour, which is not worth it for the lines it
+        would serve. Change the sizing and this number moves: that is the point
+        of writing it down.
+        """
+        speedtest, down_per, up_per, streams = self.sizing()
+
+        def ceiling_mbps(per_stream):
+            return (per_stream * 8 / 1e6) / speedtest.MIN_TIMED_WINDOW_S * streams
+
+        self.assertAlmostEqual(ceiling_mbps(down_per), 1920.0, places=1)
+        self.assertAlmostEqual(ceiling_mbps(up_per), 640.0, places=1)
+
+    def test_no_stream_falls_below_the_floor(self):
+        _, down_per, up_per, _ = self.sizing()
+        self.assertGreaterEqual(down_per, 1_000_000)
+        self.assertGreaterEqual(up_per, 1_000_000)
+
+    def test_the_upload_budget_is_not_slivered_by_the_split(self):
+        # 2 MB over four streams would be 500 kB each, which stops being
+        # timeable at 80 Mbps a stream — on exactly the fast lines this is for.
+        import inspect
+        from nexthopd import speedtest
+        up = inspect.signature(speedtest.content_test).parameters["up_bytes"].default
+        streams = inspect.signature(speedtest.content_test).parameters["streams"].default
+        self.assertGreaterEqual(up // streams, 1_000_000)
+
+
+class PeakUploadCostIsUnchangedByParallelism(unittest.TestCase):
+    """Splitting a pass must not multiply what it spends.
+
+    The peak's sustained upload used to be one stream of up to PEAK_UP_CAP.
+    It is now PEAK_STREAMS of a per-stream size, and the point of sizing per
+    stream rather than per pass is that the total stays where it was.
+    """
+
+    def test_the_cap_still_bounds_the_whole_pass(self):
+        from nexthopd import speedtest
+        per_stream_cap = speedtest.PEAK_UP_CAP // speedtest.PEAK_STREAMS
+        self.assertLessEqual(per_stream_cap * speedtest.PEAK_STREAMS,
+                             speedtest.PEAK_UP_CAP)
+
+    def test_a_pass_is_sized_for_the_rate_one_stream_carries(self):
+        from nexthopd import speedtest
+        # 400 Mbps over four streams is 100 Mbps a stream; ten seconds of that
+        # is 125 MB, which the per-stream cap holds down to 25 MB.
+        n = speedtest._sized_pass(400.0 / speedtest.PEAK_STREAMS,
+                                  speedtest.PEAK_UP_FLOOR // speedtest.PEAK_STREAMS,
+                                  speedtest.PEAK_UP_CAP // speedtest.PEAK_STREAMS)
+        self.assertLessEqual(n * speedtest.PEAK_STREAMS, speedtest.PEAK_UP_CAP)
+        self.assertGreaterEqual(n, speedtest.PEAK_UP_FLOOR // speedtest.PEAK_STREAMS)
+
+
 if __name__ == "__main__":
     unittest.main()

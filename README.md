@@ -35,7 +35,7 @@ the router owns the problem.
   no fan, no stutter, nothing competing with your work.
 - **It doesn't clog your line.** The probes are pings and payload-free
   handshakes and add up to a few MB an hour; the hourly speed check is
-  about 14 MB and can be turned off. Nothing saturates your connection
+  about 16 MB and can be turned off. Nothing saturates your connection
   unless you press the button.
 - **Private by construction.** Everything it measures stays on your machine
   — no account, no cloud, no telemetry. Even your own IP is shown masked, so
@@ -112,7 +112,7 @@ The event log, naming who did what — including the router that kicks:
   - *Responsiveness* — scored from lag
   - *Reliability* — uptime, charged in time: outages in full, brief
     self-healed interruptions at half
-  - *Speed* — scored from small periodic **content checks** (~14 MB,
+  - *Speed* — scored from small periodic **content checks** (~16 MB,
     hourly by default), not from saturating speed tests. No configuration:
     the score answers "is it fast enough" on an experience-anchored curve
     (diminishing returns past ~100 Mbps), minus a penalty when the line
@@ -195,7 +195,7 @@ the repository you installed from.
 | ICMP | your gateway, and the anchor while seated | ~30 MB/day per target on the wire at the default 500 ms — two 84-byte packets a second; the gateway's share never leaves your LAN |
 | TCP handshakes | the instrument pool, port 443, ~1/s while seated | ~20 MB/day per seated instrument — connections opened and closed, no payload |
 | Reachability check | speed.cloudflare.com/cdn-cgi/trace | one ~1 KB HTTPS request when the network changes and hourly after that; every 30 s only while a sign-in page is suspected. Proves the real internet answered, and supplies the WAN address |
-| Content check | speed.cloudflare.com | ~14 MB each, hourly, and can be turned off |
+| Content check | speed.cloudflare.com | ~16 MB each, hourly, and can be turned off |
 | Peak test | Ookla / Cloudflare / fast.com | up to ~600 MB, **only ever when you ask** |
 | Update check | the repository you installed from (`git ls-remote`) | one request a day, carrying nothing about you; off in the Setup tab |
 
