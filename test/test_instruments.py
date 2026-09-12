@@ -47,59 +47,85 @@ class BenchSeats(unittest.TestCase):
     def keys(self, b):
         return sorted(i.key for i in b.actives())
 
-    def test_first_two_start_seated(self):
-        self.assertEqual(self.keys(self.bench()), ["icmp-a", "tcp-a"])
+    def test_the_opening_pair_spans_two_hosts(self):
+        """Not `pool[:2]`, which was one host wearing two protocols.
+
+        `icmp-a` and `tcp-a` both point at 1.1.1.1, so seating both put every
+        scored instrument on one address before any evidence existed. On a
+        network that blocks it, that is a false outage at 4 s and a desktop
+        notification at 5 s on every daemon start, with no way back until the
+        bench's next pass a minute later (#5).
+        """
+        self.assertEqual(self.keys(self.bench()), ["icmp-a", "tcp-b"])
+
+    def test_a_blocked_anchor_still_leaves_a_working_seat(self):
+        """The property the pairing exists for.
+
+        One live instrument is enough: the leg answers if either does, so no
+        outage is declared while the bench re-ranks.
+        """
+        b = self.bench()
+        hosts = {i.target.rpartition(":")[0] or i.target for i in b.actives()}
+        self.assertEqual(len(hosts), 2)
+        anchor_seats = [i for i in b.actives() if i.target.startswith("1.1.1.1")]
+        self.assertEqual(len(anchor_seats), 1)
+
+    def test_a_pool_with_one_host_still_fills_both_seats(self):
+        # Fewer scored instruments than the bench expects is the worse
+        # failure, so a pool that cannot offer two hosts falls back to order.
+        b = Bench([("icmp-a", "icmp", "1.1.1.1"), ("tcp-a", "tcp", "1.1.1.1:443")])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
 
     def test_dead_seat_is_replaced_immediately(self):
         b = self.bench()
-        stats = {"icmp-a": _st(), "tcp-a": _st(loss=1.0, p50=None, p95=None),
-                 "tcp-b": _st(p50=25, p95=35), "tcp-c": _st(p50=40, p95=60)}
+        stats = {"icmp-a": _st(), "tcp-b": _st(loss=1.0, p50=None, p95=None),
+                 "tcp-a": _st(p50=25, p95=35), "tcp-c": _st(p50=40, p95=60)}
         changes = b.evaluate(1000.0, stats)
-        self.assertEqual(sorted(changes), [("tcp-a", False), ("tcp-b", True)])
-        self.assertEqual(self.keys(b), ["icmp-a", "tcp-b"])
+        self.assertEqual(sorted(changes), [("tcp-a", True), ("tcp-b", False)])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
 
     def test_no_churn_during_a_full_outage(self):
         b = self.bench()
         dead = _st(loss=1.0, p50=None, p95=None)
         stats = {k: dict(dead) for k in ("icmp-a", "tcp-a", "tcp-b", "tcp-c")}
         self.assertEqual(b.evaluate(1000.0, stats), [])
-        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-b"])
 
     def test_challenger_needs_two_consecutive_clear_wins(self):
         b = self.bench()
-        # tcp-b is 20%+ better than the worst seat; one win is not enough.
-        stats = {"icmp-a": _st(p50=10, p95=14), "tcp-a": _st(p50=100, p95=160),
-                 "tcp-b": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
+        # tcp-a is 20%+ better than the worst seat; one win is not enough.
+        stats = {"icmp-a": _st(p50=10, p95=14), "tcp-b": _st(p50=100, p95=160),
+                 "tcp-a": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
         self.assertEqual(b.evaluate(1000.0, stats), [])
         changes = b.evaluate(1000.0 + Bench.RESELECT_EVERY_S, stats)
-        self.assertEqual(sorted(changes), [("tcp-a", False), ("tcp-b", True)])
-        self.assertEqual(self.keys(b), ["icmp-a", "tcp-b"])
+        self.assertEqual(sorted(changes), [("tcp-a", True), ("tcp-b", False)])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
 
     def test_a_win_streak_broken_starts_over(self):
         b = self.bench()
-        better = {"icmp-a": _st(p50=10, p95=14), "tcp-a": _st(p50=100, p95=160),
-                  "tcp-b": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
-        level = {"icmp-a": _st(p50=10, p95=14), "tcp-a": _st(p50=19, p95=24),
-                 "tcp-b": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
+        better = {"icmp-a": _st(p50=10, p95=14), "tcp-b": _st(p50=100, p95=160),
+                  "tcp-a": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
+        level = {"icmp-a": _st(p50=10, p95=14), "tcp-b": _st(p50=19, p95=24),
+                 "tcp-a": _st(p50=20, p95=24), "tcp-c": _st(p50=90, p95=150)}
         t = 1000.0
         self.assertEqual(b.evaluate(t, better), [])
         self.assertEqual(b.evaluate(t + 300, level), [])   # streak broken
         self.assertEqual(b.evaluate(t + 600, better), [])  # back to one win
-        self.assertEqual(self.keys(b), ["icmp-a", "tcp-a"])
+        self.assertEqual(self.keys(b), ["icmp-a", "tcp-b"])
 
     def test_flapping_instrument_is_quarantined(self):
         b = self.bench()
-        inst = b.instruments["tcp-b"]
+        inst = b.instruments["tcp-a"]
         t = 1000.0
         # Three seat changes inside an hour is a flap.
-        for k, active in (("tcp-b", True), ("tcp-b", False), ("tcp-b", True)):
+        for _, active in (("tcp-a", True), ("tcp-a", False), ("tcp-a", True)):
             b._seat(inst, t, active)
             t += 60
         self.assertGreater(inst.quarantined_until, t)
         # While quarantined it cannot be promoted, even over a corpse.
         b._seat(inst, t, False)
-        stats = {"icmp-a": _st(), "tcp-a": _st(loss=1.0, p50=None, p95=None),
-                 "tcp-b": _st(p50=5, p95=6), "tcp-c": _st(p50=40, p95=60)}
+        stats = {"icmp-a": _st(), "tcp-b": _st(loss=1.0, p50=None, p95=None),
+                 "tcp-a": _st(p50=5, p95=6), "tcp-c": _st(p50=40, p95=60)}
         b.evaluate(t + 60, stats)
         self.assertEqual(self.keys(b), ["icmp-a", "tcp-c"])
 

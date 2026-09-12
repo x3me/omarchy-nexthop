@@ -165,7 +165,7 @@ daemon writes, one the panel writes for it:
 | `$XDG_RUNTIME_DIR/nexthop/recent.json` | every 5 s | the panel's 30-min graphs |
 | `$XDG_RUNTIME_DIR/nexthop/apps.json` | every 3 s | the Apps tab |
 | `~/.local/state/nexthop/history.db` | 1-min rows | `nexthop query`, longer windows |
-| `~/.local/state/nexthop/config.json` | when a setting changes | the daemon — the one file the panel writes |
+| `~/.local/state/nexthop/config.json` | when a setting changes | the daemon — **derived, not edited**: the panel rewrites it from your bar entry every time the shell starts, so changes made here are overwritten. Settings live in `~/.config/omarchy/shell.json` |
 
 The three snapshots are rewritten many times a minute between them and mean
 nothing after a reboot, so they live in the session's runtime directory,

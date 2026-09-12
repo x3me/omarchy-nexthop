@@ -54,6 +54,20 @@ def penalty(stats):
     return DEAD_PENALTY * loss + spread + 0.1 * p50
 
 
+def host_of(target: str) -> str:
+    """The address part of an instrument's target.
+
+    So that two instruments pointed at the same machine are recognisable as
+    such: `1.1.1.1` and `1.1.1.1:443` are one host wearing two protocols. A
+    trailing `:port` is stripped only when what remains holds no colon of its
+    own, which leaves an IPv6 literal intact rather than truncating it.
+    """
+    head, sep, tail = target.rpartition(":")
+    if sep and tail.isdigit() and ":" not in head:
+        return head
+    return target
+
+
 class Instrument:
     def __init__(self, key: str, kind: str, target: str = ""):
         self.key = key
@@ -85,14 +99,55 @@ class Bench:
     DEAD_AT = DEAD_PENALTY * 0.95
 
     def __init__(self, pool):
-        """pool: ordered [(key, kind, target)]; the first two start active,
-        which is the pre-0.2.0 pair — continuity until the first ranking."""
+        """pool: ordered [(key, kind, target)].
+
+        The opening seats span two DISTINCT hosts rather than being the first
+        two in the pool. They used to be `pool[:2]` — ICMP and TCP to the
+        anchor, the pre-0.2.0 pair, kept for continuity until the first
+        ranking. On any network that blocks the anchor outright that put both
+        scored seats on a dead host at every start: the outage watch opens at
+        4 s, the notification fires at 5 s, and the bench cannot reseat until
+        its next pass a minute later. A false outage and a desktop alert on
+        every daemon start, and the daemon restarts on a shell restart, a
+        version handover and a probe-settings change (#5).
+
+        One working seat is enough to prevent it — the leg answers if either
+        instrument does — so the rule is simply that the pair must not be one
+        host twice. The bench re-ranks from there as it always did; this only
+        decides what is seated before there is anything to rank.
+
+        Not fixed by changing the default anchor: every candidate address is
+        blocked on somebody's network, so that moves the report rather than
+        closing it.
+        """
         self.instruments = {}
-        for i, (key, kind, target) in enumerate(pool):
-            inst = Instrument(key, kind, target)
-            inst.active = i < self.ACTIVE_N
-            self.instruments[key] = inst
+        for key, kind, target in pool:
+            self.instruments[key] = Instrument(key, kind, target)
+        for inst in self._opening_seats():
+            inst.active = True
         self._last_reselect = 0.0
+
+    def _opening_seats(self):
+        """The first instruments of the pool that do not share a host."""
+        seats, hosts = [], set()
+        for inst in self.instruments.values():
+            if len(seats) >= self.ACTIVE_N:
+                break
+            host = host_of(inst.target)
+            if host in hosts:
+                continue
+            seats.append(inst)
+            hosts.add(host)
+        # A pool offering fewer distinct hosts than there are seats fills the
+        # rest in order: fewer scored instruments than the bench expects is a
+        # worse failure than two of them sharing a host.
+        if len(seats) < self.ACTIVE_N:
+            for inst in self.instruments.values():
+                if len(seats) >= self.ACTIVE_N:
+                    break
+                if inst not in seats:
+                    seats.append(inst)
+        return seats
 
     def actives(self):
         return [i for i in self.instruments.values() if i.active]
