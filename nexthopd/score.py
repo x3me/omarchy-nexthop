@@ -394,37 +394,33 @@ def wan_from(total: dict, local: dict) -> dict:
     prev = 0.0
     for key in ("p50", "p75", "p95", "max"):
         t, l = total.get(key), local.get(key)
-        if t is not None and l is not None and l > t + WAN_INVERSION_TOLERANCE_MS:
-            # The router answered SLOWER than the internet behind it, so
-            # `total = local + wan` does not hold and the subtraction has
-            # nothing to say. Clamping the negative to zero used to report
-            # the ISP leg as 0.0 ms — the best possible answer, from an
-            # invalid measurement, on the number the whole panel is built
-            # around. It happens for a real reason: plenty of gateways
-            # deprioritise or rate-limit ICMP addressed to themselves, so
-            # their own replies are slow while everything they forward is
-            # fast. That says something about the gateway's control plane,
-            # not about the link, and it cannot be turned into the ISP's
-            # share of the round trip.
-            out[key] = None
-            continue
-        if t is None or l is None:
-            # Unknown, not zero. Substituting 0 for a local statistic we do
-            # not have made the derived leg equal the whole round trip, so a
-            # silent gateway produced a confident, healthy-looking internet
-            # figure that was really the total wearing the wan leg's label.
-            # We do not know the ISP's share without the router's, and
-            # saying so beats inventing one.
+        # One refusal, in one place — `wan_point_ms` — for both reasons it
+        # refuses, because a rule whose whole job is to withhold must not
+        # have a second copy that can forget to.
+        #
+        # It withholds when the router answered SLOWER than the internet
+        # behind it, because `total = local + wan` does not hold and the
+        # subtraction has nothing to say. Clamping the negative to zero used
+        # to report the ISP leg as 0.0 ms — the best possible answer, from an
+        # invalid measurement, on the number the whole panel is built around.
+        # It happens for a real reason: plenty of gateways deprioritise or
+        # rate-limit ICMP addressed to themselves, so their own replies are
+        # slow while everything they forward is fast. That says something
+        # about the gateway's control plane, not about the link.
+        #
+        # And when either reading is missing: unknown, not zero. Substituting
+        # 0 for a local statistic we do not have made the derived leg equal
+        # the whole round trip, so a silent gateway produced a confident,
+        # healthy-looking internet figure that was really the total wearing
+        # the wan leg's label.
+        v = wan_point_ms(t, l)
+        if v is None:
             out[key] = None
             continue
         # Subtracting two independent distributions statistic-by-statistic
         # can invert the order (a wan p95 below the wan p50) when the local
         # leg's tail is fatter than the total's. Each statistic is floored
         # at the one before it so the derived leg reads like a distribution.
-        v = wan_point_ms(t, l)
-        if v is None:
-            out[key] = None
-            continue
         # The floor has to carry forward FLOORED, not raw: `prev` is what the
         # previous statistic ended up reporting, so a p95 that subtracts lower
         # than the p50 still reads as a distribution.

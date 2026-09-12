@@ -495,6 +495,26 @@ class WanPerPoint(unittest.TestCase):
         self.assertIsNone(score.wan_point_ms(None, 2.0))
         self.assertIsNone(score.wan_point_ms(None, None))
 
+    def test_the_per_point_rule_refuses_exactly_when_wan_from_does(self):
+        """The two must never disagree about WHAT THEY REFUSE.
+
+        Raised by the HopSense session 2026-09-12: their Go port is pinned to
+        `wan_from` by golden vectors, and a per-point refusal is a surface
+        those vectors do not cover. They cannot diverge today because
+        `wan_from` calls this helper — this pins that they still cannot after
+        someone inlines it back for speed.
+        """
+        cases = [(10.0, 2.0), (10.0, 10.0), (10.0, 10.5), (10.0, 11.5),
+                 (10.0, 30.0), (0.5, 0.4), (None, 2.0), (10.0, None),
+                 (None, None), (0.0, 0.0)]
+        for total, local in cases:
+            point = score.wan_point_ms(total, local)
+            window = score.wan_from({"p50": total, "count": 9}, {"p50": local})
+            self.assertEqual(
+                point is None, window["p50"] is None,
+                "disagreed on total=%s local=%s: point=%s window=%s"
+                % (total, local, point, window["p50"]))
+
     def test_wan_from_still_floors_each_statistic_at_the_last(self):
         # The helper is unfloored by design; `wan_from` carries the floor
         # forward FLOORED, which is what keeps a derived leg reading like a

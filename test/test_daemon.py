@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from nexthopd import daemon as daemon_mod  # noqa: E402
 from nexthopd import score  # noqa: E402
 from nexthopd.daemon import (  # noqa: E402
     CHECK_DEFER_MAX_S,
@@ -1115,6 +1116,59 @@ class LoadFloor(unittest.TestCase):
 
         d.store.baseline_speed = boom
         self.assertEqual(d.load_floor_bps(1000.0), LOAD_FLOOR_BPS)
+
+
+class RoamDoesNotResetTheSeries(unittest.TestCase):
+    """A roam is the same network, so the history must survive it.
+
+    Raised by the HopSense session 2026-09-12: their sparkline filters rows by
+    network fingerprint because their sink keeps every network a device has
+    been on. Ours resets upstream instead, on a route change — so the question
+    is whether a BSSID change without a gateway change counts as one. It must
+    not: this laptop's own network kicked every station once a minute for a
+    while, and a series that reset on each roam would be permanently empty.
+    """
+
+    def daemon(self, route):
+        d = Daemon.__new__(Daemon)
+        d.route = route
+        d.config = {"internetAnchor": "1.1.1.1"}
+        d.rebuilt = []
+        d._rebuild_probes = lambda fresh: d.rebuilt.append(fresh)
+        return d
+
+    def run_with(self, current, fresh):
+        d = self.daemon(current)
+        real = daemon_mod.net.route_to
+        daemon_mod.net.route_to = lambda anchor: fresh
+        try:
+            Daemon.restart_probes_if_route_changed(d)
+        finally:
+            daemon_mod.net.route_to = real
+        return d.rebuilt
+
+    def test_a_roam_keeps_the_series(self):
+        # Same gateway, same interface: only the access point changed.
+        here = {"gateway": "192.168.10.1", "iface": "wlo1"}
+        self.assertEqual(self.run_with(here, dict(here)), [])
+
+    def test_a_different_gateway_resets(self):
+        rebuilt = self.run_with({"gateway": "192.168.10.1", "iface": "wlo1"},
+                                {"gateway": "10.0.0.1", "iface": "wlo1"})
+        self.assertEqual(len(rebuilt), 1)
+
+    def test_a_different_interface_resets(self):
+        # Docking: the same address on a different link is a different path.
+        rebuilt = self.run_with({"gateway": "192.168.10.1", "iface": "wlo1"},
+                                {"gateway": "192.168.10.1", "iface": "eth0"})
+        self.assertEqual(len(rebuilt), 1)
+
+    def test_losing_the_route_is_an_outage_not_a_new_network(self):
+        # Resetting here throws away the run-up to the drop, which is the one
+        # window a user wants afterwards.
+        self.assertEqual(
+            self.run_with({"gateway": "192.168.10.1", "iface": "wlo1"},
+                          {"gateway": None, "iface": "wlo1"}), [])
 
 
 if __name__ == "__main__":
