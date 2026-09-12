@@ -954,6 +954,46 @@ class LinkOffTheLoop(unittest.TestCase):
         self.assertTrue(c.is_alive())
 
 
+class SnapshotFreshnessBudget(unittest.TestCase):
+    """Nothing on the loop may be budgeted for longer than the snapshot it
+    delays is allowed to be old.
+
+    The loop writes live.json and then does work. `AppTraffic.poll()` is
+    the only blocking call left in that stretch, so its deadline is how
+    stale live.json can get — and past `BarWidget.staleAfterS` the bar
+    stops believing the daemon: glyph only, no index, no headline, and
+    since 0.2.39 no liveness ring on the path sparklines. Both numbers
+    were 5: one file's worst case was exactly the other file's failure
+    threshold, so a single slow `ss` could report a perfectly healthy
+    daemon as absent.
+
+    Pin the relationship, not either number — they live in different
+    files and in different languages, and neither one is wrong alone.
+    """
+
+    def stale_after_s(self):
+        import re
+        src = (REPO / "BarWidget.qml").read_text()
+        m = re.search(r"property\s+int\s+staleAfterS\s*:\s*(\d+)", src)
+        self.assertIsNotNone(
+            m, "staleAfterS is gone from BarWidget — find where the "
+               "staleness contract moved and re-point this test")
+        return float(m.group(1))
+
+    def test_the_blocking_poll_fits_well_inside_the_staleness_contract(self):
+        from nexthopd.apps import AppTraffic
+        contract = self.stale_after_s()
+        self.assertLess(
+            AppTraffic.POLL_DEADLINE_S, contract / 2.0,
+            "a full-deadline ss read would age live.json into the "
+            "bar's no-data state on a healthy daemon")
+
+    def test_the_poll_deadline_covers_the_reap_too(self):
+        """The budget is the call's, not the read's — see `_reap`."""
+        from nexthopd.apps import REAP_RESERVE_S, AppTraffic
+        self.assertLess(REAP_RESERVE_S, AppTraffic.POLL_DEADLINE_S)
+
+
 class LiveJsonContract(unittest.TestCase):
     """Every key the QML reads off live.json must be one compose_live
     publishes. The dict literal is the contract; this pins the two halves

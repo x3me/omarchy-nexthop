@@ -183,6 +183,15 @@ def parse_ss(raw: str, max_sockets: int = 10_000) -> dict:
     return out
 
 
+# Reaping is inside the budget, not after it. This whole call runs on the
+# daemon's loop, so what the caller needs bounded is the block the loop
+# suffers — the read plus getting rid of the child. Spending the deadline
+# reading and then seconds terminating meets the letter and misses the
+# point; that gap is what let a slow `ss` push live.json past the age at
+# which the bar calls the daemon dead.
+REAP_RESERVE_S = 0.25
+
+
 def read_bounded(proc, max_bytes: int, deadline_s: float):
     """The child's stdout, capped in size and in time, then the child reaped.
 
@@ -190,10 +199,14 @@ def read_bounded(proc, max_bytes: int, deadline_s: float):
     deadline — it is killed and waited for either way, so nothing lingers.
     Output past the cap is discarded and the process stopped: the sample
     stays bounded and simply under-counts, which is the existing contract.
+
+    `deadline_s` bounds the CALL, reaping included, because that is the
+    figure the caller budgets against.
     """
     fd = proc.stdout.fileno()
     os.set_blocking(fd, False)
-    deadline = time.monotonic() + deadline_s
+    reserve = max(0.05, min(REAP_RESERVE_S, deadline_s * 0.5))
+    deadline = time.monotonic() + max(0.0, deadline_s - reserve)
     chunks, total, timed_out = [], 0, False
     try:
         while total <= max_bytes:
@@ -216,24 +229,32 @@ def read_bounded(proc, max_bytes: int, deadline_s: float):
         timed_out = True
     finally:
         proc.stdout.close()
-        _reap(proc, deadline)
+        _reap(proc, reserve)
     if timed_out:
         return None
     return b"".join(chunks)[:max_bytes].decode("utf-8", "replace")
 
 
-def _reap(proc, deadline: float):
-    """Terminate if still running, escalate to kill, always wait — a
-    signalled child that is never waited for is a zombie until the next
-    Popen happens to collect it."""
+def _reap(proc, budget_s: float):
+    """Terminate if still running, escalate to kill, and wait — within
+    `budget_s`, because this runs on the daemon's loop.
+
+    A signalled child that is never waited for is a zombie until the next
+    Popen happens to collect it, so waiting is right; waiting without a
+    bound is not. A child that survives SIGKILL for longer than this is in
+    uninterruptible sleep, and no amount of further waiting is going to
+    help — leaving it for the next poll to collect costs a transient
+    zombie, while blocking here costs the snapshot the whole bar reads.
+    """
+    half = max(0.05, budget_s * 0.5)
     try:
         if proc.poll() is None:
             proc.terminate()
-            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            proc.wait(timeout=half)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
-            proc.wait(timeout=2)
+            proc.wait(timeout=half)
         except (OSError, subprocess.TimeoutExpired):
             pass
     except OSError:
@@ -267,7 +288,19 @@ class AppTraffic:
     # on a busy machine that can stall. The read is bounded in time as
     # well as size, because a read with no deadline holds the daemon's
     # loop — and its outage watch — for as long as `ss` does.
-    POLL_DEADLINE_S = 5.0
+    #
+    # The size of the bound is not free either. This call is the only
+    # blocking one left on the loop, and the loop writes live.json just
+    # before it, so whatever this is budgeted for is how stale that
+    # snapshot can get. The bar calls the daemon dead at
+    # `BarWidget.staleAfterS` (5 s) — so a 5 s budget here, which is what
+    # this was, could blank the index, the headline and the path
+    # sparklines' liveness ring on a daemon that was measuring perfectly.
+    # A third of the contract leaves room for the rest of the iteration.
+    # Overrunning it costs one interval of app counters, which the Apps
+    # tab already degrades honestly; the alternative cost the whole bar.
+    # A test pins this against the QML number rather than either alone.
+    POLL_DEADLINE_S = 1.5
 
     def poll(self) -> bool:
         if not shutil.which("ss"):

@@ -187,8 +187,41 @@ class SubprocessBounds(unittest.TestCase):
              " time.sleep(30)"], stdout=subprocess.PIPE)
         t0 = time.monotonic()
         self.assertIsNone(read_bounded(proc, 4096, 0.3))
-        self.assertLess(time.monotonic() - t0, 3.0)
+        # The deadline bounds the CALL. The old 3.0 here was slack hiding
+        # the fact that reaping ran on its own clock afterwards.
+        self.assertLess(time.monotonic() - t0, 0.3 + 0.4)
         self.assertIsNotNone(proc.returncode)    # reaped, not a zombie
+
+    def test_reaping_a_child_that_will_not_die_still_returns_the_loop(self):
+        """`ss` in uninterruptible sleep must not hold the daemon's loop.
+
+        This is the case the budget exists for: terminate ignored, kill
+        not collectable. Before the budget was shared, reaping spent a
+        flat 2 s here on top of a deadline that had already expired, so
+        the loop could block for the deadline plus 2.1 s — past the age
+        at which the bar declares the daemon dead.
+        """
+        from nexthopd.apps import _reap
+
+        class Undying:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                time.sleep(timeout)
+                raise subprocess.TimeoutExpired("ss", timeout)
+
+        t0 = time.monotonic()
+        _reap(Undying(), 0.4)
+        self.assertLess(time.monotonic() - t0, 0.4 + 0.3)
 
     def test_ss_read_is_capped_and_still_reaps(self):
         from nexthopd.apps import read_bounded
