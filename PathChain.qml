@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "pathspark.js" as Spark
 
 // laptop — router — internet, with per-leg latency on the connecting lines.
 // The answer to "is it me or is it them", drawn rather than written.
@@ -32,6 +33,20 @@ Item {
     if (tethered) return live.link.ssid || live.link.gateway || ""
     return live.link.gateway || ""
   }
+
+  // Three minutes of each leg for the connectors. The ISP leg arrives already
+  // subtracted per point — see score.wan_point_ms — so nothing here re-derives
+  // it and the inversion guard keeps one implementation.
+  readonly property var points: panel ? panel.recentPoints : []
+  readonly property var localSeries: Spark.slots(points, "local", Spark.SLOTS)
+  readonly property var wanSeries: Spark.slots(points, "wan", Spark.SLOTS)
+  // One zero-based scale for both, so a 2 ms wobble cannot outdraw the WAN.
+  readonly property real sparkMax: Spark.sharedMax([localSeries, wanSeries],
+                                                   Spark.SCALE_FLOOR_MS)
+  // The panel already knows whether readings are arriving: the daemon writes
+  // live.json at 2 Hz and the bar widget calls it stale after five seconds.
+  // The ring is that fact drawn, not a second rule with a second clock.
+  readonly property bool sparkLive: !!(panel && !panel.stale)
 
   readonly property var localMs: live && live.local ? live.local.p50 : null
   readonly property var wanMs: live && live.wan ? live.wan.p50 : null
@@ -160,6 +175,22 @@ Item {
     return Color.urgent
   }
 
+  // One animator for both legs, stopped the moment the liveness claim stops
+  // being true: a panel left open must never keep pulsing over stale data.
+  property real ringPhase: 0
+  NumberAnimation on ringPhase {
+    running: root.sparkLive && root.motionOk
+    loops: Animation.Infinite
+    from: 0; to: 1; duration: 1400
+  }
+  // Omarchy's own animation preference; a user who turns the bar's motion off
+  // gets a static second circle rather than nothing, so the claim still reads.
+  readonly property bool motionOk: {
+    var b = panel ? panel.bar : null
+    if (!b || !("foregroundAnimationEnabled" in b)) return true
+    return b.foregroundAnimationEnabled === true
+  }
+
   implicitHeight: stack.implicitHeight
 
   Column {
@@ -211,6 +242,7 @@ Item {
       property var ms: null
       property bool down: false
       property string label: ""
+      property var series: []
       width: (row.width - Style.space(84) * 3) / 2
       spacing: Style.space(4)
       // Sits a little above the node centres so the line meets the icons.
@@ -226,11 +258,31 @@ Item {
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
       }
-      Rectangle {
+      Canvas {
+        id: spark
         width: parent.width - Style.space(12)
         anchors.horizontalCenter: parent.horizontalCenter
-        height: 2
-        color: root.legColor(parent.ms, parent.down)
+        height: Style.space(16)
+        antialiasing: true
+        // Repainting on every phase tick is what the ring costs; the series
+        // only changes every five seconds.
+        property real phase: root.ringPhase
+        property var series: parent.series
+        property real sparkScale: root.sparkMax
+        onPhaseChanged: requestPaint()
+        onSeriesChanged: requestPaint()
+        onSparkScaleChanged: requestPaint()
+        onPaint: {
+          var ctx = getContext("2d")
+          Spark.draw(ctx, width, height, series, {
+            max: sparkScale,
+            phase: phase,
+            live: root.sparkLive,
+            motion: root.motionOk,
+            downColor: Color.urgent,
+            colorFor: root.legColor
+          })
+        }
       }
       Text {
         textFormat: Text.PlainText
@@ -252,6 +304,7 @@ Item {
       ms: root.localMs
       down: root.localDown
       label: "LOCAL"
+      series: root.localSeries
     }
     // When the connection comes from a phone, this node is the phone. Drawing
     // a router here mislabelled both legs at once: the local leg is the hop
@@ -265,6 +318,7 @@ Item {
       ms: root.wanMs
       down: root.wanDown
       label: "WAN"
+      series: root.wanSeries
     }
     Node {
       icon: "󰖟"   // nf-md-web

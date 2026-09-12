@@ -365,6 +365,23 @@ def band(score):
 WAN_INVERSION_TOLERANCE_MS = 1.0
 
 
+def wan_point_ms(total_ms, local_ms):
+    """The ISP leg for ONE pair of readings, or None when it says nothing.
+
+    The same rule `wan_from` applies per statistic, factored out so the
+    per-point series in recent.json and the per-window statistics cannot
+    drift apart. A gateway that answers slower than the internet behind it
+    is common — plenty of them deprioritise ICMP addressed to themselves —
+    and the subtraction has nothing to say about the line when it happens,
+    so the answer is None rather than a clamped zero.
+    """
+    if total_ms is None or local_ms is None:
+        return None
+    if local_ms > total_ms + WAN_INVERSION_TOLERANCE_MS:
+        return None
+    return round(max(0.0, total_ms - local_ms), 2)
+
+
 def wan_from(total: dict, local: dict) -> dict:
     """The ISP leg: what is left of the round trip once the router's share is gone.
 
@@ -404,7 +421,14 @@ def wan_from(total: dict, local: dict) -> dict:
         # can invert the order (a wan p95 below the wan p50) when the local
         # leg's tail is fatter than the total's. Each statistic is floored
         # at the one before it so the derived leg reads like a distribution.
-        v = max(prev, max(0.0, t - (l or 0.0)))
+        v = wan_point_ms(t, l)
+        if v is None:
+            out[key] = None
+            continue
+        # The floor has to carry forward FLOORED, not raw: `prev` is what the
+        # previous statistic ended up reporting, so a p95 that subtracts lower
+        # than the p50 still reads as a distribution.
+        v = max(prev, v)
         out[key] = round(v, 2)
         prev = v
     t, l = total.get("last"), local.get("last")

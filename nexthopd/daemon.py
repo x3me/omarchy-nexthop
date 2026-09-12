@@ -1858,6 +1858,18 @@ class Daemon:
                 "t": round(start + b * bucket, 1),
                 "local": round(sum(lr) / len(lr), 2) if lr else None,
                 "total": round(sum(means) / len(means), 2) if means else None,
+                # The ISP leg per point, derived here rather than in QML so
+                # the inversion guard has one implementation. A panel that
+                # subtracted these itself would be a second copy of a rule
+                # whose whole purpose is refusing to answer, and the copy
+                # that forgets to refuse is the one that ships.
+                "wan": score.wan_point_ms(
+                    round(sum(means) / len(means), 2) if means else None,
+                    round(sum(lr) / len(lr), 2) if lr else None),
+                # None means no probe was sent in this bucket, which is a gap.
+                # A figure with no `total` means probes went out and nothing
+                # came back, which is down. The two must stay distinguishable:
+                # a gap is drawn as nothing, a down as an outage.
                 "loss": round((len(l) - len(lr) + lost_t) /
                               max(1, len(l) + n_t), 3) if (l or n_t) else None,
                 "rx": round(a[0], 1) if a and a[0] is not None else None,

@@ -466,5 +466,46 @@ class HeadlineDuringAnOutage(unittest.TestCase):
         self.assertEqual(score.band(None), "unknown")
 
 
+class WanPerPoint(unittest.TestCase):
+    """One pair of readings to one ISP-leg figure.
+
+    Factored out of `wan_from` so the per-point series in recent.json and the
+    per-window statistics cannot drift: the rule that matters here is the one
+    that REFUSES to answer, and a second copy of it is a copy that can forget.
+    """
+
+    def test_it_subtracts_the_router_share(self):
+        self.assertEqual(score.wan_point_ms(11.13, 3.92), 7.21)
+
+    def test_a_gateway_slower_than_the_internet_says_nothing(self):
+        # Plenty of routers deprioritise ICMP addressed to themselves, so the
+        # local leg reads slower than the total that crosses it. The
+        # subtraction has nothing to say about the line; a clamped zero would
+        # report a perfect ISP leg from an invalid measurement.
+        self.assertIsNone(score.wan_point_ms(5.0, 9.0))
+
+    def test_inside_the_tolerance_it_still_answers(self):
+        # A hair over is measurement noise, not an inversion.
+        self.assertEqual(score.wan_point_ms(5.0, 5.5), 0.0)
+        self.assertIsNone(
+            score.wan_point_ms(5.0, 5.0 + score.WAN_INVERSION_TOLERANCE_MS + 0.01))
+
+    def test_either_reading_missing_is_unknown_not_zero(self):
+        self.assertIsNone(score.wan_point_ms(5.0, None))
+        self.assertIsNone(score.wan_point_ms(None, 2.0))
+        self.assertIsNone(score.wan_point_ms(None, None))
+
+    def test_wan_from_still_floors_each_statistic_at_the_last(self):
+        # The helper is unfloored by design; `wan_from` carries the floor
+        # forward FLOORED, which is what keeps a derived leg reading like a
+        # distribution. Extracting the arithmetic broke this once.
+        w = score.wan_from(
+            {"p50": 10.0, "p75": 12.0, "p95": 13.0, "max": 13.5, "count": 9},
+            {"p50": 1.0, "p75": 1.0, "p95": 8.0, "max": 12.0})
+        self.assertLessEqual(w["p50"], w["p75"])
+        self.assertLessEqual(w["p75"], w["p95"])
+        self.assertLessEqual(w["p95"], w["max"])
+
+
 if __name__ == "__main__":
     unittest.main()
