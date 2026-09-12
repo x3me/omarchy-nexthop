@@ -25,8 +25,23 @@ var SLOTS = 36;
 // fast local leg is a flat line near the floor. That is honest: it IS flat.
 var SCALE_FLOOR_MS = 50;
 
-var PAD_TOP = 3;
-var DOWN_BAND = 4;
+// The ring is the widest thing drawn, so it — not the line — sets the
+// margins. Everything below is derived from it: a plot inset by less than
+// the ring's outer edge cuts the ring, and the newest point is exactly
+// where the ring goes, which is exactly the right edge. That is how the
+// first cut shipped: the line was laid out edge to edge, correctly for a
+// line, and the ring inherited an inset of zero.
+// [Plamen, 2026-09-12: "its a bit cut off the pulsing dot?"]
+var DOT_R = 2;
+var RING_R = 4.5;
+var RING_STROKE = 1.2;
+
+// The arc's outer edge, which is what must stay inside the canvas.
+var PAD = RING_R + RING_STROKE / 2 + 0.4;
+
+// Clearance between the lowest a line may sit and the down bar, so a
+// value at zero is not read as an outage marker.
+var DOWN_GAP = 2;
 
 /**
  * One leg's last `n` slots, newest last.
@@ -93,12 +108,17 @@ function draw(ctx, w, h, series, opts) {
     ctx.clearRect(0, 0, w, h);
     if (!series || series.length === 0 || w <= 0 || h <= 0) return;
 
-    var plotH = h - PAD_TOP - DOWN_BAND;
     var max = opts.max || SCALE_FLOOR_MS;
-    var step = series.length > 1 ? w / (series.length - 1) : w;
-    var downY = h - 1.5;
 
-    function yOf(v) { return PAD_TOP + plotH - (Math.min(v, max) / max) * plotH; }
+    // One margin on all four sides, so a ring fits wherever a mark can
+    // land: at the top of the scale, on the down bar, or at either end.
+    var downY = h - PAD;
+    var plotTop = PAD;
+    var plotH = Math.max(1, downY - DOWN_GAP - plotTop);
+    var left = PAD, right = w - PAD;
+    var step = series.length > 1 ? (right - left) / (series.length - 1) : 0;
+
+    function yOf(v) { return plotTop + plotH - (Math.min(v, max) / max) * plotH; }
 
     // The measured line, cut at every gap so nothing is ever drawn across one.
     var run = [];
@@ -133,7 +153,7 @@ function draw(ctx, w, h, series, opts) {
     }
 
     for (var i = 0; i < series.length; i++) {
-        var p = series[i], x = i * step;
+        var p = series[i], x = left + i * step;
         if (!p) { flushLine(); flushDown(); continue; }
         if (p.down) {
             flushLine();
@@ -157,7 +177,7 @@ function draw(ctx, w, h, series, opts) {
     // [D, Plamen, 2026-09-12]
     var last = series.length - 1;
     if (!series[last]) return;
-    var lx = last * step;
+    var lx = left + last * step;
     var ly = series[last].down ? downY : yOf(series[last].v);
     var col = series[last].down ? opts.downColor
                                 : opts.colorFor(series[last].v, false);
@@ -165,20 +185,20 @@ function draw(ctx, w, h, series, opts) {
     if (opts.live) {
         ctx.beginPath();
         if (opts.motion) {
-            ctx.arc(lx, ly, 2.5 + opts.phase * 5.5, 0, Math.PI * 2);
+            ctx.arc(lx, ly, DOT_R + opts.phase * (RING_R - DOT_R), 0, Math.PI * 2);
             ctx.globalAlpha = 0.5 * (1 - opts.phase);
         } else {
             // The claim is still made, without motion.
-            ctx.arc(lx, ly, 5, 0, Math.PI * 2);
+            ctx.arc(lx, ly, RING_R, 0, Math.PI * 2);
             ctx.globalAlpha = 0.4;
         }
         ctx.strokeStyle = col;
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = RING_STROKE;
         ctx.stroke();
         ctx.globalAlpha = 1;
     }
     ctx.beginPath();
-    ctx.arc(lx, ly, 2, 0, Math.PI * 2);
+    ctx.arc(lx, ly, DOT_R, 0, Math.PI * 2);
     ctx.fillStyle = col;
     ctx.fill();
 }

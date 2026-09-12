@@ -262,7 +262,13 @@ Item {
         id: spark
         width: parent.width - Style.space(12)
         anchors.horizontalCenter: parent.horizontalCenter
-        height: Style.space(16)
+        // 16 left the plot 9 px tall with nothing spare, so the ring was
+        // cut on every side it could reach. The margin the ring needs is
+        // fixed; buying it out of the plot would have left a 3 px band.
+        // This keeps the same 9 px of plot and costs six pixels once —
+        // the connectors are side by side, so it is six for the panel,
+        // not six per leg.
+        height: Style.space(22)
         antialiasing: true
         // Repainting on every phase tick is what the ring costs; the series
         // only changes every five seconds.
