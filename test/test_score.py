@@ -105,8 +105,28 @@ class Scoring(unittest.TestCase):
     def test_total_downtime_floors_at_zero(self):
         self.assertEqual(score.reliability(1.0, 0), 0.0)
 
-    def test_uncovered_window_is_not_punished(self):
-        self.assertEqual(score.reliability(0.0, 5, covered=False), 100.0)
+    def test_a_window_too_thin_to_judge_is_withheld_not_perfect(self):
+        # The old `covered=False` answered 100 for a window nobody watched:
+        # the flattering answer for the case with the least evidence.
+        floor = score.RELIABILITY_MIN_WATCHED_S
+        self.assertIsNone(score.reliability(0.0, 0, window_s=floor - 1))
+        self.assertIsNone(score.reliability(0.0, 0, window_s=0))
+        self.assertEqual(score.reliability(0.0, 0, window_s=floor), 100.0)
+
+    def test_an_outage_costs_its_share_of_the_time_watched(self):
+        # #6: a laptop awake six hours of the day. Half an hour down is a
+        # twelfth of what was watched, not a forty-eighth of a day nobody saw.
+        watched = 6 * 3600
+        self.assertEqual(score.reliability(1800 / watched, 0, window_s=watched),
+                         round(100 - 100 * 1800 / watched, 1))
+        self.assertLess(score.reliability(1800 / watched, 0, window_s=watched),
+                        score.reliability(1800 / 86400, 0))
+
+    def test_the_thinnest_scored_window_does_not_amplify_a_blip_to_ruin(self):
+        # The floor's own argument: at an hour watched, a 36 s outage is one
+        # point.
+        floor = score.RELIABILITY_MIN_WATCHED_S
+        self.assertEqual(score.reliability(36 / floor, 0, window_s=floor), 99.0)
 
     def test_wan_subtraction_monotone(self):
         w = score.wan_from(

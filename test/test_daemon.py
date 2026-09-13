@@ -23,6 +23,8 @@ from nexthopd.daemon import (  # noqa: E402
     NOTIFY_AFTER_S,
     OUTAGE_AFTER_S,
     PEAK_FRESH_S,
+    RESUME_SETTLE_S,
+    UNWATCHED_AFTER_S,
     CaptiveWatch,
     Config,
     Daemon,
@@ -772,6 +774,221 @@ class LegStateReading(unittest.TestCase):
                 store.close()
 
 
+class _Stream:
+    """A leg's series on a clock the test drives: `since` reads back from
+    the test's `now`, not from time.time()."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.samples = []
+
+    def add(self, t, rtt):
+        self.samples.append((t, rtt, False))
+
+    def since(self, seconds):
+        cutoff = self.clock[0] - seconds
+        return [s for s in self.samples if s[0] >= cutoff]
+
+
+class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
+    """#6: a laptop's sleep recorded as a ten-hour outage, blamed on the ISP.
+
+    Five such rows, two from the reporter and three from this laptop, all
+    began within a second BEFORE the kernel's "PM: suspend entry" — too soon
+    for OUTAGE_AFTER_S to have been crossed while awake. So they were
+    declared after waking, from a run whose start the watch had carried
+    across the freeze. This replays that sequence through watch_outages.
+    """
+
+    T = 1_000_000.0          # the last pass before the lid closed
+    SLEEP = 36_000.0         # ten hours
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        self.notices = []
+        self.clock = [0.0]
+        d = Daemon.__new__(Daemon)
+        d.store = self.store
+        d.local = _Stream(self.clock)
+        d.total = _Stream(self.clock)
+        d._instrument_series = {"tcp": d.total}
+        d.watch_local, d.watch_wan = LegWatch(), LegWatch()
+        notify = lambda *a, **k: self.notices.append(a)  # noqa: E731
+        d.wan_events = WanEventArbiter(self.store, notify)
+        d.local_events = LocalEventArbiter(self.store, notify)
+        d._watched = None
+
+        class Captive:
+            def request(self):
+                pass
+        d.captive = Captive()
+        self.d = d
+
+    def tick(self, now, awake_offset=0.0):
+        self.clock[0] = now
+        self.d.watch_outages(now, awake=now - self.T + awake_offset)
+
+    def awake_before_sleep(self, wan_down_for=0.0):
+        """Healthy until the end, optionally with the internet silent for
+        the last `wan_down_for` seconds, and one TCP failure as the Wi-Fi
+        went down half a second before the freeze."""
+        t = self.T - 20.0
+        while t <= self.T:
+            self.d.local.add(t, 2.0)
+            lost = t > self.T - wan_down_for or t >= self.T - 0.5
+            self.d.total.add(t, None if lost else 8.0)
+            self.tick(t)
+            t += 0.5
+
+    # PingProbe charges an unanswered ping only once its grace period has
+    # passed (interval x 2.5 + 1 s), stamped when it was first seen; the TCP
+    # probe reports a failed connect at once. So for the first seconds after
+    # waking the gateway's stream is EMPTY — unknown, not down — while the
+    # internet's is already losing. That asymmetry is why #6 blamed the ISP,
+    # and a replay without it does not reproduce the report.
+    PING_GRACE_S = 0.5 * 2.5 + 1.0
+
+    def resume(self, wifi_back_after, wan_back_after=None, until=60.0,
+               awake_offset=0.0):
+        """Wake at T+SLEEP. Both legs lose until Wi-Fi is back; the wan leg
+        optionally for longer. Wall and awake clocks both jump the sleep,
+        unless `awake_offset` says otherwise."""
+        wan_back_after = wifi_back_after if wan_back_after is None else wan_back_after
+        wake = self.T + self.SLEEP
+        k = 1
+        while k * 0.5 <= until:
+            t = wake + k * 0.5
+            since = t - wake
+            if since >= wifi_back_after:
+                self.d.local.add(t, 2.0)
+            lost_at = t - self.PING_GRACE_S
+            if wake < lost_at < wake + wifi_back_after:
+                self.d.local.add(lost_at, None)
+            self.d.total.add(t, 8.0 if since >= wan_back_after else None)
+            self.tick(t, awake_offset)
+            k += 1
+        return wake
+
+    def test_the_reported_sequence_leaves_no_event(self):
+        self.awake_before_sleep()
+        # Wi-Fi took six seconds to come back, the median seen here.
+        self.resume(wifi_back_after=6.0)
+        self.assertEqual(self.store.events(10 ** 9, now=self.T + self.SLEEP + 60), [])
+        self.assertEqual(self.notices, [])
+
+    def test_the_old_behaviour_is_what_this_replays(self):
+        # Guard on the replay itself: with the gap check defeated — the awake
+        # clock not moving across the sleep, as though nothing were missed —
+        # the same inputs produce the reported row. If this ever stops
+        # failing the old way, the test above proves nothing.
+        self.awake_before_sleep()
+        wake = self.resume(wifi_back_after=6.0, awake_offset=-self.SLEEP)
+        rows = {r["leg"]: r for r in self.store.events(10 ** 9, now=wake + 60)}
+        self.assertEqual(sorted(rows), ["local", "wan"])
+        # Both artefacts, as this laptop stored them on 09-08: the sleep as
+        # an ISP outage dated before the lid closed...
+        wan = rows["wan"]
+        self.assertEqual((wan["kind"], wan["detail"]),
+                         ("outage", "router answers, nothing past it does"))
+        self.assertLess(wan["ts"], self.T + 1)
+        self.assertGreater(wan["ended_ts"] - wan["ts"], self.SLEEP)
+        # ...and the Wi-Fi re-joining as the router being unreachable.
+        self.assertEqual((rows["local"]["kind"], rows["local"]["ts"]),
+                         ("outage", int(wake)))
+
+    def test_a_slow_wifi_rejoin_is_still_not_the_router(self):
+        # The slowest rejoin seen on this laptop: 26 s after resume.
+        self.awake_before_sleep()
+        self.resume(wifi_back_after=26.0)
+        self.assertEqual(self.store.events(10 ** 9, now=self.T + self.SLEEP + 60), [])
+
+    def test_an_outage_seen_before_sleeping_ends_where_watching_stopped(self):
+        self.awake_before_sleep(wan_down_for=10.0)
+        rows = self.store.events(10 ** 9, now=self.T)
+        self.assertEqual([r["kind"] for r in rows], ["outage"])
+        self.assertIsNone(rows[0]["ended_ts"])
+        alarms = len(self.notices)
+        self.resume(wifi_back_after=6.0)
+        row = self.store.events(10 ** 9, now=self.T + self.SLEEP + 60)[0]
+        self.assertEqual(row["ended_ts"], int(self.T))      # not the wake
+        # Nothing was seen to recover, so nothing says it did.
+        self.assertEqual(len(self.notices), alarms)
+
+    def test_a_line_dead_on_waking_is_charged_from_the_settle(self):
+        self.awake_before_sleep()
+        wake = self.resume(wifi_back_after=6.0, wan_back_after=10 ** 9,
+                           until=RESUME_SETTLE_S + 20)
+        rows = self.store.events(10 ** 9, now=wake + 120)
+        self.assertEqual([(r["kind"], r["leg"]) for r in rows], [("outage", "wan")])
+        self.assertEqual(rows[0]["ts"], int(wake + RESUME_SETTLE_S))
+
+    def test_a_wall_clock_step_alone_is_not_a_gap(self):
+        # NTP stepping time.time() forward moves `now` but not the awake
+        # clock; that is not time nobody watched.
+        w = LegWatch()
+        self.d.watch_wan = w
+        self.awake_before_sleep()
+        self.tick(self.T + 3600.0, awake_offset=-3600.0 + 0.5)
+        self.assertIsNone(w.resumed_at)
+
+    def test_samples_from_before_the_gap_cannot_start_the_next_run(self):
+        w = LegWatch()
+        w.sample(LegState(False, 100.0, 99.5, 2), 100.0)
+        w.lost_sight(resumed_at=110.0)
+        # A read that still reaches back past the gap (a gap shorter than
+        # the stream window) sees only old samples: nothing to judge.
+        self.assertIsNone(w.sample(LegState(False, 100.0, 99.5, 2), 110.5))
+        self.assertIsNone(w.run_since)
+
+    def test_a_reply_from_before_the_gap_does_not_end_the_settle(self):
+        # A TCP connect that straddled the freeze reports after waking,
+        # stamped when it was sent. It says nothing about the network now.
+        w = LegWatch()
+        w.lost_sight(resumed_at=110.0)
+        w.sample(LegState(True, 109.9, None, 0), 110.5)
+        self.assertEqual(w.resumed_at, 110.0)
+
+    def test_reliability_is_charged_against_what_was_watched(self):
+        # Awake the last six hours, half an hour of it down, nothing before.
+        now = self.T + 20.0
+        base = int(now // 60) * 60
+        for ago in range(0, 6 * 3600 + 1, 60):
+            self.store.put_minute(base - ago, {})
+        eid = self.store.open_event(base - 3600, "outage", "critical", "wan", "t")
+        self.store.close_event(eid, base - 1800)
+        rel, watched = Daemon.reliability(self.d, now)
+        self.assertAlmostEqual(watched, 6 * 3600 + 20, delta=60)
+        self.assertEqual(rel, round(100 - 100 * 1800 / watched, 1))
+        self.assertLess(rel, score.reliability(1800 / 86400, 0))
+
+    def test_reliability_is_withheld_before_an_hour_has_been_watched(self):
+        now = self.T + 20.0
+        base = int(now // 60) * 60
+        for ago in range(0, 1800, 60):
+            self.store.put_minute(base - ago, {})
+        rel, watched = Daemon.reliability(self.d, now)
+        self.assertIsNone(rel)
+        self.assertLess(watched, score.RELIABILITY_MIN_WATCHED_S)
+
+    def test_losing_sight_forgets_a_pending_disruption(self):
+        w = LegWatch()
+        w.blip = (1.0, 3.0)
+        w.lost_sight(resumed_at=50.0)
+        self.assertIsNone(w.blip)
+
+    def test_an_arbiter_that_loses_sight_drops_its_pending_alarm(self):
+        arb = WanEventArbiter(self.store, lambda *a, **k: self.notices.append(a))
+        arb.down(100.0, beyond_ok=False, since=96.0)
+        arb.lost_sight(101.0)
+        arb.tick(100.0 + NOTIFY_AFTER_S + 60, beyond_ok=False)
+        self.assertEqual(self.notices, [])
+        self.assertIsNone(arb.event_id)
+        self.assertEqual(self.store.events(10 ** 9, now=200)[0]["ended_ts"], 101)
+
+
 class ContentCheckReadiness(unittest.TestCase):
     """A link that has just associated is not the line yet.
 
@@ -988,6 +1205,16 @@ class SnapshotFreshnessBudget(unittest.TestCase):
             "a full-deadline ss read would age live.json into the "
             "bar's no-data state on a healthy daemon")
 
+    def test_a_slow_pass_is_not_mistaken_for_time_nobody_watched(self):
+        """The outage watch treats a long gap between passes as the machine
+        having slept (#6). The slowest legitimate pass is a tick plus the
+        whole poll budget; if that ever reached the threshold, a busy loop
+        would silently forget runs of losses it had in fact been watching."""
+        from nexthopd.apps import AppTraffic
+        tick = 0.5
+        self.assertLess(tick + AppTraffic.POLL_DEADLINE_S,
+                        UNWATCHED_AFTER_S / 2.0)
+
     def test_the_poll_deadline_covers_the_reap_too(self):
         """The budget is the call's, not the read's — see `_reap`."""
         from nexthopd.apps import REAP_RESERVE_S, AppTraffic
@@ -1202,6 +1429,38 @@ class RoamDoesNotResetTheSeries(unittest.TestCase):
         rebuilt = self.run_with({"gateway": "192.168.10.1", "iface": "wlo1"},
                                 {"gateway": "192.168.10.1", "iface": "eth0"})
         self.assertEqual(len(rebuilt), 1)
+
+    def follow(self, current, snap):
+        d = self.daemon(current)
+        d.link = type("Link", (), {"latest": snap})()
+        real = daemon_mod.net.route_to
+
+        def no_subprocess(anchor):
+            raise AssertionError("the loop must use the link thread's route")
+        daemon_mod.net.route_to = no_subprocess
+        try:
+            Daemon.follow_route(d)
+        finally:
+            daemon_mod.net.route_to = real
+        return d.rebuilt
+
+    def test_a_new_gateway_is_followed_from_the_link_snapshot(self):
+        # #6: waking on another network, the router leg pinged the old
+        # gateway until the minute flush noticed — 61 s of "router
+        # unreachable" on every such wake.
+        rebuilt = self.follow({"gateway": "192.168.10.1", "iface": "wlo1"},
+                              {"iface": "wlo1", "gateway": "192.168.1.1",
+                               "src": "192.168.1.20", "kind": "wifi",
+                               "bssid": "b4:86:18:8c:25:fe"})
+        self.assertEqual(rebuilt, [{"iface": "wlo1", "gateway": "192.168.1.1",
+                                    "src": "192.168.1.20"}])
+
+    def test_following_the_snapshot_keeps_the_roam_and_outage_rules(self):
+        here = {"gateway": "192.168.10.1", "iface": "wlo1"}
+        self.assertEqual(self.follow(here, dict(here, bssid="aa:bb")), [])
+        self.assertEqual(self.follow(here, {"iface": "", "gateway": "",
+                                            "kind": "none"}), [])
+        self.assertEqual(self.follow(here, {}), [])     # no snapshot yet
 
     def test_losing_the_route_is_an_outage_not_a_new_network(self):
         # Resetting here throws away the run-up to the drop, which is the one

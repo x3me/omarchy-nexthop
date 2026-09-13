@@ -95,6 +95,29 @@ LEG_STALE_S = 6.0
 # How far back to read a leg's stream for the start of the current run. Past
 # OUTAGE_AFTER_S with margin; the watch remembers an older start itself.
 LEG_STREAM_WINDOW_S = 12.0
+# More than this between two passes of the outage watch, on a clock that
+# keeps counting through suspend, and the daemon was not watching: the
+# machine slept, or the process was stopped. The loop passes every half
+# second and nothing on it may block for long (see AppTraffic's budget), so
+# this is a stream's own staleness horizon applied to the watcher.
+#
+# Why it exists (#6): the watch remembers when a run of losses began, and
+# that memory survived a freeze. One lost probe in the last half-second
+# before a laptop slept — the TCP probe fails at once when NetworkManager
+# takes the Wi-Fi down — plus one after it woke made a run as long as the
+# sleep, and the first tick after waking declared it: a ten-hour outage
+# dated before the lid closed, blamed on the ISP. Every such row began a
+# second BEFORE the kernel's "PM: suspend entry", too soon for the 4 s
+# threshold to have been crossed while awake, which is how it was placed.
+UNWATCHED_AFTER_S = LEG_STALE_S
+# After such a gap the first losses are the machine re-joining its own
+# network, not the network failing: on this laptop Wi-Fi came back 3 to
+# 26 s after resume across twenty wakes (median 5), and every one of those
+# seconds used to be logged as the router being unreachable. So a leg must
+# answer once, or this long must pass, before its silence counts again. A
+# line that really is dead on waking is charged from the end of the settle,
+# which undercharges by at most this much.
+RESUME_SETTLE_S = 30.0
 
 # Probes needed on each side of the idle/loaded split before their ratio is
 # reported. Below this the comparison is sampling noise.
@@ -513,6 +536,16 @@ def _short_duration(seconds):
     return "%d h %d min" % (s // 3600, (s % 3600) // 60)
 
 
+_AWAKE_CLOCK = getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC)
+
+
+def awake_clock() -> float:
+    """Seconds on a clock that keeps counting through suspend and never
+    steps. CLOCK_MONOTONIC stops while the machine sleeps, so it cannot see
+    a sleep at all; time.time() can, but also jumps whenever NTP steps it."""
+    return time.clock_gettime(_AWAKE_CLOCK)
+
+
 class LegState(NamedTuple):
     """What a leg's probe stream says right now — see leg_state()."""
     ok: bool             # the newest sample is a reply
@@ -557,6 +590,23 @@ class LegWatch:
         self.run_since = None      # first lost sample of the current run
         self.lost = 0              # lost samples seen in that run
         self.blip = None           # (from, to) of a run that just recovered
+        self.resumed_at = None     # set by lost_sight(); cleared by a reply
+        self.settle_until = None
+
+    def lost_sight(self, resumed_at: float, settle_s: float = RESUME_SETTLE_S):
+        """We stopped watching and have just started again (UNWATCHED_AFTER_S).
+
+        Forget the run in progress: the silence before the gap and the
+        silence after it are not one run, because nobody saw what lay
+        between. Returns whether the leg had been declared down, so the
+        caller can close that event where watching stopped.
+        """
+        was_down = self.down_since is not None
+        self.down_since = self.run_since = self.blip = None
+        self.lost = 0
+        self.resumed_at = resumed_at
+        self.settle_until = resumed_at + settle_s
+        return was_down
 
     def sample(self, state: LegState, now: float):
         """Returns 'down' / 'up' / 'disruption' on a transition, else None.
@@ -567,6 +617,18 @@ class LegWatch:
         Reliability charges. Both thresholds are seconds of silence on the
         stream, from the first lost sample to the first reply after it.
         """
+        if self.resumed_at is not None:
+            if state.ts < self.resumed_at:
+                return None               # nothing from this side of the gap yet
+            if state.ok:
+                self.resumed_at = self.settle_until = None
+            elif now < self.settle_until:
+                return None               # still re-joining; see RESUME_SETTLE_S
+            else:
+                # Never answered since waking. Count it, from the end of the
+                # settle rather than from samples taken while re-joining.
+                state = state._replace(
+                    run_since=max(state.run_since, self.settle_until))
         if state.ok:
             began, lost = self.run_since, self.lost
             self.run_since, self.lost = None, 0
@@ -667,6 +729,20 @@ class LegArbiter:
             # notice with no matching alarm is a message about nothing.
             if self.kind == "outage" and self._notified:
                 self.notify(self.RECOVERED[0], self.RECOVERED[1])
+        self._clear()
+
+    def lost_sight(self, watched_until):
+        """Watching stopped with this event open (UNWATCHED_AFTER_S). Close it
+        where we last saw it, not when watching resumed: what happened in
+        between is unknown, and closing it at wake charged the whole sleep.
+        No recovery notice, and a pending alarm is dropped — nothing was
+        seen to recover, and an alarm raised on waking would be about a
+        silence nobody observed."""
+        if self.event_id is not None:
+            self.store.close_event(self.event_id, int(watched_until))
+        self._clear()
+
+    def _clear(self):
         self.event_id = None
         self.kind = None
         self._notify_at = None
@@ -957,6 +1033,7 @@ class Daemon:
         self.watch_wan = LegWatch()
         self.wan_events = WanEventArbiter(self.store, self.notify)
         self.local_events = LocalEventArbiter(self.store, self.notify)
+        self._watched = None       # (wall, awake_clock) of the last watch pass
         self.captive = CaptiveWatch(net.reachability)
         # Is this connection someone's phone sharing its data? Recomputed
         # whenever the route changes, which is the only thing that can
@@ -1091,10 +1168,13 @@ class Daemon:
             self.probes.append(p)
             self._instrument_probes[key] = p
 
-    def restart_probes_if_route_changed(self):
-        """New default route (roamed networks, docked, VPN up) — new targets."""
-        anchor = self.config["internetAnchor"]
-        fresh = net.route_to(anchor)
+    def restart_probes_if_route_changed(self, fresh=None):
+        """New default route (roamed networks, docked, VPN up) — new targets.
+
+        `fresh` is a route already read (see follow_route); without one it
+        is read here."""
+        if fresh is None:
+            fresh = net.route_to(self.config["internetAnchor"])
         if not fresh.get("gateway"):
             # No route at all is an outage, not a different network, and
             # resetting on it threw away the one window a user wants
@@ -1108,6 +1188,22 @@ class Daemon:
            fresh.get("iface") == self.route.get("iface"):
             return
         self._rebuild_probes(fresh)
+
+    def follow_route(self):
+        """Rebuild the probes on the tick a new gateway appears.
+
+        The link thread already reads the route twice a second, so the loop
+        compares against that instead of running `ip route get` itself. It
+        used to do that once a minute, at the minute flush, and until then
+        the router leg kept pinging the PREVIOUS network's gateway: every
+        wake on a different network than the one the laptop slept on logged
+        61 s of "router unreachable" — ten of ten such wakes here, against
+        5-7 s for every wake on the same network (#6). Switching networks
+        while awake paid the same minute.
+        """
+        snap = self.link.latest
+        self.restart_probes_if_route_changed(
+            {k: snap.get(k) or "" for k in ("iface", "gateway", "src")})
 
     def restart_probes_if_settings_changed(self):
         """The anchor or the probe interval changed under us.
@@ -1230,7 +1326,7 @@ class Daemon:
             except OSError:
                 pass
 
-    def watch_outages(self, now: float):
+    def watch_outages(self, now: float, awake: float = None):
         """Outage logic on each leg's probe stream (leg_state / LegWatch).
 
         The wan watch counts silence only when the local leg answered, or
@@ -1241,7 +1337,21 @@ class Daemon:
         Arbitration is judged on the run itself — did anything beyond the
         leg answer DURING the silence — not on a trailing window: a reply
         from just before a 1.5 s blip must not vouch for the blip.
+
+        A pass that finds the previous one more than UNWATCHED_AFTER_S ago
+        on `awake` (awake_clock(), injectable for tests) first tells both
+        watches and both arbiters that watching stopped.
         """
+        awake = awake_clock() if awake is None else awake
+        if self._watched is not None and \
+                awake - self._watched[1] > UNWATCHED_AFTER_S:
+            watched_until = self._watched[0]
+            for watch, events in ((self.watch_local, self.local_events),
+                                  (self.watch_wan, self.wan_events)):
+                watch.lost_sight(now)
+                events.lost_sight(watched_until)
+        self._watched = (now, awake)
+
         local = leg_state(self.local.since(LEG_STREAM_WINDOW_S), now)
         total = leg_state(self.total.since(LEG_STREAM_WINDOW_S), now)
         local_ok = None if local is None else local.ok
@@ -1680,6 +1790,22 @@ class Daemon:
                 out["min_ms"] = ms
         return out
 
+    def reliability(self, now: float):
+        """(score or None, seconds watched) over RELIABILITY_WINDOW_S.
+
+        Charged against the time actually watched — see
+        score.RELIABILITY_MIN_WATCHED_S and Store.unwatched. One place, because
+        live.json and the minute row must not disagree about what was
+        watched."""
+        window = score.RELIABILITY_WINDOW_S
+        gaps = self.store.unwatched(window, now)
+        watched = window - sum(b - a for a, b in gaps)
+        out_frac, disruptions, disrupt_frac = self.store.outage_stats(
+            window, now, unwatched=gaps)
+        return score.reliability(out_frac, disruptions,
+                                 disruption_fraction=disrupt_frac,
+                                 window_s=watched), watched
+
     def compose_live(self, now: float) -> dict:
         """live.json, twice a second.
 
@@ -1702,9 +1828,7 @@ class Daemon:
         # anyone's index.
         bloat = self.bufferbloat(300.0)
 
-        out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
-        rel = score.reliability(out_frac, disruptions,
-                                disruption_fraction=disrupt_frac)
+        rel, watched = self.reliability(now)
 
         snap = self.link.latest
         network = snap.get("ssid") or snap.get("name") or ""
@@ -1764,6 +1888,11 @@ class Daemon:
             "band": score.band(headline),
             "scores": {"responsiveness": resp, "reliability": rel, "speed": spd},
             "speed_ctx": speed_ctx,
+            # What Reliability was charged against, so the panel can say so
+            # when it is less than the day the caption would otherwise imply.
+            "reliability_ctx": {"watched_s": round(watched),
+                                "window_s": score.RELIABILITY_WINDOW_S,
+                                "min_s": score.RELIABILITY_MIN_WATCHED_S},
             # best/typical/worst all come from the same fold — see
             # score.lag_band. `now` stays the scored p75-based figure.
             "lag": {"now": lag,
@@ -1892,9 +2021,7 @@ class Daemon:
         icmp_stats = Series.stats(self.icmp_anchor.since(60))
         icmp_lag = score.lag_ms(icmp_stats) if icmp_stats["count"] else None
 
-        out_frac, disruptions, disrupt_frac = self.store.outage_stats(24 * 3600, now)
-        rel = score.reliability(out_frac, disruptions,
-                                disruption_fraction=disrupt_frac)
+        rel, _ = self.reliability(now)
         bloat = self.bufferbloat(300.0)
         snap_link = self.link.latest
         if snap_link.get("kind") != "wifi":
@@ -1965,6 +2092,7 @@ class Daemon:
             now = time.time()
             self.config.refresh()
             self.restart_probes_if_settings_changed()
+            self.follow_route()
 
             self.watch_outages(now)
             self.throughput(now, self.route.get("iface", ""))
@@ -1979,7 +2107,6 @@ class Daemon:
                 self.last_minute_flush = now
                 self.flush_minute(now)
                 self.flush_recent(now)
-                self.restart_probes_if_route_changed()
             elif now - self.last_recent_flush >= 5.0:
                 self.flush_recent(now)
 

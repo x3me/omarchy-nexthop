@@ -144,6 +144,14 @@ def responsiveness(lag):
 
 
 RELIABILITY_WINDOW_S = 24 * 3600
+# Reliability is charged against the time the daemon actually watched, not
+# the whole 24 h: a laptop asleep for seventeen hours has no evidence about
+# them either way, and counting them as uptime flatters every real outage by
+# the same factor. The price of dividing by what was watched is that a thin
+# window amplifies, so below an hour the component is withheld rather than
+# scored — at that floor a 36 s outage costs one point, which is about what
+# it costs a full day's window to notice a quarter-hour one.
+RELIABILITY_MIN_WATCHED_S = 3600.0
 
 # A self-healed interruption is real but not as bad as being down, so its
 # time is charged at a discount.
@@ -159,7 +167,7 @@ DISRUPTION_RECOVERY_S = 300.0
 DISRUPTION_MAX_PENALTY = 25.0
 
 
-def reliability(outage_fraction: float, disruptions: int, covered: bool = True,
+def reliability(outage_fraction: float, disruptions: int,
                 disruption_fraction: float = 0.0,
                 window_s: float = RELIABILITY_WINDOW_S):
     """Uptime, not smoothness — everything charged in one currency: time.
@@ -178,10 +186,17 @@ def reliability(outage_fraction: float, disruptions: int, covered: bool = True,
     blips zeroed the component outright. Time is the honest unit for "how
     much of today was this connection unusable", and an event's recovery
     cost is expressed in seconds so it lands on the same scale.
+
+    `window_s` is the time actually watched, and both fractions must be
+    shares of it. Under RELIABILITY_MIN_WATCHED_S this returns None. It
+    used to take a `covered` flag that no caller ever passed and that
+    returned 100 when false — a window we had not watched scored as a
+    perfect one, which is the flattering answer for the case with the least
+    evidence.
     """
-    if not covered:
-        return 100.0
-    window = window_s if window_s and window_s > 0 else RELIABILITY_WINDOW_S
+    window = RELIABILITY_WINDOW_S if window_s is None else window_s
+    if window < RELIABILITY_MIN_WATCHED_S:
+        return None
     down = max(0.0, min(1.0, outage_fraction))
     disrupted_s = (max(0.0, min(1.0, disruption_fraction)) * window
                    + max(0, disruptions) * DISRUPTION_RECOVERY_S)

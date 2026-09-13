@@ -141,6 +141,16 @@ Column {
           var d = tab.elapsed(l.down_since)
           return d ? "down " + d : "outage now"
         }
+        // Charged against the time actually watched (a laptop that slept
+        // most of the day watched a few hours of it), so say how much when
+        // it is short of the day. Under the floor the number is withheld.
+        var c = tab.live.reliability_ctx
+        if (c && c.watched_s < c.min_s)
+          return "watched " + Math.floor(c.watched_s / 60) + " of "
+            + Math.round(c.min_s / 60) + " min"
+        if (c && c.watched_s < c.window_s - 1800)
+          return "watched " + Math.round(c.watched_s / 3600) + " of "
+            + Math.round(c.window_s / 3600) + " h"
         return "last 24 h"
       }
       textColor: tab.panel.fg

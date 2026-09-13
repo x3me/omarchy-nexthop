@@ -239,6 +239,113 @@ class StoreConcurrency(unittest.TestCase):
         self.assertEqual(len(rows), n)
 
 
+class UnwatchedTime(unittest.TestCase):
+    """What Reliability may charge: only time the daemon was there to see.
+
+    #6: on a laptop that sleeps overnight, a suspend could be stored as a
+    ten-hour outage. The watch no longer produces those rows, but users
+    already have them, and history is not rewritten — so the accounting has
+    to refuse to charge time with no minute rows behind it.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        self.now = 2_000_040            # 20 s into a minute
+        self.day = 86_400
+
+    def minutes(self, first, last):
+        """A minute row for every minute in [first, last], seconds ago."""
+        base = int(self.now // 60) * 60
+        for ago in range(first, last + 1, 60):
+            self.store.put_minute(base - ago, {"rel": 100.0})
+
+    def test_a_daemon_watching_all_day_has_no_gaps(self):
+        self.minutes(0, self.day)
+        self.assertEqual(self.store.unwatched(self.day, now=self.now), [])
+
+    def test_a_skipped_bucket_is_drift_not_a_gap(self):
+        # The minute flush runs slightly later than every 60 s, so a bucket
+        # is occasionally skipped. That is still a daemon watching.
+        self.minutes(0, 3660)
+        base = int(self.now // 60) * 60
+        self.store.db.execute("DELETE FROM minute WHERE ts = ?", (base - 1200,))
+        self.assertEqual(self.store.unwatched(3600, now=self.now), [])
+
+    def test_a_night_asleep_is_one_gap_bounded_by_the_rows_either_side(self):
+        self.minutes(0, 7 * 3600)                     # awake the last 7 h
+        self.minutes(17 * 3600, self.day)             # and before the night
+        gaps = self.store.unwatched(self.day, now=self.now)
+        self.assertEqual(len(gaps), 1)
+        a, b = gaps[0]
+        base = int(self.now // 60) * 60
+        # Each row proves its own minute and no more, so the gap is at most
+        # a minute short at each end — never longer than the silence.
+        self.assertEqual(a, base - 17 * 3600 + 60)
+        self.assertEqual(b, base - 7 * 3600)
+
+    def test_before_the_first_row_is_unwatched(self):
+        self.minutes(0, 2 * 3600)                     # installed two hours ago
+        gaps = self.store.unwatched(self.day, now=self.now)
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0][0], self.now - self.day)
+        self.assertEqual(gaps[0][1], int(self.now // 60) * 60 - 2 * 3600)
+
+    def test_just_after_waking_the_sleep_is_already_a_gap(self):
+        # The first pass after a resume runs before the minute flush, so the
+        # newest row is from before the sleep; `now` itself counts as watched.
+        self.minutes(3 * 3600, self.day)
+        gaps = self.store.unwatched(self.day, now=self.now)
+        self.assertEqual(gaps[-1][1], self.now)
+
+    def test_no_rows_at_all_is_the_whole_window(self):
+        gaps = self.store.unwatched(3600, now=self.now)
+        self.assertEqual(gaps, [(self.now - 3600, self.now)])
+
+    def test_an_old_suspend_outage_is_charged_only_where_it_was_watched(self):
+        # The reporter's row: an "outage" from the last tick before the lid
+        # closed to the first after it opened, ten hours later.
+        base = int(self.now // 60) * 60
+        self.minutes(0, 7 * 3600)
+        self.minutes(17 * 3600 + 60, self.day)
+        eid = self.store.open_event(base - 17 * 3600, "outage", "critical",
+                                    "wan", "router answers, nothing past it does")
+        self.store.close_event(eid, base - 7 * 3600 + 30)
+        naive, _, _ = self.store.outage_stats(self.day, now=self.now)
+        gaps = self.store.unwatched(self.day, now=self.now)
+        frac, _, _ = self.store.outage_stats(self.day, now=self.now,
+                                             unwatched=gaps)
+        watched = self.day - sum(b - a for a, b in gaps)
+        self.assertAlmostEqual(naive, 10 * 3600 / self.day, delta=0.01)
+        # What is left is the minute at each edge the rows cannot rule out.
+        self.assertLessEqual(frac * watched, 3 * 60)
+        self.assertLess(frac, 0.01)
+
+    def test_a_disruption_wholly_unwatched_is_not_counted(self):
+        self.minutes(0, 3600)
+        eid = self.store.open_event(self.now - 3 * 3600, "disruption", "warn",
+                                    "wan", "t")
+        self.store.close_event(eid, self.now - 3 * 3600 + 20)
+        gaps = self.store.unwatched(self.day, now=self.now)
+        _, count, disrupted = self.store.outage_stats(self.day, now=self.now,
+                                                     unwatched=gaps)
+        self.assertEqual((count, disrupted), (0, 0.0))
+
+    def test_a_watched_outage_is_a_share_of_the_watched_time(self):
+        base = int(self.now // 60) * 60
+        self.minutes(0, 6 * 3600)
+        eid = self.store.open_event(base - 3600, "outage", "critical", "wan", "t")
+        self.store.close_event(eid, base - 1800)
+        gaps = self.store.unwatched(self.day, now=self.now)
+        watched = self.day - sum(b - a for a, b in gaps)
+        frac, _, _ = self.store.outage_stats(self.day, now=self.now,
+                                             unwatched=gaps)
+        self.assertAlmostEqual(frac * watched, 1800, delta=1)
+        self.assertAlmostEqual(watched, 6 * 3600 + 60, delta=60)
+
+
 class EventWindowSemantics(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

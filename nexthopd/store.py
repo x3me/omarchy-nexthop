@@ -58,6 +58,12 @@ SAMPLE_COLUMNS = [
 MINUTE_ONLY_REAL = ["drain_ms", "drain_min_ms", "drain_settled"]
 MINUTE_ONLY_TEXT = ["drain_src"]
 
+# Past this between the end of one minute row's minute and the start of the
+# next row, nobody was watching — see `Store.unwatched`. The minute flush
+# drifts a little later than every 60 s and so occasionally skips a bucket,
+# which leaves exactly 60 s; twice that is not drift.
+UNWATCHED_GAP_S = 120
+
 _COLS_SQL = ", ".join(f"{c} REAL" for c in SAMPLE_COLUMNS)
 _MINUTE_EXTRA_SQL = ", ".join(
     [f"{c} REAL" for c in MINUTE_ONLY_REAL] + [f"{c} TEXT" for c in MINUTE_ONLY_TEXT])
@@ -370,12 +376,47 @@ class Store:
         return p90(rows)
 
     @_locked
-    def outage_stats(self, seconds: float, now: float = None):
+    def unwatched(self, seconds: float, now: float = None) -> list:
+        """Stretches of the window nobody was watching, as (start, end).
+
+        The daemon writes a minute row every minute it runs, through an
+        outage as well, since the loop keeps ticking while the probes lose.
+        So the minute table already records when we were looking, and a
+        hole in it is time with no daemon behind it: the machine asleep, the
+        daemon stopped, the plugin not yet installed. Nothing new is stored.
+
+        A row is taken to prove only the minute it names, so a stretch is
+        under-reported by up to a minute at each end rather than over. `now`
+        counts as watched: the caller is the running daemon.
+        """
+        now = now or time.time()
+        start = now - seconds
+        rows = self.db.execute(
+            "SELECT ts FROM minute WHERE ts >= ? AND ts <= ? ORDER BY ts",
+            (int(start) - 60, int(now))).fetchall()
+        gaps = []
+        edge = start                        # watched up to here
+        for ts in [r["ts"] for r in rows] + [now]:
+            if ts - edge > UNWATCHED_GAP_S:
+                gaps.append((edge, min(ts, now)))
+            edge = max(edge, ts + 60)
+        return gaps
+
+    @_locked
+    def outage_stats(self, seconds: float, now: float = None, unwatched=()):
         """(fraction fully down, count of disruptions, fraction disrupted).
 
         Disruptions carry their duration as well as their count because
         reliability charges both kinds of interruption in the same currency —
         time. Counting alone made three brief blips outweigh an hour offline.
+
+        `unwatched` (from `Store.unwatched`) comes off both sides: out of each
+        event, and out of the span the fractions are shares of. An event
+        spanning a stretch nobody watched was never measured across it. Rows
+        like that exist — until 0.2.43 a suspend could be recorded as a
+        ten-hour outage — and they are left as stored, because the rule is
+        that history is not rewritten; they are simply not charged for time
+        with no evidence in it.
         """
         now = now or time.time()
         start = now - seconds
@@ -390,13 +431,15 @@ class Store:
             begin = max(r["ts"], start)
             end = r["ended_ts"] if r["ended_ts"] else now
             end = min(end, now)
-            if end <= begin:
+            length = (end - begin) - sum(
+                max(0.0, min(end, b) - max(begin, a)) for a, b in unwatched)
+            if length <= 0:
                 continue
             if r["kind"] == "outage":
-                down += end - begin
+                down += length
             else:
                 disruptions += 1
-                disrupted += end - begin
-        span = seconds if seconds else 0.0
-        return ((down / span if span else 0.0), disruptions,
-                (disrupted / span if span else 0.0))
+                disrupted += length
+        span = (seconds or 0.0) - sum(b - a for a, b in unwatched)
+        return ((down / span if span > 0 else 0.0), disruptions,
+                (disrupted / span if span > 0 else 0.0))
