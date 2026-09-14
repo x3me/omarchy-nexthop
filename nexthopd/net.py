@@ -176,49 +176,113 @@ def tunnel_type(iface: str, sys_net: str = SYS_NET) -> str:
     return "ppp" if raw == "512" else "tunnel"
 
 
-def physical_default(raw: Optional[str], sys_net: str = SYS_NET) -> dict:
-    """The main table's default route on a link that is not a tunnel, or {}.
+# The main table is read whole only while the anchor's route is a tunnel. A
+# desktop's is a few kilobytes; a machine carrying a routing daemon's table can
+# be far larger, and past this cap the answer is "unknown" (the JSON is cut and
+# does not parse), which leaves the anchor's own route standing.
+ROUTE_TABLE_MAX_BYTES = 1 << 20
+ROUTE_TABLE_DEADLINE_S = 2.0
 
-    Lowest metric wins, as it does in the kernel. NetworkManager's OpenVPN
-    adds its own default via tun0 beside the physical one, which is why a
-    tunnel entry is skipped rather than trusted for being first.
+
+def _is_host_route(dst) -> bool:
+    """`ip -j` prints a /32 as a bare address and everything else with /len,
+    which ip_address refuses — so parsing is the whole test."""
+    if not isinstance(dst, str):
+        return False
+    try:
+        return ipaddress.ip_address(dst).version == 4
+    except ValueError:
+        return False
+
+
+def line_route(raw: Optional[str], sys_net: str = SYS_NET) -> dict:
+    """The route that IS the subscriber's line, from the main table, or {}.
+
+    The rule both products implement [D, Plamen, 2026-09-14], IPv4, main table
+    only — a VPN's own policy tables (wg-quick's 51820, Tailscale's 52) cannot
+    vouch for the line underneath it, so they are never read:
+
+    1. The lowest-metric default with a gateway on a non-tunnel link is the
+       line. PPP counts as a tunnel here.
+    2. Otherwise let D be the lowest-metric default of any kind. A VPN that
+       replaced the default must still reach its own server outside the
+       tunnel, so it installs a host route to it through the underlying link:
+       if a /32 with a gateway leaves by a link other than D's, the
+       lowest-metric such route is the line, and D is a VPN.
+    3. Otherwise D's own link is the line, with D's gateway if it has one.
+       That is PPPoE (ppp0 carries the default and nothing else) and a CLAT
+       on an IPv6-only network (a tun device with the IPv4 default).
+
+    Ties go to the earlier route in table order; no default at all, no line.
+    Subnet routes, link-scope routes, a /32 without a gateway (a WireGuard
+    peer, a PPP peer) and a /32 on D's own link never qualify. `ip route show`
+    does not list routes the kernel cloned per destination, which macOS's
+    table has to exclude by flag.
     """
     try:
         rows = json.loads(raw) if raw else []
     except ValueError:
         return {}
-    best = None
-    for r in rows if isinstance(rows, list) else []:
-        if not isinstance(r, dict) or r.get("dst") != "default":
-            continue
-        dev = r.get("dev") or ""
-        if not _iface_ok(dev) or is_tunnel_link(dev, sys_net):
-            continue
-        metric = r.get("metric") or 0
-        if best is None or metric < best[0]:
-            best = (metric, {"iface": dev, "gateway": r.get("gateway") or "",
-                             "src": r.get("prefsrc") or ""})
-    return best[1] if best else {}
+    rows = [r for r in rows if isinstance(r, dict) and _iface_ok(r.get("dev"))] \
+        if isinstance(rows, list) else []
+
+    def pick(candidates):
+        return min(candidates, key=lambda ir: (ir[1].get("metric") or 0, ir[0]))[1]
+
+    def as_line(r):
+        return {"iface": r["dev"], "gateway": r.get("gateway") or "",
+                "src": r.get("prefsrc") or ""}
+
+    defaults = [(i, r) for i, r in enumerate(rows) if r.get("dst") == "default"]
+    if not defaults:
+        return {}
+    physical = [(i, r) for i, r in defaults
+                if r.get("gateway") and not is_tunnel_link(r["dev"], sys_net)]
+    if physical:
+        return as_line(pick(physical))
+    d = pick(defaults)
+    underlay = [(i, r) for i, r in enumerate(rows)
+                if _is_host_route(r.get("dst")) and r.get("gateway")
+                and r["dev"] != d["dev"]]
+    if underlay:
+        return as_line(pick(underlay))
+    return as_line(d)
+
+
+def _main_table() -> Optional[str]:
+    if not shutil.which("ip"):
+        return None
+    from .apps import read_bounded
+    try:
+        proc = subprocess.Popen(["ip", "-j", "route", "show", "table", "main"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL)
+    except OSError:
+        return None
+    return read_bounded(proc, ROUTE_TABLE_MAX_BYTES, ROUTE_TABLE_DEADLINE_S)
 
 
 def local_route(anchor: str = "1.1.1.1", sys_net: str = SYS_NET,
-                route=None, defaults=None) -> dict:
-    """The connection the router leg measures: the anchor's route while that
-    leaves by a real link, otherwise the physical default underneath the
-    tunnel. With no physical default at all — PPPoE, where ppp0 IS the line —
-    the anchor's route stands, and nothing is called a VPN.
+                route=None, routes=None) -> dict:
+    """The connection the router leg measures.
 
-    `route` and `defaults` are injectable so the choice is tested without a
-    routing table. The extra `ip route show default` runs only while the
-    anchor's route is a tunnel, so an ordinary link costs nothing new.
+    The anchor's route while that leaves by a real link — the common case, and
+    no extra read. When it leaves by a tunnel, the line from the main table
+    (line_route) instead, marked with the tunnel it sits under. When the line
+    turns out to be that tunnel itself (PPPoE, a CLAT), or cannot be read, the
+    anchor's route stands and nothing is called a VPN.
+
+    `route` and `routes` are injectable so the choice is tested against
+    recorded tables rather than this machine's.
     """
     route = route or route_to
     r = route(anchor)
     if not r.get("iface") or not is_tunnel_link(r["iface"], sys_net):
         return r
-    raw = defaults() if defaults else _run(["ip", "-j", "route", "show", "default"])
-    phys = physical_default(raw, sys_net)
-    return dict(phys, tunnel_iface=r["iface"]) if phys else r
+    line = line_route(routes() if routes else _main_table(), sys_net)
+    if not line or line["iface"] == r["iface"]:
+        return r
+    return dict(line, tunnel_iface=r["iface"])
 
 
 def _first_address(host: str, resolve=None):

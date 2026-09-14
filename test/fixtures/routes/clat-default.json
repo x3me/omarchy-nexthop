@@ -1,0 +1,1 @@
+[{"dst":"default","dev":"tun0","scope":"link","flags":["linkdown"]},{"dst":"192.0.0.0/29","dev":"tun0","protocol":"kernel","scope":"link","prefsrc":"192.0.0.2","flags":[]},{"dst":"192.168.1.0/24","dev":"eth0","protocol":"kernel","scope":"link","prefsrc":"192.168.1.20","flags":[]}]

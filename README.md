@@ -159,8 +159,12 @@ The event log, naming who did what — including the router that kicks:
   labelled *via VPN*, and are only compared with other checks through the
   same tunnel. Detection reads which kind of link each route uses from the
   kernel, not what the interface is called, so a connected VPN that carries
-  none of the probes (Tailscale without an exit node) is not one. A tunnel
-  that routes nothing differently (policy-only IPsec) cannot be seen this way.
+  none of the probes (Tailscale without an exit node) is not one, and a line
+  that is itself a tunnel — PPPoE, or the CLAT an IPv6-only network uses for
+  IPv4 — is recognised as the line: a VPN that takes over the default route
+  still keeps its own server reachable outside the tunnel, and that route is
+  what tells the two apart. A tunnel that routes nothing differently
+  (policy-only IPsec) cannot be seen this way.
 - **History**: per-minute for 7 days (configurable), hourly for a year,
   every test and event kept. A month of monitoring stays under ~12 MB.
 - **Copy report** — a plain-text summary of the window you are looking at,
