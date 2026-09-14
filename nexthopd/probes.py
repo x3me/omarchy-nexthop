@@ -172,6 +172,13 @@ class PingProbe(threading.Thread):
         # Held for one further grace period, which is as long as a late report
         # can be believed to belong to that packet.
         self._charged = {}
+        # Whether ping itself stopped running (a suspend freezes it with the
+        # daemon): the timestamp of the last line and the highest sequence
+        # seen, and — after such a stop — the highest sequence that was sent
+        # before it. See _before_a_stop.
+        self._last_line_t = None
+        self._max_seq = 0
+        self._stale_upto = None
 
     def _loaded(self) -> bool:
         try:
@@ -214,6 +221,38 @@ class PingProbe(threading.Thread):
         """
         self._pending.clear()
         self._charged.clear()
+        self._last_line_t = None
+        self._max_seq = 0
+        self._stale_upto = None
+
+    def _grace(self) -> float:
+        return self.interval * 2.5 + 1.0
+
+    def _before_a_stop(self, t: float, seq: int) -> bool:
+        """Does this line describe a packet sent before ping stopped running?
+
+        `ping -D` stamps a line when ping prints it, not when the packet
+        arrived. A reply that reached the socket just before a laptop froze is
+        printed the instant ping thaws, stamped after the wake — measured in a
+        namespace: frozen with SIGSTOP while a reply was in flight, thawed four
+        seconds later, and the reply printed 200 us after the thaw with the
+        thaw's timestamp (its RTT is honest; its time is not). Read as a fresh
+        answer it ended the post-wake settle early (#6: a 5 s gateway-quiet two
+        seconds after a wake).
+
+        `-O` makes ping print a line every interval, a reply or "no answer
+        yet", so a jump between consecutive lines longer than the grace means
+        ping was not running at all. Packets sent before the jump carry a
+        sequence at most one past the highest printed before it (the last one
+        sent is announced only when the next is). Those are neither answered
+        nor lost as far as the leg is concerned: nobody was watching when they
+        were, and the gap is the daemon's to account for.
+        """
+        if self._last_line_t is not None and t - self._last_line_t > self._grace():
+            self._stale_upto = self._max_seq + 1
+        self._last_line_t = t
+        self._max_seq = max(self._max_seq, seq)
+        return self._stale_upto is not None and seq <= self._stale_upto
 
     def _expire(self, now: float):
         """A packet still unanswered after the grace period is a lost packet.
@@ -286,6 +325,9 @@ class PingProbe(threading.Thread):
         m = RE_REPLY.match(line)
         if m:
             t, seq, rtt = float(m.group(1)), int(m.group(2)), float(m.group(3))
+            if self._before_a_stop(t, seq):
+                self._pending.pop(seq, None)
+                return
             self._pending.pop(seq, None)
             # A reply this late cannot un-lose the packet — the window it
             # belonged to has already been read — and recording the RTT as
@@ -298,6 +340,9 @@ class PingProbe(threading.Thread):
         m = RE_UNREACH.match(line)
         if m:
             t, seq = float(m.group(1)), int(m.group(2))
+            if self._before_a_stop(t, seq):
+                self._pending.pop(seq, None)
+                return
             self._pending.pop(seq, None)
             if seq not in self._charged:
                 self.series.add(t, None, self._loaded())
@@ -307,6 +352,10 @@ class PingProbe(threading.Thread):
         m = RE_PENDING.match(line)
         if m:
             t, seq = float(m.group(1)), int(m.group(2))
+            if self._before_a_stop(t, seq):
+                self._pending.pop(seq, None)
+                self._expire(t)
+                return
             # `ping -O` repeats "no answer yet" for the same seq, so one that
             # has already been charged must not be put back on the pending
             # list to be charged a second time.

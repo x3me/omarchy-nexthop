@@ -81,22 +81,23 @@ class PingParsing(unittest.TestCase):
         """
         s = Series()
         p = PingProbe("192.0.2.1", s, 500)
-        p._consume("[100.0] no answer yet for icmp_seq=4\n")
-        p._consume("[110.0] no answer yet for icmp_seq=9\n")   # expires seq 4
-        p._consume("[110.5] 64 bytes from 1.1.1.1: icmp_seq=4 ttl=60 time=9.0 ms\n")
-        rows = s.all()
-        self.assertEqual(len(rows), 1)
-        self.assertIsNone(rows[0][1])
+        # At the real 500 ms cadence — ping prints a line every interval, and
+        # a longer silence now means ping itself stopped (_before_a_stop).
+        for i, seq in enumerate(range(4, 10)):
+            p._consume("[%.1f] no answer yet for icmp_seq=%d\n" % (100.0 + i * 0.5, seq))
+        self.assertIn(4, p._charged)                           # expired at 102.5
+        p._consume("[103.0] 64 bytes from 1.1.1.1: icmp_seq=4 ttl=60 time=9.0 ms\n")
+        self.assertEqual([r for r in s.all() if r[1] is not None], [])
 
     def test_a_repeated_pending_line_cannot_recharge_a_lost_seq(self):
         """`ping -O` repeats "no answer yet" for the same seq — the recording
         does it for seq 5 — so a charged seq must not go back on the list."""
         s = Series()
         p = PingProbe("192.0.2.1", s, 500)
-        p._consume("[100.0] no answer yet for icmp_seq=4\n")
-        p._consume("[110.0] no answer yet for icmp_seq=4\n")   # charges it
-        p._consume("[110.5] no answer yet for icmp_seq=4\n")   # must not re-arm
-        p._consume("[113.0] no answer yet for icmp_seq=4\n")   # would re-charge
+        # Every 500 ms: charged at 102.5, repeated at 103.0 (must not re-arm),
+        # and still repeating at 105.5 where a re-armed seq would be charged.
+        for k in range(12):
+            p._consume("[%.1f] no answer yet for icmp_seq=4\n" % (100.0 + k * 0.5))
         self.assertEqual(len(s.all()), 1)
 
     def test_a_new_ping_process_can_lose_seq_1_again(self):
@@ -108,12 +109,12 @@ class PingParsing(unittest.TestCase):
         """
         s = Series()
         p = PingProbe("192.0.2.1", s, 500)
-        p._consume("[100.0] no answer yet for icmp_seq=1\n")
-        p._consume("[110.0] no answer yet for icmp_seq=9\n")   # charges seq 1
+        for k in range(6):                                     # charges seq 1
+            p._consume("[%.1f] no answer yet for icmp_seq=1\n" % (100.0 + k * 0.5))
         self.assertEqual(len(s.all()), 1)
         p._reset_tracking()                                    # ping respawned
-        p._consume("[200.0] no answer yet for icmp_seq=1\n")
-        p._consume("[210.0] no answer yet for icmp_seq=2\n")   # charges it again
+        for k in range(6):                                     # charges it again
+            p._consume("[%.1f] no answer yet for icmp_seq=1\n" % (200.0 + k * 0.5))
         self.assertEqual(len(s.all()), 2)
 
     def test_the_charged_map_does_not_grow_without_bound(self):
@@ -130,11 +131,70 @@ class PingParsing(unittest.TestCase):
         s = Series()
         p = PingProbe("192.0.2.1", s, 500)
         p._consume("[100.0] no answer yet for icmp_seq=7\n")
-        # A reply for a later seq far past the grace window flushes it.
-        p._consume("[200.0] 64 bytes from 1.1.1.1: icmp_seq=9 ttl=60 time=5.0 ms\n")
+        p._consume("[101.5] 64 bytes from 1.1.1.1: icmp_seq=8 ttl=60 time=5.0 ms\n")
+        # A later reply, past the grace for seq 7, flushes it.
+        p._consume("[103.0] 64 bytes from 1.1.1.1: icmp_seq=9 ttl=60 time=5.0 ms\n")
         stats = Series.stats(s.all())
-        self.assertEqual(stats["count"], 2)
-        self.assertEqual(stats["loss"], 0.5)
+        self.assertEqual(stats["count"], 3)
+        self.assertAlmostEqual(stats["loss"], 1 / 3)
+
+
+class PingAcrossAStop(unittest.TestCase):
+    """What ping prints the moment it thaws belongs to before it stopped.
+
+    Measured in a user namespace with 1 s of netem delay: ping frozen with
+    SIGSTOP while a reply was in flight, thawed four seconds later. It printed
+    `no answer yet for icmp_seq=1` and then the reply for seq 1, both stamped
+    within 200 us of the thaw, the reply carrying an honest `time=2000 ms`.
+    Read as fresh, that reply ended the post-wake settle early (#6, a 5 s
+    gateway-quiet two seconds after a real wake).
+    """
+
+    def replay(self, lines):
+        s = Series()
+        p = PingProbe("192.0.2.1", s, 500)
+        for line in lines:
+            p._consume(line + "\n")
+        return s, p
+
+    BEFORE = ["[100.0] 64 bytes from 192.0.2.1: icmp_seq=1 ttl=64 time=2.1 ms",
+              "[100.5] 64 bytes from 192.0.2.1: icmp_seq=2 ttl=64 time=2.0 ms"]
+    # 98 minutes asleep; seq 3 was sent just before, and its reply was waiting.
+    THAW = ["[5980.9] no answer yet for icmp_seq=3",
+            "[5980.9] 64 bytes from 192.0.2.1: icmp_seq=3 ttl=64 time=2.2 ms"]
+
+    def test_a_reply_printed_on_thaw_is_not_an_answer_after_waking(self):
+        s, _ = self.replay(self.BEFORE + self.THAW)
+        self.assertEqual([r[0] for r in s.all()], [100.0, 100.5])
+
+    def test_a_probe_sent_after_waking_counts_as_usual(self):
+        s, _ = self.replay(self.BEFORE + self.THAW + [
+            "[5981.4] 64 bytes from 192.0.2.1: icmp_seq=4 ttl=64 time=2.3 ms"])
+        self.assertEqual(s.all()[-1][:2], (5981.4, 2.3))
+
+    def test_the_new_losses_after_waking_are_charged_at_their_own_time(self):
+        # Wi-Fi rejoining: seq 4 onwards go unanswered, and that silence is
+        # real — the daemon's settle, not the probe, decides what it means.
+        lines = self.BEFORE + self.THAW + [
+            "[%.1f] no answer yet for icmp_seq=%d" % (5981.4 + k * 0.5, 4 + k)
+            for k in range(8)]
+        s, _ = self.replay(lines)
+        losses = [r[0] for r in s.all() if r[1] is None]
+        self.assertTrue(losses)
+        self.assertTrue(all(t >= 5981.4 for t in losses))
+
+    def test_a_loss_from_before_the_stop_is_charged_before_it(self):
+        s, _ = self.replay([
+            "[100.0] 64 bytes from 192.0.2.1: icmp_seq=1 ttl=64 time=2.1 ms",
+            "[100.5] no answer yet for icmp_seq=2",
+            "[5980.9] no answer yet for icmp_seq=3"])
+        self.assertEqual([r[:2] for r in s.all()], [(100.0, 2.1), (100.5, None)])
+
+    def test_a_short_pause_in_output_is_not_a_stop(self):
+        s, p = self.replay(self.BEFORE + [
+            "[102.0] 64 bytes from 192.0.2.1: icmp_seq=3 ttl=64 time=2.2 ms"])
+        self.assertIsNone(p._stale_upto)
+        self.assertEqual(len(s.all()), 3)
 
 
 class SynRetransmits(unittest.TestCase):
