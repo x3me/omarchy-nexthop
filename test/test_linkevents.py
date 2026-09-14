@@ -50,6 +50,25 @@ class LinkEvents(unittest.TestCase):
         self.assertIn("44", roam["detail"])
         self.assertIn("-61", roam["detail"])
 
+    def test_roam_uses_access_point_names_when_known(self):
+        t = time.time()
+        self.watch.sample(t, {"bssid": "aa:aa:aa:aa:aa:aa",
+                              "ap_name": "Kitchen", "channel": 149})
+        self.watch.sample(t + 2, {"bssid": "bb:bb:bb:bb:bb:bb",
+                                  "ap_name": "Upstairs Hallway", "channel": 44})
+        roam = [e for e in self.store.events() if e["kind"] == "roam"][0]
+        self.assertTrue(roam["detail"].startswith("Roamed to Upstairs Hallway"))
+        self.assertIn("bb:bb:bb:bb:bb:bb", roam["detail"])
+
+    def test_same_named_radios_remain_distinct_in_events(self):
+        t = time.time()
+        self.watch.sample(t, {"bssid": "aa:aa:aa:aa:aa:aa",
+                              "ap_name": "Upstairs Hallway", "channel": 157})
+        self.watch.sample(t + 2, {"bssid": "bb:bb:bb:bb:bb:bb",
+                                  "ap_name": "Upstairs Hallway", "channel": 209})
+        roam = [e for e in self.store.events() if e["kind"] == "roam"][0]
+        self.assertIn("Upstairs Hallway (bb:bb:bb:bb:bb:bb)", roam["detail"])
+
     def test_associate_needs_a_confirmed_gap(self):
         t = time.time()
         link = {"bssid": "aa:aa:aa:aa:aa:aa", "ssid": "Office"}
@@ -200,6 +219,18 @@ class LinkAttribution(unittest.TestCase):
         self.assertNotIn(" via ", evs[0]["detail"])
         # The lookup window reached back to the last time the link was up.
         self.assertGreaterEqual(events.calls[-1][2], 14.0)
+
+    def test_name_change_does_not_make_the_same_bssid_a_different_ap(self):
+        events = StubEvents(self.cause(True, 2, None))
+        watch = LinkWatch(self.store, events)
+        t = time.time()
+        watch.sample(t, {"bssid": self.OLD, "ap_name": "Old Hallway Name"})
+        for i in range(LinkWatch.GAP_SAMPLES):
+            watch.sample(t + 2 + i * 2, {})
+        watch.sample(t + 14, {"bssid": self.OLD, "ap_name": "Upstairs Hallway"})
+        event = self.store.events()[0]
+        self.assertIn("Kicked by AP Old Hallway Name", event["detail"])
+        self.assertNotIn(" via ", event["detail"])
 
     def test_gap_nobody_claimed_is_a_plain_association(self):
         watch = LinkWatch(self.store, StubEvents(None))

@@ -100,6 +100,21 @@ The event log, naming who did what — including the router that kicks:
 - **IPC**: `omarchy-shell io.github.x3me.nexthop toggle | speedTest |
   showTab Latency`
 
+### Name your access points
+
+Put a CSV inventory at
+`~/.config/nexthop/bssid_to_ap_inventory.csv`. The required columns are
+`bssid` and `ap_name`; extra columns such as band, channel, and SSID are fine:
+
+```csv
+bssid,ap_name,band,channel,ssid
+aa:bb:cc:dd:ee:ff,Upstairs Hallway,6 GHz,209,Home
+```
+
+Known names appear on the Overview and Wi-Fi tabs and in new link events.
+The file is noticed automatically when it changes; unknown BSSIDs continue
+to use their address.
+
 ## What it measures
 
 - **Two-leg latency, twice a second.** One persistent probe to your

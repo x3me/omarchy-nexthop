@@ -22,7 +22,8 @@ Item {
   readonly property var metered: live && live.metered ? live.metered : null
   readonly property bool tethered: !!(metered && metered.tethered)
 
-  readonly property string middleTitle: tethered ? metered.label : "Router"
+  readonly property string middleTitle: tethered ? metered.label
+    : (live && live.link && live.link.ap_name ? live.link.ap_name : "Router")
 
   readonly property string middleDetail: {
     if (!live || !live.link) return ""
@@ -220,6 +221,9 @@ Item {
       Text {
         textFormat: Text.PlainText
         anchors.horizontalCenter: parent.horizontalCenter
+        width: parent.width
+        elide: Text.ElideRight
+        horizontalAlignment: Text.AlignHCenter
         text: parent.title
         color: root.textColor
         font.family: Style.font.family

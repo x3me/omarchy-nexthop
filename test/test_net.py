@@ -3,7 +3,10 @@
 Run: python3 -m unittest discover -s test
 """
 
+import os
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -161,6 +164,125 @@ class ConnectionNameCache(unittest.TestCase):
         net.connection_name_cached("wlo1", ("wlo1", "10.0.0.1", "aa:bb"),
                                    now=131 + net.NAME_CACHE_TTL_S + 1)
         self.assertEqual(len(calls), 3)
+
+
+class AccessPointInventory(unittest.TestCase):
+    def test_csv_maps_bssid_to_access_point_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            path.write_text(
+                "bssid,ap_name,band,channel,ssid\n"
+                "8C:30:66:72:62:5F,Upstairs Hallway,6 GHz,209,PoolPartyUltra\n"
+            )
+            inventory = net.ApInventory(path)
+            self.assertEqual(
+                inventory.lookup("8c:30:66:72:62:5f"), "Upstairs Hallway")
+
+    def test_utf8_bom_from_spreadsheet_exports_is_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            path.write_text(
+                "bssid,ap_name\n8c:30:66:72:62:5f,Upstairs Hallway\n",
+                encoding="utf-8-sig")
+            inventory = net.ApInventory(path)
+            self.assertEqual(
+                inventory.lookup("8c:30:66:72:62:5f"), "Upstairs Hallway")
+
+    def test_invalid_rows_and_unknown_bssids_have_no_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            path.write_text(
+                "bssid,ap_name,band,channel,ssid\n"
+                "not-a-bssid,Wrong,5 GHz,36,Office\n"
+                "aa:bb:cc:dd:ee:ff,,5 GHz,36,Office\n"
+            )
+            inventory = net.ApInventory(path)
+            self.assertIsNone(inventory.lookup("not-a-bssid"))
+            self.assertIsNone(inventory.lookup("aa:bb:cc:dd:ee:ff"))
+            self.assertIsNone(inventory.lookup("11:22:33:44:55:66"))
+
+    def test_same_size_rewrite_is_seen_even_when_mtime_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            before = ("bssid,ap_name\n"
+                      "aa:bb:cc:dd:ee:ff,Kitchen\n")
+            after = ("bssid,ap_name\n"
+                     "aa:bb:cc:dd:ee:ff,Hallway\n")
+            self.assertEqual(len(before), len(after))
+            path.write_text(before)
+            inventory = net.ApInventory(path)
+            self.assertEqual(inventory.lookup("aa:bb:cc:dd:ee:ff"), "Kitchen")
+            old_mtime = path.stat().st_mtime_ns
+            path.write_text(after)
+            os.utime(path, ns=(old_mtime, old_mtime))
+            self.assertEqual(inventory.lookup("aa:bb:cc:dd:ee:ff"), "Hallway")
+
+    def test_fifo_inventory_path_cannot_block_a_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            os.mkfifo(path)
+            inventory = net.ApInventory(path)
+            done = threading.Event()
+            worker = threading.Thread(
+                target=lambda: (inventory.lookup("aa:bb:cc:dd:ee:ff"), done.set()),
+                daemon=True)
+            worker.start()
+            completed_without_writer = done.wait(0.25)
+            if not completed_without_writer:
+                writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+                os.close(writer)
+                worker.join(1)
+            self.assertTrue(completed_without_writer)
+
+    def test_snapshot_publishes_the_known_access_point_name(self):
+        originals = (net.route_to, net.is_wireless, net.wifi_link,
+                     net.wifi_station, net.connection_name_cached,
+                     net.AP_INVENTORY)
+        net.route_to = lambda anchor: {
+            "iface": "wlo1", "gateway": "192.168.1.1", "src": "192.168.1.2"}
+        net.is_wireless = lambda iface: True
+        net.wifi_link = lambda iface: {
+            "bssid": "8c:30:66:72:62:5f", "ssid": "PoolPartyUltra"}
+        net.wifi_station = lambda iface: {}
+        net.connection_name_cached = lambda iface, key: "PoolPartyUltra"
+        net.AP_INVENTORY = type("Inventory", (), {
+            "lookup": lambda self, bssid: "Upstairs Hallway"})()
+        try:
+            self.assertEqual(net.snapshot()["ap_name"], "Upstairs Hallway")
+        finally:
+            (net.route_to, net.is_wireless, net.wifi_link,
+             net.wifi_station, net.connection_name_cached,
+             net.AP_INVENTORY) = originals
+
+    def test_historical_event_bssids_are_decorated_for_display(self):
+        inventory = type("Inventory", (), {
+            "lookup": lambda self, bssid: {
+                "aa:aa:aa:aa:aa:aa": "Kitchen",
+                "bb:bb:bb:bb:bb:bb": "Upstairs Hallway",
+            }.get(bssid)})()
+        detail = "Roamed from aa:aa:aa:aa:aa:aa to bb:bb:bb:bb:bb:bb"
+        self.assertEqual(
+            net.decorate_bssids(detail, inventory),
+            "Roamed from Kitchen (aa:aa:aa:aa:aa:aa) to "
+            "Upstairs Hallway (bb:bb:bb:bb:bb:bb)")
+
+    def test_already_decorated_event_is_not_decorated_twice(self):
+        inventory = type("Inventory", (), {
+            "lookup": lambda self, bssid: "Upstairs Hallway"})()
+        detail = "Roamed to Upstairs Hallway (bb:bb:bb:bb:bb:bb)"
+        self.assertEqual(net.decorate_bssids(detail, inventory), detail)
+
+    def test_stored_name_survives_an_inventory_rename_without_nesting(self):
+        inventory = type("Inventory", (), {
+            "lookup": lambda self, bssid: "Current Hallway Name"})()
+        detail = "Roamed to Stored Hallway Name (bb:bb:bb:bb:bb:bb)"
+        self.assertEqual(net.decorate_bssids(detail, inventory), detail)
+
+    def test_bssid_shaped_substrings_inside_words_are_not_decorated(self):
+        inventory = type("Inventory", (), {
+            "lookup": lambda self, bssid: "Hallway"})()
+        detail = "xaa:bb:cc:dd:ee:ff and aa:bb:cc:dd:ee:ffz"
+        self.assertEqual(net.decorate_bssids(detail, inventory), detail)
 
 
 if __name__ == "__main__":
