@@ -283,6 +283,241 @@ class AccessPointInventory(unittest.TestCase):
             "lookup": lambda self, bssid: "Hallway"})()
         detail = "xaa:bb:cc:dd:ee:ff and aa:bb:cc:dd:ee:ffz"
         self.assertEqual(net.decorate_bssids(detail, inventory), detail)
+class TunnelDetection(unittest.TestCase):
+    """Which link a route leaves by, read from the kernel, never from a name.
+
+    The shapes come from emulating each setup in an `unshare -rn` namespace
+    against the real route code (2026-09-13): wg-quick and a Tailscale exit
+    node give the anchor a route with no gateway, OpenVPN def1 gives it the
+    tunnel peer. The link types are what this laptop's own kernel reports:
+    wlo1 1, docker0 1, tailscale0 65534 with tun_flags.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.sys = self.dir.name
+        self.link("wlo1", 1, uevent="DEVTYPE=wlan\n")
+        self.link("docker0", 1, uevent="DEVTYPE=bridge\n")
+        self.link("wg0", 65534, uevent="DEVTYPE=wireguard\n")
+        self.link("tailscale0", 65534, tun_flags="0x5001\n")
+        self.link("tun0", 65534, tun_flags="0x1001\n")
+        self.link("ppp0", 512)
+        self.link("ppp1", 512)
+        self.link("ipip0", 768)
+        self.link("eth0", 1)
+
+    def link(self, name, arphrd, uevent="", tun_flags=None):
+        d = Path(self.sys) / name
+        d.mkdir()
+        (d / "type").write_text("%d\n" % arphrd)
+        (d / "uevent").write_text(uevent)
+        if tun_flags is not None:
+            (d / "tun_flags").write_text(tun_flags)
+
+    def test_tunnels_are_known_by_link_type(self):
+        for name in ("wg0", "tailscale0", "tun0", "ppp0", "ipip0"):
+            self.assertTrue(net.is_tunnel_link(name, self.sys), name)
+        for name in ("wlo1", "docker0", "absent0"):
+            self.assertFalse(net.is_tunnel_link(name, self.sys), name)
+
+    def test_a_name_that_did_not_come_from_the_kernel_is_not_read(self):
+        (Path(self.sys) / "type").write_text("65534\n")
+        for bad in ("", "..", ".", "../wg0", "wg0/../wg0", "a" * 16, "wg 0"):
+            self.assertFalse(net.is_tunnel_link(bad, self.sys), repr(bad))
+
+    def test_the_label_comes_from_the_kernel_where_it_can(self):
+        self.assertEqual(net.tunnel_type("wg0", self.sys), "wireguard")
+        self.assertEqual(net.tunnel_type("tailscale0", self.sys), "tailscale")
+        self.assertEqual(net.tunnel_type("tun0", self.sys), "tun")
+        self.assertEqual(net.tunnel_type("ppp0", self.sys), "ppp")
+        self.assertEqual(net.tunnel_type("ipip0", self.sys), "tunnel")
+
+    # `ip -j route show default` on this laptop, plus the default route
+    # NetworkManager's OpenVPN adds beside it with a lower metric.
+    DEFAULTS = ('[{"dst":"default","gateway":"10.8.0.1","dev":"tun0","metric":50,"flags":[]},'
+                '{"dst":"default","gateway":"192.168.10.1","dev":"wlo1","protocol":"dhcp",'
+                '"prefsrc":"192.168.10.219","metric":600,"flags":[]}]')
+
+    def table(self, name):
+        return (FIXTURES / "routes" / (name + ".json")).read_text()
+
+    def test_a_physical_default_beats_any_tunnel_default(self):
+        self.assertEqual(net.line_route(self.DEFAULTS, self.sys),
+                         {"iface": "wlo1", "gateway": "192.168.10.1",
+                          "src": "192.168.10.219"})
+        self.assertEqual(net.line_route(self.table("openvpn-beside-physical-default"),
+                                        self.sys)["iface"], "eth0")
+
+    # The shapes below are `ip -j route show` recorded in an `unshare -rnm`
+    # namespace on this laptop (test/fixtures/routes), one per case in the
+    # rule HopSense verified [D, Plamen, 2026-09-14].
+
+    def test_a_replaced_default_is_found_through_the_server_host_route(self):
+        # OpenVPN without def1: the default is tun0's, and the route that keeps
+        # the VPN's own server reachable outside the tunnel names the line.
+        line = net.line_route(self.table("openvpn-replaced-default"), self.sys)
+        self.assertEqual((line["iface"], line["gateway"]), ("eth0", "192.168.1.1"))
+        line = net.line_route(self.table("networkmanager-vpn"), self.sys)
+        self.assertEqual((line["iface"], line["gateway"]), ("eth0", "192.168.1.1"))
+
+    def test_pppoe_is_the_line(self):
+        line = net.line_route(self.table("pppoe-default"), self.sys)
+        self.assertEqual((line["iface"], line["gateway"]), ("ppp0", ""))
+
+    def test_a_clat_is_the_line(self):
+        # An IPv6-only network giving IPv4 its default through a tun device.
+        line = net.line_route(self.table("clat-default"), self.sys)
+        self.assertEqual((line["iface"], line["gateway"]), ("tun0", ""))
+
+    def test_a_vpn_over_pppoe_is_found_under_ppp_on_both_sides(self):
+        line = net.line_route(self.table("vpn-over-pppoe"), self.sys)
+        self.assertEqual((line["iface"], line["gateway"]), ("ppp0", "10.0.0.1"))
+
+    def test_host_routes_without_a_gateway_or_on_the_default_s_link_never_qualify(self):
+        # A WireGuard peer's allowed IP (a /32 with no gateway), one on another
+        # link with no gateway, and the LAN's subnet route: still D.
+        line = net.line_route(self.table("host-routes-that-never-qualify"), self.sys)
+        self.assertEqual((line["iface"], line["gateway"]), ("wg0", ""))
+        same_link = ('[{"dst":"default","dev":"tun0"},'
+                     '{"dst":"203.0.113.5","gateway":"10.8.0.1","dev":"tun0"}]')
+        self.assertEqual(net.line_route(same_link, self.sys),
+                         {"iface": "tun0", "gateway": "", "src": ""})
+
+    def test_a_gatewayed_subnet_route_is_not_a_server_route(self):
+        # A static route to another office's subnet has a gateway and leaves by
+        # the LAN, and it still says nothing about a VPN's server.
+        table = ('[{"dst":"default","dev":"tun0"},'
+                 '{"dst":"10.99.0.0/16","gateway":"192.168.1.1","dev":"eth0"}]')
+        self.assertEqual(net.line_route(table, self.sys)["iface"], "tun0")
+
+    def test_step_one_needs_a_gateway_not_just_a_lower_metric(self):
+        table = ('[{"dst":"default","dev":"eth0","metric":10},'
+                 '{"dst":"default","gateway":"192.168.10.1","dev":"wlo1","metric":600}]')
+        self.assertEqual(net.line_route(table, self.sys)["iface"], "wlo1")
+
+    def test_the_lowest_metric_underlay_wins_and_ties_keep_table_order(self):
+        table = ('[{"dst":"default","dev":"tun0"},'
+                 '{"dst":"203.0.113.5","gateway":"192.168.1.1","dev":"eth0","metric":100},'
+                 '{"dst":"203.0.113.6","gateway":"192.168.10.1","dev":"wlo1","metric":50},'
+                 '{"dst":"203.0.113.7","gateway":"192.168.1.9","dev":"eth0","metric":50}]')
+        self.assertEqual(net.line_route(table, self.sys)["gateway"], "192.168.10.1")
+
+    def test_no_default_is_no_line(self):
+        self.assertEqual(net.line_route(self.table("no-default"), self.sys), {})
+        self.assertEqual(net.line_route("not json", self.sys), {})
+        self.assertEqual(net.line_route(None, self.sys), {})
+        # A table cut at the read cap does not parse, so it is unknown, never a VPN.
+        cut = self.table("openvpn-replaced-default")[:40]
+        self.assertEqual(net.line_route(cut, self.sys), {})
+
+    def route(self, table):
+        return lambda target: dict(table.get(target, {}))
+
+    def test_an_ordinary_link_costs_no_extra_read(self):
+        def defaults():
+            raise AssertionError("the main table must not be read")
+        here = {"iface": "wlo1", "gateway": "192.168.10.1", "src": "192.168.10.219"}
+        got = net.local_route("1.1.1.1", self.sys,
+                              route=self.route({"1.1.1.1": here}), routes=defaults)
+        self.assertEqual(got, here)
+
+    def test_under_wg_quick_the_router_is_still_the_physical_gateway(self):
+        # Before: no gateway, so no router probe was created at all.
+        tunnel = {"iface": "wg0", "gateway": "", "src": "10.66.66.2"}
+        got = net.local_route("1.1.1.1", self.sys,
+                              route=self.route({"1.1.1.1": tunnel}),
+                              routes=lambda: self.DEFAULTS)
+        self.assertEqual(got["iface"], "wlo1")
+        self.assertEqual(got["gateway"], "192.168.10.1")
+        self.assertEqual(got["tunnel_iface"], "wg0")
+
+    def test_under_openvpn_def1_the_peer_is_not_taken_for_the_router(self):
+        # Before: the router leg pinged 10.8.0.1, the VPN server's end.
+        tunnel = {"iface": "tun0", "gateway": "10.8.0.1", "src": "10.8.0.6"}
+        got = net.local_route("1.1.1.1", self.sys,
+                              route=self.route({"1.1.1.1": tunnel}),
+                              routes=lambda: self.DEFAULTS)
+        self.assertEqual(got["gateway"], "192.168.10.1")
+
+    def test_pppoe_is_the_line_not_a_vpn(self):
+        # ppp0 with nothing physical underneath it IS the internet link.
+        line = {"iface": "ppp0", "gateway": "", "src": "203.0.113.7"}
+        got = net.local_route("1.1.1.1", self.sys,
+                              route=self.route({"1.1.1.1": line}),
+                              routes=lambda: self.table("pppoe-default"))
+        self.assertEqual(got, line)
+        self.assertNotIn("tunnel_iface", got)
+
+    def test_a_vpn_that_replaced_the_default_keeps_the_real_router(self):
+        tunnel = {"iface": "tun0", "gateway": "10.8.0.1", "src": "10.8.0.6"}
+        got = net.local_route("1.1.1.1", self.sys,
+                              route=self.route({"1.1.1.1": tunnel}),
+                              routes=lambda: self.table("openvpn-replaced-default"))
+        self.assertEqual((got["iface"], got["gateway"], got["tunnel_iface"]),
+                         ("eth0", "192.168.1.1", "tun0"))
+
+    def test_a_clat_is_not_a_vpn(self):
+        clat = {"iface": "tun0", "gateway": "", "src": "192.0.0.2"}
+        got = net.local_route("1.1.1.1", self.sys, route=self.route({"1.1.1.1": clat}),
+                              routes=lambda: self.table("clat-default"))
+        self.assertNotIn("tunnel_iface", got)
+
+    def test_an_unreadable_table_leaves_the_anchor_route_standing(self):
+        tunnel = {"iface": "tun0", "gateway": "10.8.0.1", "src": "10.8.0.6"}
+        got = net.local_route("1.1.1.1", self.sys, route=self.route({"1.1.1.1": tunnel}),
+                              routes=lambda: None)
+        self.assertEqual(got, tunnel)
+
+    TARGETS = {"icmp-anchor": "1.1.1.1", "tcp-anchor": "1.1.1.1",
+               "tcp-cf": "speed.cloudflare.com", "tcp-google": "dns.google"}
+
+    def resolve(self, table):
+        def fake(host, port, type=None):
+            if host not in table:
+                raise OSError("no such host")
+            return [(2, 1, 6, "", (table[host], port))]
+        return fake
+
+    NAMES = {"speed.cloudflare.com": "198.51.100.10", "dns.google": "198.51.100.20"}
+
+    def test_a_full_tunnel(self):
+        via = {"iface": "wg0"}
+        got = net.tunnel_routes(self.TARGETS, "wlo1", self.sys,
+                                route=lambda t: via, resolve=self.resolve(self.NAMES))
+        self.assertEqual(got, {"iface": "wg0", "type": "wireguard", "scope": "full",
+                               "via": ["icmp-anchor", "tcp-anchor", "tcp-cf",
+                                       "tcp-google"], "probed": 4})
+
+    def test_a_split_tunnel_says_how_much_of_it(self):
+        table = {"1.1.1.1": {"iface": "wlo1"}, "198.51.100.10": {"iface": "tun0"},
+                 "198.51.100.20": {"iface": "wlo1"}}
+        got = net.tunnel_routes(self.TARGETS, "wlo1", self.sys,
+                                route=self.route(table), resolve=self.resolve(self.NAMES))
+        self.assertEqual((got["scope"], got["via"], got["probed"]),
+                         ("partial", ["tcp-cf"], 4))
+
+    def test_a_tunnel_that_carries_no_probe_is_not_a_vpn(self):
+        # Tailscale connected without an exit node — on this laptop and on
+        # the M4 Air in the first real test — routes nothing of ours.
+        got = net.tunnel_routes(self.TARGETS, "wlo1", self.sys,
+                                route=lambda t: {"iface": "wlo1"},
+                                resolve=self.resolve(self.NAMES))
+        self.assertIsNone(got)
+
+    def test_the_physical_link_itself_is_never_the_tunnel(self):
+        got = net.tunnel_routes(self.TARGETS, "ppp0", self.sys,
+                                route=lambda t: {"iface": "ppp0"},
+                                resolve=self.resolve(self.NAMES))
+        self.assertIsNone(got)
+
+    def test_an_unresolvable_target_is_left_out_not_guessed(self):
+        got = net.tunnel_routes(self.TARGETS, "wlo1", self.sys,
+                                route=lambda t: {"iface": "wg0"},
+                                resolve=self.resolve({}))
+        self.assertEqual((got["scope"], got["probed"]), ("full", 2))
+        self.assertEqual(got["via"], ["icmp-anchor", "tcp-anchor"])
 
 
 if __name__ == "__main__":

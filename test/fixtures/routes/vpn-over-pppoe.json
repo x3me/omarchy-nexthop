@@ -1,0 +1,1 @@
+[{"dst":"default","dev":"ppp1","scope":"link","flags":["linkdown"]},{"dst":"203.0.113.5","gateway":"10.0.0.1","dev":"ppp0","flags":["onlink","linkdown"]}]

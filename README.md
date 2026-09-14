@@ -162,10 +162,30 @@ to use their address.
   probes to agree: if TCP handshakes keep succeeding while pings go
   unanswered, the log records an "ICMP went quiet" event instead — no
   alarm for downtime you are not having.
+- **VPNs, drawn as VPNs.** When the probes' routes leave through a tunnel
+  (WireGuard, a Tailscale exit node, OpenVPN, a PPP VPN), the path gains a
+  fourth stop — this machine, router, VPN, internet — the router leg keeps
+  measuring your real router underneath, and everything past it is labelled
+  the tunnel's. Its latency is judged against the tunnel's own usual level
+  rather than colouring a VPN's extra 100–200 ms red. An outage through a
+  tunnel still counts against Reliability — it is the connection you have —
+  but nothing names your ISP for it, not the header, the notification, the
+  event log or the copied report. Speed checks through a tunnel run, are
+  labelled *via VPN*, and are only compared with other checks through the
+  same tunnel. Detection reads which kind of link each route uses from the
+  kernel, not what the interface is called, so a connected VPN that carries
+  none of the probes (Tailscale without an exit node) is not one, and a line
+  that is itself a tunnel — PPPoE, or the CLAT an IPv6-only network uses for
+  IPv4 — is recognised as the line: a VPN that takes over the default route
+  still keeps its own server reachable outside the tunnel, and that route is
+  what tells the two apart. A tunnel that routes nothing differently
+  (policy-only IPsec) cannot be seen this way.
 - **History**: per-minute for 7 days (configurable), hourly for a year,
   every test and event kept. A month of monitoring stays under ~12 MB.
 - **Copy report** — a plain-text summary of the window you are looking at,
-  with timestamps, both legs and loss. The thing an ISP actually asks for.
+  with timestamps, both legs and loss. The thing an ISP actually asks for —
+  so time measured through a VPN is listed as such and kept out of the
+  ISP leg's figures.
 
 ## How it works
 
@@ -228,7 +248,7 @@ bar widget, or via IPC.
 
 **Privileges: none.** No sudo, no capabilities, no packet capture. The
 daemon runs as your user; everything it reads is world-readable (`/sys`
-counters, `ping`, `iw`, `ss`).
+counters and link types, `ping`, `iw`, `ss`, `ip route`).
 
 ## Remove
 

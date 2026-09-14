@@ -112,4 +112,22 @@ if (seen.length) {
   for (const b of seen.slice(0, 12)) console.error("  " + b);
   process.exit(1);
 }
-console.log(`ok — ${checks} marks, all inside the canvas`);
+// The tunnel filter: each connector keeps only points measured on its own
+// path, and the router leg keeps everything.
+const mixed = [
+  { t: 1, loss: 0, local: 2, total: 9, wan: 7 },
+  { t: 2, loss: 0, local: 2, total: 150, wan: 148, vpn: 1 },
+  { t: 3, loss: 1, local: 2, total: null, wan: null, vpn: 1 },
+];
+const want = (got, exp, what) => {
+  if (JSON.stringify(got) !== JSON.stringify(exp)) {
+    console.error(`slots ${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(exp)}`);
+    process.exit(1);
+  }
+};
+want(Spark.slots(mixed, "wan", 3, true), [null, { v: 148 }, { down: true }], "tunnel");
+want(Spark.slots(mixed, "wan", 3, false), [{ v: 7 }, null, null], "line");
+want(Spark.slots(mixed, "wan", 3), [{ v: 7 }, { v: 148 }, { down: true }], "unfiltered");
+want(Spark.slots(mixed, "local", 3, true), [{ v: 2 }, { v: 2 }, { v: 2 }], "router leg");
+
+console.log(`ok — ${checks} marks, all inside the canvas; tunnel slots ok`);

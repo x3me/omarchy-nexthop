@@ -547,5 +547,40 @@ class WanPerPoint(unittest.TestCase):
         self.assertLessEqual(w["p95"], w["max"])
 
 
+class TunnelColour(unittest.TestCase):
+    """A VPN's leg judged against its own usual level [D, Plamen, 2026-09-13]."""
+
+    def test_no_usual_level_yet_means_no_judgement(self):
+        self.assertIsNone(score.tunnel_bands(None, None, 0))
+        self.assertIsNone(score.tunnel_bands(150.0, 152.0,
+                                             score.TUNNEL_BASELINE_MIN_MINUTES - 1))
+
+    def test_thresholds_are_the_pressure_bands_above_the_usual_level(self):
+        b = score.tunnel_bands(150.0, 152.0, 40)
+        self.assertEqual(b["amber_ms"], 150.0 + score.PRESSURE_BUSY_MS + 2 * 2.0)
+        self.assertEqual(b["red_ms"], 150.0 + score.PRESSURE_CONGESTED_MS + 2 * 2.0)
+
+    def test_a_distant_tunnel_still_shows_a_real_slowdown(self):
+        # The case the multiple failed on replay: +30 ms on a 150 ms tunnel is
+        # 1.2x, under 1.5x, and this rule still marks it.
+        b = score.tunnel_bands(150.0, 152.0, 40)
+        self.assertLess(180.0, 1.5 * 150.0)
+        self.assertGreaterEqual(180.0, b["amber_ms"])
+
+    def test_a_fast_tunnel_s_wobble_is_not_a_slowdown(self):
+        # And the other half: 6 -> 12 ms is "2x", and this rule leaves it alone.
+        b = score.tunnel_bands(6.0, 7.7, 40)
+        self.assertGreaterEqual(12.0, 2 * 6.0)
+        self.assertLess(12.0, b["amber_ms"])
+
+    def test_a_wobbly_tunnel_needs_more_to_be_called_worse(self):
+        calm = score.tunnel_bands(150.0, 152.0, 40)
+        wobbly = score.tunnel_bands(150.0, 170.0, 40)
+        self.assertGreater(wobbly["amber_ms"], calm["amber_ms"])
+
+    def test_the_index_is_withheld_while_the_tunnel_is_down(self):
+        self.assertFalse(score.scored_now("tunnel-down"))
+
+
 if __name__ == "__main__":
     unittest.main()

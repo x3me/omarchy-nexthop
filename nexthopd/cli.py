@@ -20,6 +20,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -283,14 +284,21 @@ def cmd_peak(_args):
     return 0
 
 
-def cmd_report(args):
-    """The paste-into-a-ticket summary. Plain text by design."""
-    store = open_store()
-    live = read_json(live_path(), {})
-    seconds = parse_window(args.window)
+VPN_DETAIL_IFACE = re.compile(r"\(([^()]{1,32})\)\s*$")
+
+
+def report_text(store, live: dict, seconds: float, window: str) -> str:
+    """The paste-into-a-ticket summary. Plain text by design, and pure given
+    a store, so what it claims about a VPN is tested.
+
+    Minutes measured through a VPN describe the tunnel, not the ISP line, so
+    they are kept out of the "wan leg" figures and reported on their own, and
+    every VPN span is listed as such [D, Plamen, 2026-09-13]. This is the one
+    document a user hands their ISP.
+    """
     lines = []
     link = live.get("link", {})
-    lines.append(f"Nexthop report — last {args.window}")
+    lines.append(f"Nexthop report — last {window}")
     lines.append(f"generated {time.strftime('%Y-%m-%d %H:%M %Z')}")
     if link:
         what = link.get("ssid") or link.get("name") or link.get("iface", "?")
@@ -299,9 +307,13 @@ def cmd_report(args):
     lines.append("")
     if store:
         rows, table = store.series(seconds)
-        vals = lambda k: [r[k] for r in rows if r.get(k) is not None]
+        # Not NULL means a tunnel carried some of it — a blank hour row is a
+        # mixed hour, and mixed is still not the ISP line's.
+        line_rows = [r for r in rows if r.get("vpn") is None]
+        tunnel_rows = [r for r in rows if r.get("vpn") is not None]
 
-        def block(name, p50key, p95key, losskey):
+        def block(name, subset, p50key, p95key, losskey):
+            vals = lambda k: [r[k] for r in subset if r.get(k) is not None]
             p50, p95, loss = vals(p50key), vals(p95key), vals(losskey)
             if not p50:
                 lines.append(f"{name}: no data")
@@ -311,10 +323,26 @@ def cmd_report(args):
                 f"p95 {max(p95) if p95 else 0:.1f} ms (worst {table} bucket), "
                 f"loss {sum(loss)/len(loss)*100 if loss else 0:.2f}%")
 
-        block("local leg (to router)", "local_p50", "local_p95", "local_loss")
-        block("wan leg (past router)", "wan_p50", "wan_p95", "wan_loss")
+        block("local leg (to router)", rows, "local_p50", "local_p95", "local_loss")
+        block("wan leg (past router)", line_rows, "wan_p50", "wan_p95", "wan_loss")
+        if tunnel_rows:
+            block("through a VPN (past router, not the ISP line)", tunnel_rows,
+                  "wan_p50", "wan_p95", "wan_loss")
         lines.append("")
         events = store.events(seconds)
+        spans = [e for e in events if e["kind"] == "vpn"]
+        if spans:
+            lines.append("measured through a VPN:")
+            for e in sorted(spans, key=lambda e: e["ts"]):
+                start = time.strftime("%a %H:%M", time.localtime(e["ts"]))
+                end = (time.strftime("%H:%M", time.localtime(e["ended_ts"]))
+                       if e["ended_ts"] else "now")
+                m = VPN_DETAIL_IFACE.search(e["detail"] or "")
+                iface = m.group(1) if m else "VPN"
+                lines.append(f"  {start}–{end} measured through a VPN ({iface}): "
+                             "figures in this span describe the tunnel, not "
+                             "the ISP line.")
+            lines.append("")
         if events:
             lines.append("events:")
             for e in events:
@@ -333,9 +361,16 @@ def cmd_report(args):
                 when = time.strftime("%a %H:%M", time.localtime(t["ts"]))
                 down = f"{t['down_mbps']:.0f}" if t["down_mbps"] else "--"
                 up = f"{t['up_mbps']:.0f}" if t["up_mbps"] else "--"
+                via = "  via VPN" if t.get("vpn") else ""
                 lines.append(f"  {when}  {t['kind']:<8} {down}/{up} Mbps"
-                             f"  ({t['engine']})")
-    print("\n".join(lines))
+                             f"  ({t['engine']}){via}")
+    return "\n".join(lines)
+
+
+def cmd_report(args):
+    """The paste-into-a-ticket summary — see report_text."""
+    print(report_text(open_store(), read_json(live_path(), {}),
+                      parse_window(args.window), args.window))
     return 0
 
 

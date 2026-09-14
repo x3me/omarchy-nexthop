@@ -13,6 +13,7 @@ import ipaddress
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import time
@@ -115,6 +116,224 @@ def route_to(anchor: str = "1.1.1.1") -> dict:
         "gateway": r.get("gateway") or "",
         "src": r.get("prefsrc") or "",
     }
+
+
+# ------------------------------------------------------------------ tunnels
+#
+# A VPN is measured as though it were the line unless something says
+# otherwise, and two common setups break the leg split outright: wg-quick and
+# a Tailscale exit node give the anchor a route with no gateway (no router
+# probe at all), and OpenVPN's redirect-gateway def1 gives it the tunnel peer
+# as "gateway" (the router leg silently becomes the hop to the VPN server).
+#
+# Detection is structural: what kind of link a route leaves by, read from the
+# kernel, never from what the interface is called. Plamen's first real VPN
+# (macOS, 2026-09-13) was on ppp0 while the only utun was Tailscale carrying
+# nothing, so a name rule would have been wrong twice.
+
+SYS_NET = "/sys/class/net"
+
+# ARPHRD_* from include/uapi/linux/if_arp.h: NONE (WireGuard and tun, which
+# carry no link-layer header), PPP, and TUNNEL (IPIP). Nothing else is a
+# tunnel here until a primary source says so.
+TUNNEL_LINK_TYPES = (65534, 512, 768)
+
+# Kernel interface names are at most 15 bytes and cannot hold '/', so anything
+# else did not come from the kernel and is not joined into a /sys path.
+_IFACE_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,15}$")
+
+
+def _iface_ok(iface) -> bool:
+    return bool(iface) and bool(_IFACE_RE.match(iface)) and iface not in (".", "..")
+
+
+def _sys_read(iface: str, name: str, sys_net: str = SYS_NET) -> Optional[str]:
+    if not _iface_ok(iface):
+        return None
+    try:
+        with open(f"{sys_net}/{iface}/{name}", "r") as f:
+            return f.read(4096)
+    except OSError:
+        return None
+
+
+def is_tunnel_link(iface: str, sys_net: str = SYS_NET) -> bool:
+    raw = _sys_read(iface, "type", sys_net)
+    try:
+        return int(raw.strip()) in TUNNEL_LINK_TYPES if raw else False
+    except ValueError:
+        return False
+
+
+def tunnel_type(iface: str, sys_net: str = SYS_NET) -> str:
+    """What to call a tunnel. A label only: detection never reads it.
+
+    The kernel names WireGuard devices itself (DEVTYPE=wireguard in uevent)
+    and gives tun devices a tun_flags file; Tailscale is a tun, so its own
+    interface name is the one place a name is used, and only to label it.
+    """
+    uevent = _sys_read(iface, "uevent", sys_net) or ""
+    if "DEVTYPE=wireguard" in uevent:
+        return "wireguard"
+    if _sys_read(iface, "tun_flags", sys_net) is not None:
+        return "tailscale" if iface.startswith("tailscale") else "tun"
+    raw = (_sys_read(iface, "type", sys_net) or "").strip()
+    return "ppp" if raw == "512" else "tunnel"
+
+
+# The main table is read whole only while the anchor's route is a tunnel. A
+# desktop's is a few kilobytes; a machine carrying a routing daemon's table can
+# be far larger, and past this cap the answer is "unknown" (the JSON is cut and
+# does not parse), which leaves the anchor's own route standing.
+ROUTE_TABLE_MAX_BYTES = 1 << 20
+ROUTE_TABLE_DEADLINE_S = 2.0
+
+
+def _is_host_route(dst) -> bool:
+    """`ip -j` prints a /32 as a bare address and everything else with /len,
+    which ip_address refuses — so parsing is the whole test."""
+    if not isinstance(dst, str):
+        return False
+    try:
+        return ipaddress.ip_address(dst).version == 4
+    except ValueError:
+        return False
+
+
+def line_route(raw: Optional[str], sys_net: str = SYS_NET) -> dict:
+    """The route that IS the subscriber's line, from the main table, or {}.
+
+    The rule both products implement [D, Plamen, 2026-09-14], IPv4, main table
+    only — a VPN's own policy tables (wg-quick's 51820, Tailscale's 52) cannot
+    vouch for the line underneath it, so they are never read:
+
+    1. The lowest-metric default with a gateway on a non-tunnel link is the
+       line. PPP counts as a tunnel here.
+    2. Otherwise let D be the lowest-metric default of any kind. A VPN that
+       replaced the default must still reach its own server outside the
+       tunnel, so it installs a host route to it through the underlying link:
+       if a /32 with a gateway leaves by a link other than D's, the
+       lowest-metric such route is the line, and D is a VPN.
+    3. Otherwise D's own link is the line, with D's gateway if it has one.
+       That is PPPoE (ppp0 carries the default and nothing else) and a CLAT
+       on an IPv6-only network (a tun device with the IPv4 default).
+
+    Ties go to the earlier route in table order; no default at all, no line.
+    Subnet routes, link-scope routes, a /32 without a gateway (a WireGuard
+    peer, a PPP peer) and a /32 on D's own link never qualify. `ip route show`
+    does not list routes the kernel cloned per destination, which macOS's
+    table has to exclude by flag.
+    """
+    try:
+        rows = json.loads(raw) if raw else []
+    except ValueError:
+        return {}
+    rows = [r for r in rows if isinstance(r, dict) and _iface_ok(r.get("dev"))] \
+        if isinstance(rows, list) else []
+
+    def pick(candidates):
+        return min(candidates, key=lambda ir: (ir[1].get("metric") or 0, ir[0]))[1]
+
+    def as_line(r):
+        return {"iface": r["dev"], "gateway": r.get("gateway") or "",
+                "src": r.get("prefsrc") or ""}
+
+    defaults = [(i, r) for i, r in enumerate(rows) if r.get("dst") == "default"]
+    if not defaults:
+        return {}
+    physical = [(i, r) for i, r in defaults
+                if r.get("gateway") and not is_tunnel_link(r["dev"], sys_net)]
+    if physical:
+        return as_line(pick(physical))
+    d = pick(defaults)
+    underlay = [(i, r) for i, r in enumerate(rows)
+                if _is_host_route(r.get("dst")) and r.get("gateway")
+                and r["dev"] != d["dev"]]
+    if underlay:
+        return as_line(pick(underlay))
+    return as_line(d)
+
+
+def _main_table() -> Optional[str]:
+    if not shutil.which("ip"):
+        return None
+    from .apps import read_bounded
+    try:
+        proc = subprocess.Popen(["ip", "-j", "route", "show", "table", "main"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL)
+    except OSError:
+        return None
+    return read_bounded(proc, ROUTE_TABLE_MAX_BYTES, ROUTE_TABLE_DEADLINE_S)
+
+
+def local_route(anchor: str = "1.1.1.1", sys_net: str = SYS_NET,
+                route=None, routes=None) -> dict:
+    """The connection the router leg measures.
+
+    The anchor's route while that leaves by a real link — the common case, and
+    no extra read. When it leaves by a tunnel, the line from the main table
+    (line_route) instead, marked with the tunnel it sits under. When the line
+    turns out to be that tunnel itself (PPPoE, a CLAT), or cannot be read, the
+    anchor's route stands and nothing is called a VPN.
+
+    `route` and `routes` are injectable so the choice is tested against
+    recorded tables rather than this machine's.
+    """
+    route = route or route_to
+    r = route(anchor)
+    if not r.get("iface") or not is_tunnel_link(r["iface"], sys_net):
+        return r
+    line = line_route(routes() if routes else _main_table(), sys_net)
+    if not line or line["iface"] == r["iface"]:
+        return r
+    return dict(line, tunnel_iface=r["iface"])
+
+
+def _first_address(host: str, resolve=None):
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        infos = (resolve or socket.getaddrinfo)(host, 443, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return None
+    # The order create_connection tries them in, so this is the path the
+    # probe's own first attempt takes.
+    return infos[0][4][0] if infos else None
+
+
+def tunnel_routes(targets: dict, physical_iface: str, sys_net: str = SYS_NET,
+                  route=None, resolve=None) -> Optional[dict]:
+    """Which internet probes leave through a tunnel, or None if none do.
+
+    `targets` maps instrument key -> host. A target whose route leaves by a
+    tunnel link that is not the physical interface counts; one that cannot be
+    resolved or routed is left out of `probed` rather than guessed. A tunnel
+    interface that no probe's route uses is not a VPN for any of this —
+    Tailscale connected without an exit node is the everyday case.
+    """
+    route = route or route_to
+    via, ifaces, probed = [], {}, 0
+    for key, host in sorted(targets.items()):
+        addr = _first_address(host, resolve)
+        if not addr:
+            continue
+        iface = route(addr).get("iface") or ""
+        if not iface:
+            continue
+        probed += 1
+        if iface != physical_iface and is_tunnel_link(iface, sys_net):
+            via.append(key)
+            ifaces[iface] = ifaces.get(iface, 0) + 1
+    if not via:
+        return None
+    iface = max(sorted(ifaces), key=lambda i: ifaces[i])
+    return {"iface": iface, "type": tunnel_type(iface, sys_net),
+            "scope": "full" if len(via) == probed else "partial",
+            "via": via, "probed": probed}
 
 
 def is_wireless(iface: str) -> bool:
@@ -359,13 +578,19 @@ def connection_name_cached(iface: str, key, now: float = None,
 
 
 def snapshot(anchor: str = "1.1.1.1") -> dict:
-    """Everything about the local end, in one call, safe to run twice a second."""
-    route = route_to(anchor)
+    """Everything about the local end, in one call, safe to run twice a second.
+
+    The link described is the physical one even under a VPN — see
+    local_route — and `tunnel_iface` says when the anchor's own route leaves
+    by a tunnel, which is what tells the link thread to look closer.
+    """
+    route = local_route(anchor)
     iface = route.get("iface", "")
     snap = {
         "iface": iface,
         "gateway": route.get("gateway", ""),
         "src": route.get("src", ""),
+        "tunnel_iface": route.get("tunnel_iface", ""),
         "kind": "none",
     }
     if not iface:

@@ -15,7 +15,17 @@ Column {
   spacing: Style.space(12)
 
   readonly property bool outage: live
-    && (live.state === "wan-down" || live.state === "local-down")
+    && (live.state === "wan-down" || live.state === "local-down"
+        || live.state === "tunnel-down")
+
+  // Whether any point of the recent history went through a VPN — each point
+  // carries its own flag, so the legend names the tunnel only when the chart
+  // actually draws some.
+  readonly property bool tunnelInView: {
+    var pts = panel.recentPoints || []
+    for (var i = 0; i < pts.length; i++) if (pts[i] && pts[i].vpn) return true
+    return false
+  }
 
   // Same shape the bar shows, so the two agree at a glance.
   function elapsed(since) {
@@ -40,6 +50,26 @@ Column {
       + "for the internet, so treat the numbers below as the sign-in page, "
       + "not your connection."
     color: tab.panel.warnTone
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  // Only while the tunnel is down, so it costs no height otherwise. Says
+  // what failed and, just as plainly, whose fault it is not: a VPN outage is
+  // charged to this connection's Reliability but never to the ISP.
+  Text {
+    textFormat: Text.PlainText
+    visible: tab.live && tab.live.state === "tunnel-down"
+    height: visible ? implicitHeight : 0
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: {
+      var d = tab.live ? tab.elapsed(tab.live.down_since) : ""
+      return (d ? "Down " + d + ". " : "")
+        + "The router answers; the VPN tunnel does not. "
+        + "Charged to this connection, not to your ISP."
+    }
+    color: tab.panel.dim
     font.family: tab.panel.fontFamily
     font.pixelSize: Style.font.caption
   }
@@ -174,12 +204,16 @@ Column {
         var ctx = tab.live ? tab.live.speed_ctx : null
         var held = m && m.care
         if (!ctx || ctx.last_down === null || ctx.last_down === undefined)
-          return held ? "checks paused on " + m.label : "no content check yet"
+          return held ? "checks paused on " + m.label
+            : (ctx && ctx.vpn ? "no check via VPN yet" : "no content check yet")
         var mbps = Math.round(ctx.last_down) + " Mbps"
         // No content check runs while the line is down, so this figure is
         // from before it. Saying "measured" would imply it is current.
         if (tab.outage) return mbps + " before the drop"
         if (held) return mbps + " · checks paused"
+        // Checks through a tunnel measure the tunnel. Run and said so, and
+        // judged only against other checks through the same one.
+        if (ctx.vpn) return mbps + " · via VPN"
         if (ctx.basis === "plan")
           return mbps + " vs " + Math.round(ctx.plan_down) + " plan"
         // Not counted, and why. One check is the arrival check on a link
@@ -269,6 +303,7 @@ Column {
     }
 
     LegendEntry { tint: Color.accent; label: "wan leg" }
+    LegendEntry { tint: "#bb9af7"; label: "tunnel"; visible: tab.tunnelInView }
     LegendEntry { tint: tab.panel.dim; label: "local leg" }
     LegendEntry { tint: Color.urgent; label: "packet loss"; tick: true }
   }

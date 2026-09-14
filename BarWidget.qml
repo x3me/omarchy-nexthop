@@ -100,7 +100,8 @@ BarWidget {
   readonly property color stateColor: {
     // A sign-in page is a gate, not a fault: warn, not urgent.
     if (netState === "captive") return "#e0af68"
-    if (netState === "local-down" || netState === "wan-down") return Color.urgent
+    if (netState === "local-down" || netState === "wan-down"
+        || netState === "tunnel-down") return Color.urgent
     if (netState === "degraded") return "#e0af68"
     if (index === null) return okColor
     if (index >= 80) return okColor
@@ -111,14 +112,16 @@ BarWidget {
   readonly property string glyph: {
     if (netState === "captive") return "󰦝"     // nf-md-shield_lock: a gate
     if (netState === "local-down") return "󱚵"   // nf-md-wifi_strength_alert
-    if (netState === "wan-down") return "󰲛"     // nf-md-web_off / broken link
+    if (netState === "wan-down" || netState === "tunnel-down")
+      return "󰲛"                                 // nf-md-web_off / broken link
     return "󰓅"                                   // nf-md-speedometer
   }
 
   readonly property string barText: {
     if (netState === "no-daemon") return glyph
     if (netState === "captive") return glyph
-    if (netState === "local-down" || netState === "wan-down") {
+    if (netState === "local-down" || netState === "wan-down"
+        || netState === "tunnel-down") {
       var since = live && live.down_since ? live.down_since : 0
       if (!since) return glyph
       var s = Math.max(0, Math.round(Date.now() / 1000 - since))
@@ -223,7 +226,9 @@ BarWidget {
       var name = l.link && (l.link.ssid || l.link.name) || ""
       var parts = [name, (l.index !== null ? l.index + " " + l.band : "")]
       if (l.local && l.local.p50 !== null && l.wan && l.wan.p50 !== null)
-        parts.push("local " + l.local.p50 + " ms · wan " + l.wan.p50 + " ms")
+        parts.push("local " + l.local.p50 + " ms · "
+                   + (l.vpn ? "tunnel " : "wan ") + l.wan.p50 + " ms")
+      if (l.vpn) parts.push("via VPN " + l.vpn.iface)
       return parts.filter(function(p) { return p && p.length }).join("\n")
     }
 

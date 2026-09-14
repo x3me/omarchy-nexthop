@@ -33,6 +33,9 @@ class SparklineGeometry(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          f"{r.stdout}\n{r.stderr}")
         self.assertIn("all inside the canvas", r.stdout)
+        # The same harness checks that each connector keeps only the points
+        # measured on its own path (tunnel or not).
+        self.assertIn("tunnel slots ok", r.stdout)
 
 
 if __name__ == "__main__":

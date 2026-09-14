@@ -157,5 +157,40 @@ class PeakSignalAuthorization(unittest.TestCase):
         self.assertEqual(self.killed, [])
 
 
+class ReportThroughAVpn(unittest.TestCase):
+    """The report is the document handed to an ISP, so a VPN's minutes must
+    never appear as the line's [D, Plamen, 2026-09-13]."""
+
+    def test_tunnel_minutes_are_kept_out_of_the_wan_leg_and_named(self):
+        from nexthopd.cli import report_text
+        from nexthopd.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(Path(d) / "t.db")
+            try:
+                now = time.time()
+                base = int(now // 60) * 60
+                for m in range(30):
+                    store.put_minute(base - 3600 + 60 * m,
+                                     {"local_p50": 2.0, "wan_p50": 6.0, "wan_p95": 9.0,
+                                      "wan_loss": 0.0, "local_loss": 0.0})
+                    store.put_minute(base - 1800 + 60 * m,
+                                     {"local_p50": 2.0, "wan_p50": 150.0, "wan_p95": 190.0,
+                                      "wan_loss": 0.0, "local_loss": 0.0, "vpn": "wg0"})
+                eid = store.open_event(base - 1800, "vpn", "info", "tunnel",
+                                       "Measured through a VPN (wg0)")
+                store.close_event(eid, base)
+                store.put_test(int(now - 60), "content", "cloudflare",
+                               down_mbps=90.0, up_mbps=30.0, ok=True, vpn="wg0")
+                text = report_text(store, {}, 2 * 3600, "2h")
+            finally:
+                store.close()
+        wan = next(l for l in text.splitlines() if l.startswith("wan leg"))
+        self.assertIn("median 6.0 ms", wan)              # the line alone
+        self.assertIn("through a VPN (past router, not the ISP line): median 150.0 ms", text)
+        self.assertIn("measured through a VPN (wg0): figures in this span describe "
+                      "the tunnel, not the ISP line.", text)
+        self.assertIn("via VPN", next(l for l in text.splitlines() if "90/30" in l))
+
+
 if __name__ == "__main__":
     unittest.main()
