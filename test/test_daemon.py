@@ -36,6 +36,7 @@ from nexthopd.daemon import (  # noqa: E402
     check_ready,
     leg_state)
 from nexthopd.net import trace_verdict  # noqa: E402
+from nexthopd.probes import Series as probes_Series  # noqa: E402
 from nexthopd.store import Store  # noqa: E402
 from support import REPO, run_now, FakeStore, _FakeDaemonForDisruption  # noqa: E402
 
@@ -820,6 +821,11 @@ class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
         d.wan_events = WanEventArbiter(self.store, notify)
         d.local_events = LocalEventArbiter(self.store, notify)
         d._watched = None
+        d.vpn = None
+        d.vpn_events = daemon_mod.IntervalEvent(self.store, "vpn", "info", "tunnel")
+        d.tether_events = daemon_mod.IntervalEvent(self.store, "tether", "info", "local")
+        from collections import deque
+        d._vpn_spans = deque(maxlen=64)
 
         class Captive:
             def request(self):
@@ -987,6 +993,346 @@ class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
         self.assertEqual(self.notices, [])
         self.assertIsNone(arb.event_id)
         self.assertEqual(self.store.events(10 ** 9, now=200)[0]["ended_ts"], 101)
+
+
+class VpnOnThePath(unittest.TestCase):
+    """What the daemon does with what the link thread finds about a VPN."""
+
+    VPN = {"iface": "wg0", "type": "wireguard", "scope": "full",
+           "via": ["icmp-anchor", "tcp-anchor", "tcp-cf", "tcp-google"], "probed": 4}
+
+    def setUp(self):
+        from collections import deque
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        test = self
+
+        class Link:
+            snap = {}
+
+            @property
+            def latest(self):
+                return dict(self.snap)
+
+        class Captive:
+            requests = 0
+
+            def request(self):
+                Captive.requests += 1
+
+        d = Daemon.__new__(Daemon)
+        d.store = self.store
+        d.link = Link()
+        d.captive = Captive()
+        d.wan_events = WanEventArbiter(self.store, lambda *a, **k: None)
+        d.metered = None
+        d.vpn = None
+        d.vpn_events = daemon_mod.IntervalEvent(self.store, "vpn", "info", "tunnel")
+        d.tether_events = daemon_mod.IntervalEvent(self.store, "tether", "info", "local")
+        d._vpn_spans = deque(maxlen=64)
+        d.wan_ip = {"ip": "198.51.100.7", "country": "BG", "edge": "SOF"}
+        d._wan_ip_at = 5
+        self.d = d
+        self.Captive = Captive
+        Captive.requests = 0
+
+    def see(self, now, vpn):
+        self.d.link.snap = {"iface": "wlo1", "vpn": vpn}
+        self.d.follow_path_states(now)
+
+    def rows(self, kind):
+        return sorted((e for e in self.store.events(10 ** 9, now=10 ** 7)
+                       if e["kind"] == kind), key=lambda e: e["ts"])
+
+    def test_a_vpn_coming_up_opens_a_span_and_changes_whose_words_are_used(self):
+        self.see(100, self.VPN)
+        [row] = self.rows("vpn")
+        self.assertEqual((row["ts"], row["ended_ts"], row["leg"], row["detail"]),
+                         (100, None, "tunnel", "Measured through a VPN (wg0)"))
+        self.assertTrue(self.d.wan_events.tunnel)
+        self.assertEqual(self.d.vpn["since"], 100)
+        # The address from before belonged to the line, not the tunnel exit.
+        self.assertIsNone(self.d.wan_ip)
+        self.assertEqual(self.Captive.requests, 1)
+        self.assertEqual(self.d._content_boost_at, 190)
+
+    def test_a_steady_vpn_is_one_span(self):
+        self.see(100, self.VPN)
+        self.see(101, dict(self.VPN))
+        self.assertEqual(len(self.rows("vpn")), 1)
+        self.assertEqual(self.d.vpn["since"], 100)
+        self.assertEqual(self.Captive.requests, 1)
+
+    def test_full_becoming_partial_is_a_new_span_not_a_new_address(self):
+        self.see(100, self.VPN)
+        self.d.wan_ip = {"ip": "203.0.113.9", "edge": "AMS"}
+        self.see(200, dict(self.VPN, scope="partial", via=["tcp-cf"]))
+        first, second = self.rows("vpn")
+        self.assertEqual(first["ended_ts"], 200)
+        self.assertEqual(second["detail"], "Partly measured through a VPN (wg0)")
+        self.assertIsNotNone(self.d.wan_ip)            # same tunnel, same exit
+        self.assertEqual(self.Captive.requests, 1)
+
+    def test_the_vpn_going_away_closes_the_span_and_drops_the_exit_address(self):
+        self.see(100, self.VPN)
+        self.d.wan_ip = {"ip": "203.0.113.9", "edge": "AMS"}
+        self.see(300, None)
+        [row] = self.rows("vpn")
+        self.assertEqual(row["ended_ts"], 300)
+        self.assertFalse(self.d.wan_events.tunnel)
+        self.assertIsNone(self.d.wan_ip)
+        self.assertEqual(self.Captive.requests, 2)
+        self.assertTrue(self.d.vpn_during(150, 155))
+        self.assertTrue(self.d.vpn_during(295, 305))
+        self.assertFalse(self.d.vpn_during(301, 306))
+
+    def test_a_hotspot_is_a_span_too(self):
+        self.d.metered = {"tethered": True, "label": "iPhone"}
+        self.see(100, None)
+        self.d.metered = None
+        self.see(400, None)
+        [row] = self.rows("tether")
+        self.assertEqual((row["ts"], row["ended_ts"], row["leg"], row["detail"]),
+                         (100, 400, "local", "Measured through a hotspot (iPhone)"))
+
+    def test_an_unwatched_gap_ends_the_span_where_watching_stopped(self):
+        self.see(100, self.VPN)
+        self.d._lose_sight_of_path_states(150)
+        self.see(900, self.VPN)                         # still on it after waking
+        first, second = self.rows("vpn")
+        self.assertEqual((first["ended_ts"], second["ts"]), (150, 900))
+        self.assertFalse(self.d.vpn_during(151, 899))
+
+    def test_the_stored_identity_names_the_exit_edge_once_known(self):
+        self.see(100, self.VPN)
+        self.assertEqual(self.d.vpn_identity(), "wg0")
+        self.d.wan_ip = {"ip": "203.0.113.9", "edge": "AMS"}
+        self.assertEqual(self.d.vpn_identity(), "wg0@AMS")
+        self.see(200, None)
+        self.assertIsNone(self.d.vpn_identity())
+
+
+class TunnelOutageWords(unittest.TestCase):
+    """Nothing silent through a VPN may be worded, or stored, as the ISP's."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        self.notices = []
+        self.arb = WanEventArbiter(self.store, lambda *a, **k: self.notices.append(a))
+
+    def test_an_outage_through_a_tunnel_is_the_tunnel_s(self):
+        self.arb.tunnel = True
+        self.arb.down(1000.0, beyond_ok=False, since=996.0)
+        self.arb.tick(1000.0 + NOTIFY_AFTER_S + 1, beyond_ok=False)
+        [row] = self.store.events(10 ** 9, now=2000)
+        self.assertEqual((row["leg"], row["detail"]),
+                         ("tunnel", "VPN tunnel silent; the router answered"))
+        self.assertEqual(self.arb.leg, "tunnel")
+        self.assertEqual(self.notices[0][0], "No connection through the VPN")
+        self.assertNotIn("ISP", " ".join(self.notices[0][:2]))
+
+    def test_the_words_are_fixed_when_the_outage_opens(self):
+        self.arb.tunnel = True
+        self.arb.down(1000.0, beyond_ok=False)
+        self.arb.tick(1000.0 + NOTIFY_AFTER_S + 1, beyond_ok=False)
+        self.arb.tunnel = False                         # tunnel gone before recovery
+        self.arb.up(1100.0)
+        self.assertEqual(self.notices[-1][0], "VPN connection recovered")
+
+    def test_without_a_tunnel_nothing_changes(self):
+        self.arb.down(1000.0, beyond_ok=False)
+        [row] = self.store.events(10 ** 9, now=2000)
+        self.assertEqual((row["leg"], row["detail"]),
+                         ("wan", "router answers, nothing past it does"))
+
+    def test_a_disruption_through_a_tunnel_is_the_tunnel_s(self):
+        w = LegWatch()
+        w.blip = (1000.0, 1002.0)
+        d = _FakeDaemonForDisruption(self.store)
+        d.vpn = {"iface": "wg0"}
+        d.record_disruption("wan", w, beyond_ok=False)
+        [row] = self.store.events(10 ** 9, now=2000)
+        self.assertEqual((row["leg"], row["detail"]),
+                         ("tunnel", "Brief interruption through the VPN, recovered on its own"))
+
+
+class SpeedThroughATunnel(unittest.TestCase):
+    """Checks through a VPN run and are labelled, and are judged only against
+    other checks through the same tunnel [D, Plamen, 2026-09-13]."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        self.now = time.time()
+        d = Daemon.__new__(Daemon)
+        d.store = self.store
+        d.config = {"planDownMbps": 0, "planUpMbps": 0}
+        d.vpn = None
+        d.wan_ip = None
+        self.d = d
+
+    def check(self, ago, mbps, vpn=None):
+        self.store.put_test(int(self.now - ago), "content", "cloudflare",
+                            down_mbps=mbps, up_mbps=mbps / 3, ok=True,
+                            network="home", vpn=vpn)
+
+    def test_the_line_is_scored_on_the_line_s_checks(self):
+        for i in range(4):
+            self.check(3600 * (i + 1), 400.0)
+        self.check(60, 90.0, vpn="wg0")                 # the newest, through a VPN
+        _, ctx = self.d.speed_score(self.now, "home")
+        self.assertEqual((ctx["last_down"], ctx["vpn"]), (400.0, False))
+
+    def test_a_tunnel_with_no_checks_of_its_own_is_unknown_not_the_line(self):
+        for i in range(4):
+            self.check(3600 * (i + 1), 400.0)
+        self.d.vpn = {"iface": "wg0"}
+        spd, ctx = self.d.speed_score(self.now, "home")
+        self.assertIsNone(spd)
+        self.assertTrue(ctx["pending"])
+        self.assertTrue(ctx["vpn"])
+
+    def test_a_tunnel_is_scored_on_its_own_checks(self):
+        for i in range(4):
+            self.check(3600 * (i + 1), 400.0)
+        self.check(60, 90.0, vpn="wg0@AMS")
+        self.d.vpn = {"iface": "wg0"}
+        self.d.wan_ip = {"edge": "AMS"}
+        _, ctx = self.d.speed_score(self.now, "home")
+        self.assertEqual((ctx["last_down"], ctx["vpn"]), (90.0, True))
+        self.assertEqual(self.d._content_hint("home", "wg0@AMS")[0], 90.0)
+        self.assertEqual(self.d._content_hint("home", None)[0], 400.0)
+
+
+class TunnelCheckCadence(unittest.TestCase):
+    """The link thread re-reads every probe's route when the anchor's own
+    route changes interface, and otherwise once a minute — not twice a second."""
+
+    def test_checked_on_change_and_on_the_minute_only(self):
+        from nexthopd.daemon import LinkCollector
+        clock = [0.0]
+        snap = {"iface": "wlo1", "tunnel_iface": ""}
+        calls = []
+
+        def tunnel(targets, physical):
+            calls.append((clock[0], physical))
+            return {"iface": "wg0"} if snap["tunnel_iface"] else None
+
+        c = LinkCollector(lambda: "1.1.1.1", snapshot_fn=lambda a: dict(snap),
+                          targets_fn=lambda: {"icmp-anchor": "1.1.1.1"},
+                          tunnel_fn=tunnel, clock=lambda: clock[0])
+        c._take()
+        clock[0] = 30.0
+        c._take()
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(c.latest["vpn"])
+        snap["tunnel_iface"] = "wg0"                     # wg-quick up
+        clock[0] = 31.0
+        c._take()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(c.latest["vpn"], {"iface": "wg0"})
+        clock[0] = 31.0 + LinkCollector.TUNNEL_CHECK_S
+        c._take()
+        self.assertEqual(len(calls), 3)
+
+    def test_a_failing_check_keeps_the_last_answer(self):
+        from nexthopd.daemon import LinkCollector
+        clock = [0.0]
+        answers = [{"iface": "wg0"}]
+
+        def tunnel(targets, physical):
+            if not answers:
+                raise OSError("ip went away")
+            return answers.pop()
+
+        c = LinkCollector(lambda: "x", snapshot_fn=lambda a: {"iface": "wlo1"},
+                          targets_fn=lambda: {}, tunnel_fn=tunnel,
+                          clock=lambda: clock[0])
+        c._take()
+        clock[0] = 1000.0
+        c._take()
+        self.assertEqual(c.latest["vpn"], {"iface": "wg0"})
+
+
+class TunnelStateAndHistory(unittest.TestCase):
+    """The verdict word, the per-point flag and the gap, each checked where it
+    is produced — three places a mutation survived until these existed."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+
+    def daemon(self):
+        from collections import deque
+        d = Daemon.__new__(Daemon)
+        d.store = self.store
+        d.captive = type("C", (), {"confirmed": False, "request": lambda self: None})()
+        d.watch_local, d.watch_wan = LegWatch(), LegWatch()
+        d.local_events = LocalEventArbiter(self.store, lambda *a, **k: None)
+        d.wan_events = WanEventArbiter(self.store, lambda *a, **k: None)
+        d.vpn = None
+        d.vpn_events = daemon_mod.IntervalEvent(self.store, "vpn", "info", "tunnel")
+        d.tether_events = daemon_mod.IntervalEvent(self.store, "tether", "info", "local")
+        d._vpn_spans = deque(maxlen=64)
+        return d
+
+    def test_an_outage_opened_through_a_tunnel_is_tunnel_down(self):
+        d = self.daemon()
+        d.watch_wan.down_since = 990.0
+        d.wan_events.tunnel = True
+        d.wan_events.down(1000.0, beyond_ok=False, since=990.0)
+        self.assertEqual(d.connection_state(90), "tunnel-down")
+        d2 = self.daemon()
+        d2.watch_wan.down_since = 990.0
+        d2.wan_events.down(1000.0, beyond_ok=False, since=990.0)
+        self.assertEqual(d2.connection_state(90), "wan-down")
+
+    def test_recent_points_carry_their_own_tunnel_flag(self):
+        from collections import deque
+        d = self.daemon()
+        now = time.time()
+        d.local = probes_Series()
+        d.total = type("T", (), {"each": lambda self: []})()
+        d.aux_ring = deque(maxlen=400)
+        d.rates = (None, None)
+        d.last_signal = None
+        d._vpn_spans.append([now - 600, now - 300])
+        written = {}
+        real = daemon_mod.write_atomic
+        daemon_mod.write_atomic = lambda path, data, **kw: written.update(data=data)
+        try:
+            Daemon.flush_recent(d, now)
+        finally:
+            daemon_mod.write_atomic = real
+        pts = written["data"]["points"]
+        flagged = [p["t"] for p in pts if p.get("vpn")]
+        self.assertTrue(flagged)
+        self.assertTrue(all(now - 605 <= t < now - 300 for t in flagged))
+        self.assertNotIn("vpn", pts[0])          # absent, not false, off the VPN
+
+    def test_an_unwatched_gap_closes_the_vpn_span_where_watching_stopped(self):
+        d = self.daemon()
+        clock = [1000.0]
+        d.local = type("S", (), {"since": lambda self, s: []})()
+        d.total = d.local
+        d._instrument_series = {}
+        d._watched = None
+        d.link = type("L", (), {"latest": {"vpn": {"iface": "wg0", "scope": "full"}}})()
+        d.metered = None
+        d.follow_path_states(1000.0)
+        d.watch_outages(1000.0, awake=0.0)
+        d.watch_outages(40000.0, awake=39000.0)       # a night asleep
+        [row] = [e for e in self.store.events(10 ** 9, now=10 ** 6) if e["kind"] == "vpn"]
+        self.assertEqual(row["ended_ts"], 1000)
 
 
 class ContentCheckReadiness(unittest.TestCase):

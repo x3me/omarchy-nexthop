@@ -201,6 +201,9 @@ Column {
           ? r.local_p50 + r.wan_p50 : null,
         loss: ((r.local_loss || 0) + (r.wan_loss || 0)) > 0
           ? (r.local_loss || 0) + (r.wan_loss || 0) : null,
+        // Stored per row: not null means a tunnel carried some of it (blank
+        // is a mixed hour), and none of that is the ISP line's.
+        vpn: r.vpn !== null && r.vpn !== undefined ? 1 : undefined,
       }
     })
   }
@@ -284,6 +287,14 @@ Column {
     }
 
     LegendEntry { tint: Color.accent; label: "wan leg (router → internet)" }
+    LegendEntry {
+      tint: "#bb9af7"; label: "tunnel (router → VPN → internet)"
+      visible: {
+        var pts = tab.chartPoints || []
+        for (var i = 0; i < pts.length; i++) if (pts[i] && pts[i].vpn) return true
+        return false
+      }
+    }
     LegendEntry { tint: tab.panel.dim; label: "local leg (you → router)" }
   }
 

@@ -366,7 +366,7 @@ Panel {
               text: {
                 var s = root.live ? root.live.state : ""
                 if (s === "captive") return "󰦝"   // nf-md-shield_lock: a gate, not a fault
-                if (s === "local-down" || s === "wan-down") return "󱚵"
+                if (s === "local-down" || s === "wan-down" || s === "tunnel-down") return "󱚵"
                 return "󰓅"
               }
               color: root.bandColor(root.live && !root.stale ? root.live.index : null)
@@ -391,7 +391,7 @@ Panel {
                   // app's own name sat here reading like a network called
                   // Nexthop; say what is true instead.
                   return l.state === "local-down" || l.state === "wan-down"
-                    ? "No network" : "Nexthop"
+                    || l.state === "tunnel-down" ? "No network" : "Nexthop"
                 }
                 color: root.fg
                 font.family: root.fontFamily
@@ -410,6 +410,9 @@ Panel {
                     if (l.state === "captive") return "SIGN-IN REQUIRED"
                     if (l.state === "local-down") return "ROUTER UNREACHABLE"
                     if (l.state === "wan-down") return "NO INTERNET · ROUTER OK"
+                    // Through a VPN it is the tunnel that went silent; nothing
+                    // here may say the internet, or the ISP, did.
+                    if (l.state === "tunnel-down") return "VPN DOWN · ROUTER OK"
                     // The index is a weakest-link score whose slowest
                     // component can pin it, so it answers "how has this
                     // connection been" and not "is it bad right now".
@@ -422,6 +425,21 @@ Panel {
                   color: root.stale ? root.warnTone
                     : (root.live && root.live.state !== "online"
                        ? Color.urgent : root.dim)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.letterSpacing: 1
+                }
+
+                // The internet probes go through a VPN. In the mode colour
+                // rather than the verdict's, and only while the verdict is
+                // an ordinary band — a down state already says VPN itself.
+                Text {
+                  readonly property var l: root.live
+                  visible: !!(l && l.vpn && !root.stale
+                              && l.state !== "tunnel-down" && l.state !== "local-down")
+                  textFormat: Text.PlainText
+                  text: "· VIA VPN"
+                  color: "#bb9af7"
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.letterSpacing: 1

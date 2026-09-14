@@ -26,7 +26,7 @@ from .paths import (ensure_state_dir, ensure_runtime_dir, runtime_dir,
 from .instruments import Bench, MergedSeries, merged_stats
 from .probes import Series, PingProbe, TcpProbe
 from .state import write_atomic, retire_legacy_snapshots
-from .store import Store
+from .store import Store, vpn_matches
 from .update import UpdateWatch
 
 # Unbroken silence on a leg — no probe of any kind answering — before we
@@ -691,23 +691,38 @@ class LegArbiter:
         self.kind = None          # QUIET_KIND | "outage" while down
         self._notify_at = None    # when the alarm becomes due
         self._notified = False    # whether it actually fired
+        self._words = self.words()
 
     @property
     def real_outage(self) -> bool:
         return self.kind == "outage"
 
+    @property
+    def leg(self) -> str:
+        """The leg the current (or last) event was opened on."""
+        return self._words[0]
+
+    def words(self):
+        """(leg, outage detail, alarm, recovery) for an event opened now."""
+        return self.LEG, self.OUTAGE_DETAIL, self.ALARM, self.RECOVERED
+
     def down(self, now, beyond_ok: bool, since=None):
         # `since` is when the silence began; the row carries the onset, not
         # the tick that crossed the threshold.
         began = int(since if since is not None else now)
+        # Fixed when the event opens: an outage that began through a VPN is
+        # announced and recovered in the VPN's words even if the tunnel is
+        # gone by the time it ends.
+        self._words = self.words()
+        leg, outage_detail = self._words[0], self._words[1]
         if beyond_ok:
             self.kind = self.QUIET_KIND
             self.event_id = self.store.open_event(
-                began, self.QUIET_KIND, "warn", self.LEG, self.QUIET_DETAIL)
+                began, self.QUIET_KIND, "warn", leg, self.QUIET_DETAIL)
             return
         self.kind = "outage"
         self.event_id = self.store.open_event(
-            began, "outage", "critical", self.LEG, self.OUTAGE_DETAIL)
+            began, "outage", "critical", leg, outage_detail)
         # Logged now, alarmed only if it lasts — see NOTIFY_AFTER_S.
         self._notify_at = now + NOTIFY_AFTER_S
         self._notified = False
@@ -720,7 +735,8 @@ class LegArbiter:
         if (self.kind == "outage" and not self._notified
                 and self._notify_at is not None and now >= self._notify_at):
             self._notified = True
-            self.notify(self.ALARM[0], self.ALARM[1], True)
+            alarm = self._words[2]
+            self.notify(alarm[0], alarm[1], True)
 
     def up(self, now):
         if self.event_id is not None:
@@ -728,7 +744,8 @@ class LegArbiter:
             # Only say it came back if we said it went away. A recovery
             # notice with no matching alarm is a message about nothing.
             if self.kind == "outage" and self._notified:
-                self.notify(self.RECOVERED[0], self.RECOVERED[1])
+                recovered = self._words[3]
+                self.notify(recovered[0], recovered[1])
         self._clear()
 
     def lost_sight(self, watched_until):
@@ -765,6 +782,25 @@ class WanEventArbiter(LegArbiter):
              "the fault is on the ISP side.")
     RECOVERED = ("Internet recovered", "Replies from the internet again.")
 
+    # While the internet probes go through a VPN, what goes silent past the
+    # router is the tunnel or its server, and nothing may name the ISP for it
+    # [D, Plamen, 2026-09-13]. Stored on its own leg, because the Events tab
+    # words every `wan` outage as "the fault was upstream". Still charged to
+    # Reliability: it is the connection the user has.
+    TUNNEL_LEG = "tunnel"
+    TUNNEL_OUTAGE_DETAIL = "VPN tunnel silent; the router answered"
+    TUNNEL_ALARM = ("No connection through the VPN",
+                    "The router answers; the tunnel or its server does not.")
+    TUNNEL_RECOVERED = ("VPN connection recovered",
+                        "Replies through the tunnel again.")
+    tunnel = False          # set by the daemon each pass from its VPN state
+
+    def words(self):
+        if self.tunnel:
+            return (self.TUNNEL_LEG, self.TUNNEL_OUTAGE_DETAIL,
+                    self.TUNNEL_ALARM, self.TUNNEL_RECOVERED)
+        return super().words()
+
 
 class LocalEventArbiter(LegArbiter):
     """The local leg. `beyond_ok` here means something past the gateway
@@ -782,6 +818,44 @@ class LocalEventArbiter(LegArbiter):
              "Nothing on the local network is answering.")
     RECOVERED = ("Local network recovered",
                  "The router is answering again.")
+
+
+class IntervalEvent:
+    """A state with a start and an end — a VPN, a phone hotspot — as one
+    event row, rather than a fault.
+
+    `update(now, detail)` is called with the state's current description, or
+    None when the state is absent; a different description closes the old
+    row and opens a new one, so a full tunnel becoming a partial one reads as
+    two spans. Like the arbiters, it closes at the last watched moment across
+    an unwatched gap and opens again on the next update if the state is still
+    there, so a night asleep on a VPN is two spans with nothing in between.
+    """
+
+    def __init__(self, store, kind, severity, leg):
+        self.store = store
+        self.kind, self.severity, self.leg = kind, severity, leg
+        self.event_id = None
+        self.detail = None
+
+    def update(self, now, detail) -> bool:
+        """Returns whether anything changed."""
+        if detail == self.detail:
+            return False
+        if self.event_id is not None:
+            self.store.close_event(self.event_id, int(now))
+            self.event_id = None
+        if detail:
+            self.event_id = self.store.open_event(
+                int(now), self.kind, self.severity, self.leg, detail)
+        self.detail = detail
+        return True
+
+    def lost_sight(self, watched_until):
+        if self.event_id is not None:
+            self.store.close_event(self.event_id, int(watched_until))
+        self.event_id = None
+        self.detail = None
 
 
 class CaptiveWatch:
@@ -939,8 +1013,14 @@ class LinkCollector(threading.Thread):
     """
 
     INTERVAL_S = 0.5
+    # How often every probe target's route is re-checked for a tunnel when
+    # nothing prompted it. The anchor's own route is read twice a second as
+    # part of the snapshot, so a full tunnel coming up or down is seen at
+    # once; this cadence is for a split tunnel that leaves the anchor alone.
+    TUNNEL_CHECK_S = 60.0
 
-    def __init__(self, anchor_fn, snapshot_fn=None, interval_s=INTERVAL_S):
+    def __init__(self, anchor_fn, snapshot_fn=None, interval_s=INTERVAL_S,
+                 targets_fn=None, tunnel_fn=None, clock=time.monotonic):
         super().__init__(name="link", daemon=True)
         self._anchor_fn = anchor_fn
         self._snapshot = snapshot_fn or net.snapshot
@@ -949,14 +1029,37 @@ class LinkCollector(threading.Thread):
         self._lock = threading.Lock()
         self._latest = {}
         self.taken_at = 0.0
+        # VPN detection is off unless the daemon says what to look at.
+        self._targets_fn = targets_fn
+        self._tunnel = tunnel_fn or net.tunnel_routes
+        self._clock = clock
+        self._vpn = None
+        self._checked = None       # (monotonic time, tunnel_iface, iface) of the last check
+
+    def _check_tunnel(self, snap):
+        """Re-read which probes go through a tunnel, when it may have changed."""
+        now = self._clock()
+        key = (snap.get("tunnel_iface") or "", snap.get("iface") or "")
+        if self._checked is not None and self._checked[1:] == key \
+                and now - self._checked[0] < self.TUNNEL_CHECK_S:
+            return
+        self._checked = (now,) + key
+        try:
+            self._vpn = self._tunnel(self._targets_fn(), snap.get("iface") or "")
+        except Exception:          # noqa: BLE001 — a collector never raises into the daemon
+            pass                   # keep the last answer, as a failed snapshot does
 
     def _take(self):
         try:
             snap = self._snapshot(self._anchor_fn())
         except Exception:          # noqa: BLE001 — a collector never raises into the daemon
             return
+        snap = snap if isinstance(snap, dict) else {}
+        if self._targets_fn is not None:
+            self._check_tunnel(snap)
+            snap["vpn"] = self._vpn
         with self._lock:
-            self._latest = snap if isinstance(snap, dict) else {}
+            self._latest = snap
             self.taken_at = time.time()
 
     def start(self):
@@ -1039,6 +1142,14 @@ class Daemon:
         # whenever the route changes, which is the only thing that can
         # change the answer.
         self.metered = None
+        # Whether the internet probes go through a VPN, and since when — see
+        # follow_path_states. None when they do not.
+        self.vpn = None
+        self.vpn_events = IntervalEvent(self.store, "vpn", "info", "tunnel")
+        self.tether_events = IntervalEvent(self.store, "tether", "info", "local")
+        # [start, end or None] while a tunnel carried the probes, kept long
+        # enough to flag every point of the 30-minute recent.json.
+        self._vpn_spans = deque(maxlen=64)
         # The address this connection appears from — live.json only, never
         # recent.json or history: shown, not archived.
         self.wan_ip = None
@@ -1055,7 +1166,8 @@ class Daemon:
         self.update_watch = UpdateWatch(enabled=bool(self.config["updateCheck"]))
         self.app_traffic = apps.AppTraffic()
         # The local end, read off the loop — see LinkCollector.
-        self.link = LinkCollector(lambda: self.config["internetAnchor"])
+        self.link = LinkCollector(lambda: self.config["internetAnchor"],
+                                  targets_fn=self._probe_targets)
         self.last_apps_poll = 0.0
         self.last_content_test = 0.0
         # Set while a due content check is waiting for the link to settle.
@@ -1108,6 +1220,12 @@ class Daemon:
                 ("tcp-cf", "tcp", CF_EDGE_HOST + ":443"),
                 ("tcp-google", "tcp", DIVERSITY_HOST + ":443")]
 
+    def _probe_targets(self) -> dict:
+        """Instrument key -> the host its probes are sent to, for the tunnel
+        check. Read on the link thread; the pool is built from config alone."""
+        return {key: (target.rsplit(":", 1)[0] if kind == "tcp" else target)
+                for key, kind, target in self._instrument_pool()}
+
     def _new_instrument_series(self):
         self._instrument_series = {
             key: Series() for key, _, _ in self._instrument_pool()}
@@ -1134,7 +1252,7 @@ class Daemon:
 
     def start_probes(self):
         anchor = self.config["internetAnchor"]
-        self.route = net.route_to(anchor)
+        self.route = net.local_route(anchor)
         # Answer this before the first content check can be due, not only
         # when the route later changes — a daemon started on a hotspot must
         # not spend a check to find out it is on one.
@@ -1174,7 +1292,7 @@ class Daemon:
         `fresh` is a route already read (see follow_route); without one it
         is read here."""
         if fresh is None:
-            fresh = net.route_to(self.config["internetAnchor"])
+            fresh = net.local_route(self.config["internetAnchor"])
         if not fresh.get("gateway"):
             # No route at all is an outage, not a different network, and
             # resetting on it threw away the one window a user wants
@@ -1188,6 +1306,97 @@ class Daemon:
            fresh.get("iface") == self.route.get("iface"):
             return
         self._rebuild_probes(fresh)
+
+    def follow_path_states(self, now: float):
+        """Turn what the link thread found into state, once per pass: whether
+        the internet probes go through a VPN, and whether the link is a phone.
+
+        Detection is the link thread's (net.tunnel_routes); this owns what
+        follows from it. The `vpn` and `tether` spans. The words the internet
+        arbiter will use for an outage opened from here on. And a fresh
+        reachability check when the tunnel appears, goes or moves: the public
+        address from before belongs to the other side of the change, and
+        showing a VPN exit's address as the line's (or the line's as the
+        tunnel's) is exactly the attribution this exists to prevent.
+        """
+        found = self.link.latest.get("vpn") if self.link else None
+        prev = self.vpn
+        if found and prev and (found["iface"], found["scope"]) == \
+                (prev["iface"], prev["scope"]):
+            self.vpn = dict(found, since=prev["since"])
+        else:
+            self.vpn = dict(found, since=int(now)) if found else None
+        moved = bool(found) != bool(prev) or \
+            bool(found and prev and found["iface"] != prev["iface"])
+
+        detail = None
+        if self.vpn:
+            detail = ("Measured through a VPN (%s)" if self.vpn["scope"] == "full"
+                      else "Partly measured through a VPN (%s)") % self.vpn["iface"]
+        self.vpn_events.update(now, detail)
+        self.wan_events.tunnel = bool(self.vpn)
+
+        m = self.metered
+        self.tether_events.update(
+            now, ("Measured through a hotspot (%s)" % m["label"])
+            if m and m.get("tethered") else None)
+
+        if bool(found) != bool(prev):
+            if found:
+                self._vpn_spans.append([now, None])
+            elif self._vpn_spans and self._vpn_spans[-1][1] is None:
+                self._vpn_spans[-1][1] = now
+        if moved:
+            self.wan_ip = None
+            self._wan_ip_at = 0
+            self.captive.request()
+            # Speed is kept per (network, tunnel), so the other side of the
+            # change may have no check at all; measure it soon, after the
+            # same settle a network change gets.
+            self._content_boost_at = now + 90
+
+    def _lose_sight_of_path_states(self, watched_until):
+        """An unwatched gap ends every open span where watching stopped; the
+        next pass opens them again if the state is still there."""
+        self.vpn_events.lost_sight(watched_until)
+        self.tether_events.lost_sight(watched_until)
+        if self._vpn_spans and self._vpn_spans[-1][1] is None:
+            self._vpn_spans[-1][1] = watched_until
+        self.vpn = None
+
+    def vpn_identity(self):
+        """What minute rows and speed checks store as the tunnel: `iface`, or
+        `iface@EDGE` once the trace through it has named the Cloudflare edge.
+        None when the probes are not going through one. See vpn_matches."""
+        vpn = getattr(self, "vpn", None)
+        if not vpn:
+            return None
+        edge = (getattr(self, "wan_ip", None) or {}).get("edge")
+        return vpn["iface"] + ("@" + edge if edge else "")
+
+    def vpn_during(self, a: float, b: float) -> bool:
+        """Did a tunnel carry the probes at any point in [a, b)?"""
+        for start, end in self._vpn_spans:
+            if start < b and (end is None or end > a):
+                return True
+        return False
+
+    def tunnel_bands(self, now: float):
+        """The tunnel leg's usual level and thresholds (score.tunnel_bands),
+        cached for a minute — it moves at minute-row cadence."""
+        ident = self.vpn_identity()
+        if not ident:
+            return None
+        cache = getattr(self, "_tunnel_bands_cache", None)
+        if cache and cache[1] == ident and now - cache[0] < 60:
+            return cache[2]
+        try:
+            med, p90, n = self.store.tunnel_level(ident, now=now)
+            bands = score.tunnel_bands(med, p90, n)
+        except Exception:
+            bands = None
+        self._tunnel_bands_cache = (now, ident, bands)
+        return bands
 
     def follow_route(self):
         """Rebuild the probes on the tick a new gateway appears.
@@ -1222,7 +1431,7 @@ class Daemon:
         if (anchor, interval) == self._probe_settings:
             return
         if anchor != self._probe_settings[0]:
-            self._rebuild_probes(net.route_to(anchor))
+            self._rebuild_probes(net.local_route(anchor))
             return
         self._probe_settings = (anchor, interval)
         if self._local_probe is not None:
@@ -1270,7 +1479,8 @@ class Daemon:
             network = snap.get("ssid") or snap.get("name") or ""
             try:
                 baseline = self.store.baseline_speed(network=network, now=now,
-                                                     fallback=False)
+                                                     fallback=False,
+                                                     vpn=self.vpn_identity())
             except Exception:
                 baseline = None
             floor = LOAD_FLOOR_BPS
@@ -1350,6 +1560,7 @@ class Daemon:
                                   (self.watch_wan, self.wan_events)):
                 watch.lost_sight(now)
                 events.lost_sight(watched_until)
+            self._lose_sight_of_path_states(watched_until)
         self._watched = (now, awake)
 
         local = leg_state(self.local.since(LEG_STREAM_WINDOW_S), now)
@@ -1425,9 +1636,12 @@ class Daemon:
         # so guarantee a non-zero span: outage_stats drops any row whose
         # end is not after its start, and a blip that vanished from the
         # score would be worse than one rounded up by a second.
-        eid = self.store.open_event(
-            int(began), "disruption", "warn", leg,
-            "brief interruption, recovered on its own")
+        detail = "brief interruption, recovered on its own"
+        if leg == "wan" and getattr(self, "vpn", None):
+            # Through a VPN the interruption was the tunnel's, never the ISP's.
+            leg, detail = ("tunnel",
+                           "Brief interruption through the VPN, recovered on its own")
+        eid = self.store.open_event(int(began), "disruption", "warn", leg, detail)
         self.store.close_event(eid, max(int(ended), int(began) + 1))
 
     def _any_instrument_alive(self, window_s: float) -> bool:
@@ -1521,24 +1735,27 @@ class Daemon:
 
         snap = self.link.latest
         network = snap.get("ssid") or snap.get("name") or ""
+        tunnel_before = (self.vpn or {}).get("iface")
         self.content_running = True
 
-        down_hint, up_hint = self._content_hint(network)
+        down_hint, up_hint = self._content_hint(network, self.vpn_identity())
 
         def run():
             try:
                 r = speedtest.content_test(down_hint_mbps=down_hint,
                                            up_hint_mbps=up_hint)
                 after = self.link.latest
-                if (after.get("ssid") or after.get("name") or "") != network:
-                    # The network changed under the transfer, so the sample
-                    # belongs to neither. The change has already scheduled
-                    # a fresh check of its own.
+                if (after.get("ssid") or after.get("name") or "") != network \
+                        or (self.vpn or {}).get("iface") != tunnel_before:
+                    # The network, or the tunnel, changed under the transfer,
+                    # so the sample belongs to neither side. The change has
+                    # already scheduled a fresh check of its own.
                     return
                 if r["ok"]:
                     self.store.put_test(int(r["started"]), "content", r["engine"],
                                         down_mbps=r["down_mbps"], up_mbps=r["up_mbps"],
-                                        bytes=r["bytes"], ok=True, network=network)
+                                        bytes=r["bytes"], ok=True, network=network,
+                                        vpn=self.vpn_identity())
                     # A fresh result should reprice the baseline promptly.
                     self._baseline_cache = None
                     self._content_retry_used = False
@@ -1550,7 +1767,7 @@ class Daemon:
 
         threading.Thread(target=run, daemon=True, name="content-test").start()
 
-    def _content_hint(self, network: str):
+    def _content_hint(self, network: str, vpn: str = None):
         """What this network has shown, so the next check can size itself.
 
         The best of the recent checks rather than the last. Sizing from a
@@ -1565,7 +1782,8 @@ class Daemon:
         """
         downs, ups = [], []
         for t in self.store.tests(limit=8, kind="content"):
-            if not t["ok"] or (t["network"] or "") != network:
+            if not t["ok"] or (t["network"] or "") != network \
+                    or not vpn_matches(t.get("vpn"), vpn):
                 continue
             if t["down_mbps"]:
                 downs.append(t["down_mbps"])
@@ -1591,6 +1809,7 @@ class Daemon:
 
         snap = self.link.latest
         network = snap.get("ssid") or snap.get("name") or ""
+        vpn = self.vpn_identity()
 
         def run():
             try:
@@ -1608,10 +1827,10 @@ class Daemon:
                         ping_idle=r.get("ping_idle") or idle, ping_loaded=loaded,
                         jitter=r.get("jitter"), bytes=r.get("bytes"),
                         server=r.get("server"), ok=True,
-                        detail=r.get("url", ""), network=network)
+                        detail=r.get("url", ""), network=network, vpn=vpn)
                 else:
                     self.store.put_test(int(r["started"]), "peak", r["engine"],
-                                        ok=False, network=network)
+                                        ok=False, network=network, vpn=vpn)
             finally:
                 self.peak_running = False
 
@@ -1627,22 +1846,28 @@ class Daemon:
         own recent p90. The baseline is cached for a minute — it moves at
         content-check cadence, not at probe cadence.
         """
+        # Only checks through the tunnel the probes use now, or through none:
+        # a VPN's checks describe the VPN, and the home line's must not be
+        # judged against them (nor a plan against a tunnel's figure).
+        vpn = self.vpn_identity()
         tests = [t for t in self.store.tests(limit=12, kind="content")
-                 if t["ok"] and t["down_mbps"] is not None]
+                 if t["ok"] and t["down_mbps"] is not None
+                 and vpn_matches(t.get("vpn"), vpn)]
 
         plan_d = self.config["planDownMbps"]
         plan_u = self.config["planUpMbps"]
         if plan_d:
             if not tests:
                 return None, {"basis": "plan", "plan_down": plan_d,
-                              "last_down": None, "last_up": None}
+                              "last_down": None, "last_up": None,
+                              "vpn": bool(vpn)}
             last = tests[0]
             spd = score.speed(last["down_mbps"], last["up_mbps"],
                               plan_d, plan_u or 0)
             return spd, {"basis": "plan", "plan_down": plan_d,
                          "plan_up": plan_u,
                          "last_down": last["down_mbps"],
-                         "last_up": last["up_mbps"]}
+                         "last_up": last["up_mbps"], "vpn": bool(vpn)}
 
         # Checks describe the network they ran on. A result from another
         # network says nothing about this one, so on a network with no
@@ -1653,7 +1878,7 @@ class Daemon:
         if not mine:
             return None, {"basis": "auto", "baseline_down": None,
                           "last_down": None, "last_up": None,
-                          "pending": True}
+                          "pending": True, "vpn": bool(vpn)}
 
         # Median of the last few checks here, so one bad sample — a check
         # that ran mid-roam or during someone's upload — cannot pin the
@@ -1666,10 +1891,10 @@ class Daemon:
         up = ups[len(ups) // 2] if ups else None
 
         cache = getattr(self, "_baseline_cache", None)
-        if not cache or now - cache[0] > 60 or cache[2] != network:
+        if not cache or now - cache[0] > 60 or cache[2] != (network, vpn):
             baseline = self.store.baseline_speed(network=network, now=now,
-                                                 fallback=False)
-            cache = (now, baseline, network)
+                                                 fallback=False, vpn=vpn)
+            cache = (now, baseline, (network, vpn))
             self._baseline_cache = cache
         baseline = cache[1]
         spd = score.speed(down, up, baseline_down=baseline)
@@ -1684,6 +1909,8 @@ class Daemon:
                 continue
             if network and (t.get("network") or "") != network:
                 continue
+            if not vpn_matches(t.get("vpn"), vpn):
+                continue
             if now - t["ts"] > PEAK_FRESH_S:
                 break
             peak_down = t["down_mbps"]
@@ -1693,7 +1920,7 @@ class Daemon:
         return spd, {"basis": "auto", "baseline_down": baseline,
                      "last_down": down, "last_up": up,
                      "samples": len(recent), "scored": scored,
-                     "peak_down": peak_down}
+                     "peak_down": peak_down, "vpn": bool(vpn)}
 
     def bufferbloat(self, window_s: float = 300.0) -> dict:
         """Lag while the link was idle vs while it was carrying traffic.
@@ -1806,6 +2033,29 @@ class Daemon:
                                  disruption_fraction=disrupt_frac,
                                  window_s=watched), watched
 
+    def connection_state(self, idx) -> str:
+        """The one-word verdict live.json leads with. See compose_live."""
+        state = "online"
+        if self.captive.confirmed:
+            # Outranks both leg verdicts because it explains them: on a
+            # portal the gateway often refuses pings and something answers
+            # for the anchor, so "router unreachable" and "internet fine"
+            # are both artefacts of the same interception.
+            state = "captive"
+        elif self.watch_local.down_since and self.local_events.real_outage:
+            # A silent gateway is not an unreachable one; the arbiter decides.
+            state = "local-down"
+        elif self.watch_wan.down_since and self.wan_events.real_outage:
+            # Pings alone cannot declare this; see WanEventArbiter. During
+            # an icmp-quiet spell the bar stays its ordinary colour — the
+            # user's internet is working, and the log holds the anomaly.
+            # Through a VPN it is the tunnel that went silent, not the
+            # internet — judged by the leg the outage was opened on.
+            state = "tunnel-down" if self.wan_events.leg == "tunnel" else "wan-down"
+        elif idx is not None and idx < 70:
+            state = "degraded"
+        return state
+
     def compose_live(self, now: float) -> dict:
         """live.json, twice a second.
 
@@ -1857,23 +2107,7 @@ class Daemon:
         # left out of the headline — see score.speed_scored.
         idx = score.index(resp, rel, spd if speed_ctx.get("scored") else None)
 
-        state = "online"
-        if self.captive.confirmed:
-            # Outranks both leg verdicts because it explains them: on a
-            # portal the gateway often refuses pings and something answers
-            # for the anchor, so "router unreachable" and "internet fine"
-            # are both artefacts of the same interception.
-            state = "captive"
-        elif self.watch_local.down_since and self.local_events.real_outage:
-            # A silent gateway is not an unreachable one; the arbiter decides.
-            state = "local-down"
-        elif self.watch_wan.down_since and self.wan_events.real_outage:
-            # Pings alone cannot declare this; see WanEventArbiter. During
-            # an icmp-quiet spell the bar stays its ordinary colour — the
-            # user's internet is working, and the log holds the anomaly.
-            state = "wan-down"
-        elif idx is not None and idx < 70:
-            state = "degraded"
+        state = self.connection_state(idx)
 
         # An index computed while a leg is confirmed down scores a
         # connection that is not there — see score.scored_now. Withheld,
@@ -1888,6 +2122,12 @@ class Daemon:
             "band": score.band(headline),
             "scores": {"responsiveness": resp, "reliability": rel, "speed": spd},
             "speed_ctx": speed_ctx,
+            # The internet probes' routes leave through a tunnel: which, how
+            # many of them, since when, and the leg's usual level to judge
+            # its colour against (score.tunnel_bands; None until there is
+            # one). Null when no probe goes through a VPN.
+            "vpn": (dict(self.vpn, bands=self.tunnel_bands(now))
+                    if self.vpn else None),
             # What Reliability was charged against, so the panel can say so
             # when it is less than the day the caption would otherwise imply.
             "reliability_ctx": {"watched_s": round(watched),
@@ -1983,6 +2223,7 @@ class Daemon:
                 if tr:
                     means.append(sum(tr) / len(tr))
             a = aux_b.get(b)
+            tunnel = self.vpn_during(start + b * bucket, start + (b + 1) * bucket)
             points.append({
                 "t": round(start + b * bucket, 1),
                 "local": round(sum(lr) / len(lr), 2) if lr else None,
@@ -2005,6 +2246,13 @@ class Daemon:
                 "tx": round(a[1], 1) if a and a[1] is not None else None,
                 "sig": a[2] if a else None,
             })
+            # Each point says for itself whether a tunnel carried it. A chart
+            # that labelled its history from the current state relabelled a
+            # pre-VPN hour as the tunnel's the moment one came up (seen in
+            # HopSense 0.1.15). Absent rather than false, to keep the file
+            # the size it was for everyone not on a VPN.
+            if tunnel:
+                points[-1]["vpn"] = 1
         write_atomic(recent_path(), {"v": 1, "t": now, "bucket_s": bucket,
                                      "points": points})
 
@@ -2054,6 +2302,9 @@ class Daemon:
                     None if (bloat.get("drain") or {}).get("settled") is None
                     else float(bool((bloat["drain"])["settled"]))),
                 "drain_src": (bloat.get("drain") or {}).get("src"),
+                # Which tunnel the probes went through this minute, if any.
+                # Nothing is attributed to the ISP from a minute with one.
+                "vpn": self.vpn_identity(),
             },
             iface=self.route.get("iface", ""),
             network=snap_link.get("ssid", ""),
@@ -2095,6 +2346,7 @@ class Daemon:
             self.follow_route()
 
             self.watch_outages(now)
+            self.follow_path_states(now)
             self.throughput(now, self.route.get("iface", ""))
 
             write_atomic(live_path(), self.compose_live(now))

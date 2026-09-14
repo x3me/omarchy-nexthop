@@ -56,7 +56,28 @@ SAMPLE_COLUMNS = [
 # because each instrument's value is floored at its own cadence and knowing
 # which one won is the difference between an auditable figure and a guess.
 MINUTE_ONLY_REAL = ["drain_ms", "drain_min_ms", "drain_settled"]
-MINUTE_ONLY_TEXT = ["drain_src"]
+MINUTE_ONLY_TEXT = ["drain_src", "vpn"]
+
+def vpn_matches(stored, current) -> bool:
+    """Were two rows measured through the same tunnel?
+
+    Tunnel identity is stored as `iface` or `iface@EDGE` — the Cloudflare
+    edge the trace through the tunnel reached, when it was known. No tunnel
+    matches only no tunnel: a home line's history and a VPN's must never
+    stand in for each other (a slower tunnel check lowering the line's own
+    normal would excuse a real slowdown). An edge not yet known matches any
+    edge on the same interface, because the trace lands a few seconds after
+    the tunnel does and the first rows would otherwise start a bucket of
+    their own.
+    """
+    if not current:
+        return not stored
+    if not stored:
+        return False
+    si, _, se = stored.partition("@")
+    ci, _, ce = current.partition("@")
+    return si == ci and (not se or not ce or se == ce)
+
 
 # Past this between the end of one minute row's minute and the start of the
 # next row, nobody was watching — see `Store.unwatched`. The minute flush
@@ -146,11 +167,13 @@ class Store:
                               ("minute", "drain_ms"),
                               ("minute", "drain_min_ms"),
                               ("minute", "drain_settled"),
-                              ("minute", "drain_src")):
+                              ("minute", "drain_src"),
+                              ("minute", "vpn"), ("tests", "vpn"),
+                              ("hour", "vpn")):
             try:
                 self.db.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} "
-                    f"{'TEXT' if column in ('network', 'probes', 'drain_src') else 'REAL'}")
+                    f"{'TEXT' if column in ('network', 'probes', 'drain_src', 'vpn') else 'REAL'}")
             except sqlite3.OperationalError:
                 pass  # column already there
 
@@ -184,12 +207,12 @@ class Store:
         self.db.execute(
             """INSERT OR REPLACE INTO tests
                (ts, kind, engine, down_mbps, up_mbps, ping_idle, ping_loaded,
-                jitter, bytes, server, ok, detail, network)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                jitter, bytes, server, ok, detail, network, vpn)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (int(ts), kind, engine, kw.get("down_mbps"), kw.get("up_mbps"),
              kw.get("ping_idle"), kw.get("ping_loaded"), kw.get("jitter"),
              kw.get("bytes"), kw.get("server"), 1 if kw.get("ok", True) else 0,
-             kw.get("detail", ""), kw.get("network", "")),
+             kw.get("detail", ""), kw.get("network", ""), kw.get("vpn") or None),
         )
         self.db.commit()
 
@@ -230,18 +253,27 @@ class Store:
         would pick whichever name sorts last and file the other network's
         minutes under it. Blank is "mixed", which no consumer can mistake
         for a network.
+
+        `vpn` follows the same rule with one more state, because a minute with
+        no tunnel stores NULL: the identity when every minute of the hour went
+        through the same one, NULL when none did, and blank when the hour was
+        mixed. Anything not NULL is kept out of the ISP's figures.
         """
         now = now or time.time()
         current_hour = int(now // 3600) * 3600
         avg = ", ".join(f"AVG({c}) AS {c}" for c in SAMPLE_COLUMNS)
         self.db.execute(
             f"""INSERT OR REPLACE INTO hour
-                (ts, {', '.join(SAMPLE_COLUMNS)}, iface, network)
+                (ts, {', '.join(SAMPLE_COLUMNS)}, iface, network, vpn)
                 SELECT (ts / 3600) * 3600 AS bucket, {avg},
                        CASE WHEN COUNT(DISTINCT iface) > 1 THEN ''
                             ELSE MAX(iface) END,
                        CASE WHEN COUNT(DISTINCT network) > 1 THEN ''
-                            ELSE MAX(network) END
+                            ELSE MAX(network) END,
+                       CASE WHEN COUNT(vpn) = 0 THEN NULL
+                            WHEN COUNT(vpn) = COUNT(*)
+                                 AND COUNT(DISTINCT vpn) = 1 THEN MAX(vpn)
+                            ELSE '' END
                 FROM minute WHERE ts < ? GROUP BY bucket""",
             (current_hour,),
         )
@@ -337,28 +369,30 @@ class Store:
     @_locked
     def baseline_speed(self, days: int = 30, network: str = "",
                        min_samples: int = 5, now: float = None,
-                       fallback: bool = True):
+                       fallback: bool = True, vpn: str = None):
         """This connection's own normal: the p90 of recent content downloads.
 
         p90 rather than max so one lucky quiet-hour run does not set a bar
         the line can never reach again. Scoped to the current network when
         it has enough samples — the office's normal is not the home's —
         falling back to all networks, and to None until there is enough
-        history to mean anything.
+        history to mean anything. Always scoped to the tunnel, or to no
+        tunnel — see vpn_matches.
         """
         now = now or time.time()
         since = int(now - days * 86400)
 
         def p90(rows):
             vals = sorted(r["down_mbps"] for r in rows
-                          if r["down_mbps"] is not None)
+                          if r["down_mbps"] is not None
+                          and vpn_matches(r["vpn"], vpn))
             if len(vals) < min_samples:
                 return None
             return nearest_rank(vals, 0.9)
 
         if network:
             rows = self.db.execute(
-                """SELECT down_mbps FROM tests
+                """SELECT down_mbps, vpn FROM tests
                    WHERE kind='content' AND ok=1 AND ts >= ? AND network = ?""",
                 (since, network)).fetchall()
             result = p90(rows)
@@ -370,10 +404,28 @@ class Store:
         if not fallback:
             return None
         rows = self.db.execute(
-            """SELECT down_mbps FROM tests
+            """SELECT down_mbps, vpn FROM tests
                WHERE kind='content' AND ok=1 AND ts >= ?""",
             (since,)).fetchall()
         return p90(rows)
+
+    @_locked
+    def tunnel_level(self, vpn: str, seconds: float = 24 * 3600,
+                     now: float = None):
+        """(median, p90, minutes) of the stored per-minute leg medians through
+        this tunnel over the window, or (None, None, count) when there are
+        none. Minute rows exist only for watched minutes, so this is already
+        a watched window. See score.tunnel_bands for what is done with it."""
+        now = now or time.time()
+        rows = self.db.execute(
+            """SELECT wan_p50, vpn FROM minute
+               WHERE ts >= ? AND ts <= ? AND vpn IS NOT NULL
+                 AND wan_p50 IS NOT NULL""",
+            (int(now - seconds), int(now))).fetchall()
+        vals = sorted(r["wan_p50"] for r in rows if vpn_matches(r["vpn"], vpn))
+        if not vals:
+            return None, None, 0
+        return nearest_rank(vals, 0.5), nearest_rank(vals, 0.9), len(vals)
 
     @_locked
     def unwatched(self, seconds: float, now: float = None) -> list:

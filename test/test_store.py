@@ -346,6 +346,98 @@ class UnwatchedTime(unittest.TestCase):
         self.assertAlmostEqual(watched, 6 * 3600 + 60, delta=60)
 
 
+class TunnelStorage(unittest.TestCase):
+    """What a VPN leaves in history, and what may be compared with what."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        self.now = 3_000_000
+
+    def test_identity_matching(self):
+        from nexthopd.store import vpn_matches
+        self.assertTrue(vpn_matches(None, None))
+        self.assertTrue(vpn_matches("", None))
+        self.assertFalse(vpn_matches("wg0", None))       # a VPN is not the line
+        self.assertFalse(vpn_matches(None, "wg0"))       # nor the line a VPN
+        self.assertTrue(vpn_matches("wg0@AMS", "wg0@AMS"))
+        self.assertFalse(vpn_matches("wg0@AMS", "wg0@FRA"))
+        self.assertFalse(vpn_matches("wg0@AMS", "tun0@AMS"))
+        # The edge arrives a few seconds after the tunnel does.
+        self.assertTrue(vpn_matches("wg0", "wg0@AMS"))
+        self.assertTrue(vpn_matches("wg0@AMS", "wg0"))
+
+    def checks(self, network, vpn, values):
+        for i, v in enumerate(values):
+            self.store.put_test(self.now - 3600 * (i + 1) - (0 if vpn is None else 30),
+                                "content", "cloudflare", down_mbps=v, ok=True,
+                                network=network, vpn=vpn)
+
+    def test_the_speed_baseline_is_kept_per_tunnel(self):
+        self.checks("home", None, [400, 410, 420, 390, 405])
+        self.checks("home", "wg0@AMS", [90, 95, 100, 85, 92])
+        line = self.store.baseline_speed(network="home", now=self.now, fallback=False)
+        tunnel = self.store.baseline_speed(network="home", now=self.now,
+                                           fallback=False, vpn="wg0@AMS")
+        self.assertGreaterEqual(line, 400)      # the tunnel did not drag it down
+        self.assertLessEqual(tunnel, 100)       # nor the line lift the tunnel's
+        self.assertIsNone(self.store.baseline_speed(
+            network="home", now=self.now, fallback=False, vpn="tun0"))
+
+    def test_tests_carry_the_tunnel(self):
+        self.checks("home", "wg0", [100])
+        self.assertEqual(self.store.tests(limit=1)[0]["vpn"], "wg0")
+        self.checks("home", None, [400])
+        self.assertIsNone(self.store.tests(limit=1)[0]["vpn"])
+
+    def minutes(self, vpn, values, start_ago):
+        base = (self.now // 60) * 60
+        for i, v in enumerate(values):
+            self.store.put_minute(base - start_ago + 60 * i, {"wan_p50": v, "vpn": vpn})
+
+    def test_a_tunnel_s_usual_level_reads_only_its_own_minutes(self):
+        self.minutes(None, [6.0] * 40, 7200)             # the line, earlier
+        self.minutes("wg0@AMS", [150.0] * 30 + [160.0] * 10, 3000)
+        self.minutes("tun0", [40.0] * 40, 12000)
+        med, p90, n = self.store.tunnel_level("wg0@AMS", now=self.now)
+        self.assertEqual((med, p90, n), (150.0, 160.0, 40))
+        self.assertEqual(self.store.tunnel_level("ppp0", now=self.now), (None, None, 0))
+
+    def test_an_hour_row_says_whether_a_tunnel_carried_it(self):
+        base = (self.now // 3600) * 3600 - 3 * 3600
+        for m in range(60):
+            self.store.put_minute(base + 60 * m, {"wan_p50": 150.0, "vpn": "wg0"})
+            self.store.put_minute(base + 3600 + 60 * m, {"wan_p50": 6.0})
+            self.store.put_minute(base + 7200 + 60 * m,
+                                  {"wan_p50": 6.0, "vpn": "wg0" if m < 20 else None})
+        self.store.rollup_hours(self.now)
+        rows = {r["ts"]: r["vpn"] for r in self.store.db.execute(
+            "SELECT ts, vpn FROM hour").fetchall()}
+        self.assertEqual(rows[base], "wg0")
+        self.assertIsNone(rows[base + 3600])
+        self.assertEqual(rows[base + 7200], "")          # mixed: still not the ISP's
+
+    def test_an_older_database_gains_the_columns(self):
+        import sqlite3 as sq
+        path = Path(self.dir.name) / "old.db"
+        st = Store(path)
+        st.put_test(60, "content", "x", down_mbps=1.0)
+        st.close()
+        db = sq.connect(path)
+        for table in ("minute", "hour", "tests"):
+            db.execute("ALTER TABLE %s DROP COLUMN vpn" % table)
+        db.commit()
+        db.close()
+        st = Store(path)
+        self.addCleanup(st.close)
+        for table in ("minute", "hour", "tests"):
+            cols = [r[1] for r in st.db.execute("PRAGMA table_info(%s)" % table)]
+            self.assertIn("vpn", cols)
+        self.assertIsNone(st.tests(limit=1)[0]["vpn"])   # the old row, honestly blank
+
+
 class EventWindowSemantics(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

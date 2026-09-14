@@ -9,13 +9,19 @@ import "readout.js" as Readout
 // Stacking is the point — the top line is the latency you feel, and the
 // split says which side of the router owns it.
 //
-// `points` is an array of {t, local, total, loss} — local/total in ms or
-// null, loss 0..1 or null. X is time, so a suspend shows as a gap.
+// `points` is an array of {t, local, total, loss, vpn} — local/total in ms or
+// null, loss 0..1 or null, vpn 1 when a tunnel carried that point. X is time,
+// so a suspend shows as a gap.
+//
+// A point measured through a VPN is drawn in the tunnel colour and read out
+// as the tunnel, by its own flag — never by whether a VPN is up now, which
+// would relabel a whole past hour the moment one came up.
 Canvas {
   id: chart
 
   property var points: []
   property color wanColor: Color.accent
+  property color tunnelColor: "#bb9af7"
   property color localColor: Color.muted
   property color lossColor: Color.urgent
   property color axisColor: Qt.rgba(Color.popups.text.r, Color.popups.text.g,
@@ -95,10 +101,13 @@ Canvas {
 
     // Runs of consecutive non-null samples paint as separate segments so a
     // gap in the data is a gap on screen, not a line drawn through it.
-    function runs(key) {
+    function runs(key, tunnel) {
       var out = [], current = []
       for (var i = 0; i < pts.length; i++) {
         var v = pts[i][key]
+        // `tunnel` given: only the points on that side of the VPN, the rest
+        // break the run, so a line and a tunnel never join into one stroke.
+        if (tunnel !== undefined && !!pts[i].vpn !== tunnel) v = null
         if (v === null || v === undefined) {
           if (current.length > 1) out.push(current)
           current = []
@@ -132,11 +141,17 @@ Canvas {
     }
 
     var i, r
-    var totalRuns = runs("total")
+    var totalRuns = runs("total", false)
     for (i = 0; i < totalRuns.length; i++) {
       r = totalRuns[i]
       area(r, wanColor, 0.20)
       line(r, wanColor, 1.5)
+    }
+    var tunnelRuns = runs("total", true)
+    for (i = 0; i < tunnelRuns.length; i++) {
+      r = tunnelRuns[i]
+      area(r, tunnelColor, 0.20)
+      line(r, tunnelColor, 1.5)
     }
     var localRuns = runs("local")
     for (i = 0; i < localRuns.length; i++) {
@@ -176,9 +191,10 @@ Canvas {
           // does not hold and the subtraction says nothing. Clamping the
           // negative to zero printed "wan 0.0 ms" — a perfect ISP leg from
           // an invalid measurement.
+          var legName = best.vpn ? "tunnel " : "wan "
           parts.push(local > best.total + 1.0
-            ? "wan \u2014"
-            : "wan " + Math.max(0, best.total - local).toFixed(1) + " ms")
+            ? legName + "\u2014"
+            : legName + Math.max(0, best.total - local).toFixed(1) + " ms")
           parts.push("local " + local.toFixed(1) + " ms")
         } else {
           parts.push("no data")

@@ -54,14 +54,25 @@ var DOWN_GAP = 2;
  * `loss === null` is the daemon's way of saying it sampled nothing in that
  * bucket, which is a gap rather than an outage. A bucket that sampled and got
  * no reply carries a loss figure with no `total`, and that is down.
+ *
+ * `tunnel`, when given, keeps only the points whose own `vpn` flag matches it
+ * and leaves the rest as gaps: the TUNNEL connector draws only what went
+ * through the VPN, the WAN connector only what did not. A point is judged by
+ * the path it was measured on, never by the one in use now — labelling a
+ * history from the current state relabelled a whole pre-VPN hour as the
+ * tunnel's in HopSense 0.1.15.
  */
-function slots(points, key, n) {
+function slots(points, key, n, tunnel) {
     var out = [];
     var pts = points || [];
     var from = Math.max(0, pts.length - (n || SLOTS));
     for (var i = from; i < pts.length; i++) {
         var p = pts[i];
         if (!p || p.loss === null || p.loss === undefined) { out.push(null); continue; }
+        if (tunnel !== undefined && key !== "local" && !!p.vpn !== !!tunnel) {
+            out.push(null);
+            continue;
+        }
         if (key === "local") {
             // The router itself did not answer.
             if (p.local === null || p.local === undefined) { out.push({ down: true }); continue; }

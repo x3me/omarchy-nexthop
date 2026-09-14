@@ -24,6 +24,25 @@ Item {
 
   readonly property string middleTitle: tethered ? metered.label : "Router"
 
+  // The internet probes' routes leave through a VPN (daemon: net.tunnel_routes).
+  // Then the path is four stops, not three — laptop, router, VPN, internet —
+  // because that is where the traffic goes, and the leg past the router is the
+  // tunnel's, never the ISP's [D, Plamen, 2026-09-13, drawing B].
+  readonly property var vpn: live && live.vpn ? live.vpn : null
+  readonly property bool tunnelled: vpn !== null
+  readonly property color modeColor: "#bb9af7"   // roam purple: a mode, not a verdict
+  readonly property real nodeW: tunnelled ? Style.space(72) : Style.space(84)
+  readonly property int legCount: tunnelled ? 3 : 2
+
+  readonly property string vpnDetail: {
+    if (!vpn) return ""
+    if (vpn.scope === "partial")
+      return "partly \u00b7 " + (vpn.via ? vpn.via.length : 0) + " of "
+        + (vpn.probed || 0) + " probes"
+    var country = wanIp && wanIp.country ? wanIp.country : ""
+    return vpn.iface + (country ? " \u00b7 " + country : "")
+  }
+
   readonly property string middleDetail: {
     if (!live || !live.link) return ""
     // On a hotspot the gateway is always the same fixed address for the
@@ -39,7 +58,9 @@ Item {
   // it and the inversion guard keeps one implementation.
   readonly property var points: panel ? panel.recentPoints : []
   readonly property var localSeries: Spark.slots(points, "local", Spark.SLOTS)
-  readonly property var wanSeries: Spark.slots(points, "wan", Spark.SLOTS)
+  // Only the points measured on the path this connector stands for: under a
+  // VPN the tunnel's, otherwise the line's. See Spark.slots.
+  readonly property var wanSeries: Spark.slots(points, "wan", Spark.SLOTS, tunnelled)
   // One zero-based scale for both, so a 2 ms wobble cannot outdraw the WAN.
   readonly property real sparkMax: Spark.sharedMax([localSeries, wanSeries],
                                                    Spark.SCALE_FLOOR_MS)
@@ -51,7 +72,8 @@ Item {
   readonly property var localMs: live && live.local ? live.local.p50 : null
   readonly property var wanMs: live && live.wan ? live.wan.p50 : null
   readonly property bool localDown: live && live.state === "local-down"
-  readonly property bool wanDown: live && live.state === "wan-down"
+  readonly property bool wanDown: live && (live.state === "wan-down"
+                                           || live.state === "tunnel-down")
 
   // The address this connection appears from, published by the daemon.
   // Shown masked: Overview screenshots end up on forums, and a screenshot
@@ -102,6 +124,8 @@ Item {
     // user's location, so it is labelled as the route and not as a place.
     if (wanIp.country) parts.push(wanIp.country)
     if (wanIp.edge) parts.push("via Cloudflare " + wanIp.edge)
+    // Through a VPN this is the tunnel exit's address, not the line's.
+    if (tunnelled) parts.push("VPN exit")
     return parts.join(" \u00b7 ")
   }
 
@@ -112,7 +136,7 @@ Item {
     var f = function(v) {
       return v === null || v === undefined ? "\u2014" : v.toFixed(2) + " ms"
     }
-    return "local " + f(l) + "  \u00b7  wan " + f(w)
+    return "local " + f(l) + "  \u00b7  " + (tunnelled ? "tunnel " : "wan ") + f(w)
   }
 
   function probeLine() {
@@ -175,6 +199,20 @@ Item {
     return Color.urgent
   }
 
+  // A tunnel judged against its own usual level, not the 15 / 50 ms bands a
+  // VPN adding 100-200 ms would sit red in for good. The daemon publishes the
+  // thresholds (score.tunnel_bands); until it has a usual level there is
+  // nothing to be worse than, so the leg stays in the mode colour.
+  function tunnelColor(ms, down) {
+    if (down) return Color.urgent
+    if (ms === null || ms === undefined) return dimColor
+    var b = vpn ? vpn.bands : null
+    if (!b) return modeColor
+    if (ms >= b.red_ms) return Color.urgent
+    if (ms >= b.amber_ms) return "#e0af68"
+    return modeColor
+  }
+
   // One animator for both legs, stopped the moment the liveness claim stops
   // being true: a panel left open must never keep pulsing over stale data.
   property real ringPhase: 0
@@ -206,14 +244,15 @@ Item {
       property string icon: ""
       property string title: ""
       property string detail: ""
-      width: Style.space(84)
+      property color tint: root.textColor
+      width: root.nodeW
       spacing: Style.space(4)
 
       Text {
         textFormat: Text.PlainText
         anchors.horizontalCenter: parent.horizontalCenter
         text: parent.icon
-        color: root.textColor
+        color: parent.tint
         font.family: Style.font.family
         font.pixelSize: Style.font.iconLarge
       }
@@ -221,7 +260,7 @@ Item {
         textFormat: Text.PlainText
         anchors.horizontalCenter: parent.horizontalCenter
         text: parent.title
-        color: root.textColor
+        color: parent.tint
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
       }
@@ -239,11 +278,17 @@ Item {
     }
 
     component Leg: Column {
+      id: leg
       property var ms: null
       property bool down: false
       property string label: ""
       property var series: []
-      width: (row.width - Style.space(84) * 3) / 2
+      property var colorFn: root.legColor
+      property color labelColor: root.dimColor
+      // A hop the probes cannot separate from the one before it: drawn
+      // dotted and given no figure, rather than implying a measurement.
+      property bool unmeasured: false
+      width: (row.width - root.nodeW * (root.legCount + 1)) / root.legCount
       spacing: Style.space(4)
       // Sits a little above the node centres so the line meets the icons.
       topPadding: Style.space(8)
@@ -251,15 +296,37 @@ Item {
       Text {
         textFormat: Text.PlainText
         anchors.horizontalCenter: parent.horizontalCenter
-        text: parent.down ? "down"
+        text: parent.unmeasured ? " "
+          : parent.down ? "down"
           : (parent.ms === null || parent.ms === undefined
              ? "--" : parent.ms.toFixed(1) + " ms")
-        color: root.legColor(parent.ms, parent.down)
+        color: leg.colorFn(leg.ms, leg.down)
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
       }
+      Item {
+        visible: leg.unmeasured
+        width: leg.width - Style.space(12)
+        height: visible ? Style.space(22) : 0
+        anchors.horizontalCenter: parent.horizontalCenter
+        Row {
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.horizontalCenter: parent.horizontalCenter
+          spacing: Style.space(4)
+          Repeater {
+            model: Math.max(0, Math.floor(leg.width / Style.space(8)) - 1)
+            Rectangle {
+              width: Math.max(1, Style.space(2))
+              height: width
+              color: root.dimColor
+            }
+          }
+        }
+      }
       Canvas {
         id: spark
+        visible: !leg.unmeasured
+        height: visible ? Style.space(22) : 0
         width: parent.width - Style.space(12)
         anchors.horizontalCenter: parent.horizontalCenter
         // 16 left the plot 9 px tall with nothing spare, so the ring was
@@ -268,7 +335,6 @@ Item {
         // This keeps the same 9 px of plot and costs six pixels once —
         // the connectors are side by side, so it is six for the panel,
         // not six per leg.
-        height: Style.space(22)
         antialiasing: true
         // Repainting on every phase tick is what the ring costs; the series
         // only changes every five seconds.
@@ -286,7 +352,7 @@ Item {
             live: root.sparkLive,
             motion: root.motionOk,
             downColor: Color.urgent,
-            colorFor: root.legColor
+            colorFor: leg.colorFn
           })
         }
       }
@@ -294,7 +360,7 @@ Item {
         textFormat: Text.PlainText
         anchors.horizontalCenter: parent.horizontalCenter
         text: parent.label
-        color: root.dimColor
+        color: leg.labelColor
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.letterSpacing: 1
@@ -323,8 +389,22 @@ Item {
     Leg {
       ms: root.wanMs
       down: root.wanDown
-      label: "WAN"
+      label: root.tunnelled ? "TUNNEL" : "WAN"
+      labelColor: root.tunnelled ? root.modeColor : root.dimColor
+      colorFn: root.tunnelled ? root.tunnelColor : root.legColor
       series: root.wanSeries
+    }
+    Node {
+      visible: root.tunnelled
+      icon: "󰖂"   // nf-md-vpn
+      title: "VPN"
+      detail: root.vpnDetail
+      tint: root.modeColor
+    }
+    Leg {
+      visible: root.tunnelled
+      unmeasured: true
+      label: "EXIT"
     }
     Node {
       icon: "󰖟"   // nf-md-web

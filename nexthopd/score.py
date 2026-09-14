@@ -337,7 +337,7 @@ def index(resp, rel, spd):
 
 
 # The states in which a headline index is not a current reading.
-OUTAGE_STATES = ("local-down", "wan-down")
+OUTAGE_STATES = ("local-down", "wan-down", "tunnel-down")
 
 
 def scored_now(state):
@@ -525,6 +525,47 @@ def drain_after_load(samples, baseline_ms: float) -> dict:
 # congested.
 PRESSURE_BUSY_MS = 10.0
 PRESSURE_CONGESTED_MS = 30.0
+
+# A VPN's leg is coloured against its own usual level, not the 15 / 50 ms
+# bands: many tunnels add 100-200 ms, and those bands would paint every such
+# tunnel red for good [D, Plamen, 2026-09-13]. Colour only — Responsiveness
+# still scores the added latency.
+#
+# The excess over the tunnel's own median is judged with the pressure bands
+# above, for their own reason: a path to another continent is mostly
+# distance. A multiple was the first suggestion and was replayed against
+# 9,630 minutes of this laptop's WAN leg: 1.5x / 2x painted 1.43% of minutes
+# red on the real 6 ms leg (a wobble to 12 ms is "2x") and, with 150 ms of
+# distance added, caught 1 of 30 real +30 ms minutes (180/150 is 1.2x). The
+# excess form marked 0.58% / 0.30% and caught 30 of 30 at both.
+#
+# The spread term keeps a naturally wobbly tunnel from going amber on its own
+# jitter. It has only met synthetic jitter so far; re-argue it on real tunnel
+# minutes. Fewer than TUNNEL_BASELINE_MIN_MINUTES and there is no usual level
+# to be worse than, so nothing is judged.
+TUNNEL_SPREAD_FACTOR = 2.0
+TUNNEL_BASELINE_MIN_MINUTES = 30
+
+
+def tunnel_bands(baseline_ms, p90_ms, minutes):
+    """Where a tunnel's leg becomes worse than its usual level, or None.
+
+    `baseline_ms` and `p90_ms` are the median and p90 of the stored
+    per-minute leg medians through the same tunnel over the watched window
+    (Store.tunnel_level), over `minutes` minutes. Returns absolute
+    thresholds, so a reader compares each point of its own against them: a
+    history chart must judge a past point by the tunnel it was on, not by
+    now.
+    """
+    if baseline_ms is None or p90_ms is None or not minutes \
+            or minutes < TUNNEL_BASELINE_MIN_MINUTES:
+        return None
+    spread = max(0.0, p90_ms - baseline_ms)
+    margin = TUNNEL_SPREAD_FACTOR * spread
+    return {"baseline_ms": round(baseline_ms, 1), "spread_ms": round(spread, 1),
+            "amber_ms": round(baseline_ms + PRESSURE_BUSY_MS + margin, 1),
+            "red_ms": round(baseline_ms + PRESSURE_CONGESTED_MS + margin, 1),
+            "minutes": int(minutes)}
 
 
 def pressure(socket_queue_ms=None, loaded_ms=None, idle_ms=None) -> dict:

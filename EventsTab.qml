@@ -219,6 +219,10 @@ Column {
       return "No internet. The router still answered, so the fault was upstream."
     if (e.kind === "outage" && e.leg === "local")
       return "Router unreachable — nothing on the local network answered."
+    // Stored on its own leg because the `wan` sentence above blames upstream.
+    if (e.kind === "outage" && e.leg === "tunnel")
+      return "No connection through the VPN. The router still answered, so "
+        + "the tunnel or its server was silent — not evidence about your ISP."
     return shortMac(e.detail || e.kind)
   }
 
@@ -454,7 +458,8 @@ Column {
           // coloured. This used to be a second table keyed by kind, and
           // 0.2.4's gateway-quiet shipped warn-toned in the database and
           // accent-toned here because that table never learned of it.
-          if (k === "roam") return "#bb9af7"
+          // A VPN span shares it: a mode the connection was in, not a fault.
+          if (k === "roam" || k === "vpn") return "#bb9af7"
           if (k === "associate") return tab.panel.okTone
           var s = modelData.first ? modelData.first.severity : undefined
           if (s === "critical") return Color.urgent
