@@ -7,6 +7,7 @@ contract, so either side can restart without the other noticing.
 """
 
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -1174,6 +1175,14 @@ class CaptiveWatch:
                 "checked_ts": self.checked_ts}
 
 
+def _is_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
 class LinkCollector(threading.Thread):
     """Reads the local end — route, interface, Wi-Fi link and station — on
     its own thread, and keeps the latest snapshot for the loop to read.
@@ -1210,21 +1219,36 @@ class LinkCollector(threading.Thread):
         self.taken_at = 0.0
         # VPN detection is off unless the daemon says what to look at.
         self._targets_fn = targets_fn
-        self._tunnel = tunnel_fn or net.tunnel_routes
+        # Never a name lookup on this thread, whatever reaches it: a target
+        # without an address is left out rather than waited for. The daemon
+        # hands over addresses (Daemon._probe_targets); this is the backstop.
+        self._tunnel = tunnel_fn or (lambda targets, iface: net.tunnel_routes(
+            targets, iface, resolve=net.no_lookup))
         self._clock = clock
         self._vpn = None
         self._checked = None       # (monotonic time, tunnel_iface, iface) of the last check
 
     def _check_tunnel(self, snap):
-        """Re-read which probes go through a tunnel, when it may have changed."""
+        """Re-read which probes go through a tunnel, when it may have changed.
+
+        Also when the set of instruments with an address changes: at start
+        the probes have not resolved anything yet, and without this the first
+        check with every address in hand would wait for the minute. Keyed on
+        which instruments have one, not on the addresses — an anycast name
+        whose answers rotate would otherwise re-check twice a second."""
         now = self._clock()
-        key = (snap.get("tunnel_iface") or "", snap.get("iface") or "")
+        try:
+            targets = self._targets_fn()
+        except Exception:          # noqa: BLE001 — a collector never raises into the daemon
+            return
+        key = (snap.get("tunnel_iface") or "", snap.get("iface") or "",
+               tuple(sorted(targets)))
         if self._checked is not None and self._checked[1:] == key \
                 and now - self._checked[0] < self.TUNNEL_CHECK_S:
             return
         self._checked = (now,) + key
         try:
-            self._vpn = self._tunnel(self._targets_fn(), snap.get("iface") or "")
+            self._vpn = self._tunnel(targets, snap.get("iface") or "")
         except Exception:          # noqa: BLE001 — a collector never raises into the daemon
             pass                   # keep the last answer, as a failed snapshot does
 
@@ -1401,10 +1425,35 @@ class Daemon:
                 ("tcp-google", "tcp", DIVERSITY_HOST + ":443")]
 
     def _probe_targets(self) -> dict:
-        """Instrument key -> the host its probes are sent to, for the tunnel
-        check. Read on the link thread; the pool is built from config alone."""
-        return {key: (target.rsplit(":", 1)[0] if kind == "tcp" else target)
-                for key, kind, target in self._instrument_pool()}
+        """Instrument key -> the address its probes are sent to, for the tunnel
+        check. Read on the link thread.
+
+        The address each TCP probe actually connects to, from its own lookup
+        (NameLookup), rather than a name to be resolved again. Until 0.2.48
+        this handed tunnel_routes the host names and it looked them up there,
+        synchronously and with no deadline, on the thread that takes the link
+        snapshot — so a silent resolver (glibc: two 5 s attempts a name) held
+        the route and Wi-Fi reading ~20 s once a minute, and held the daemon's
+        start, whose first snapshot is taken on the main thread. HopSense's
+        port found the same shape in its own rebuild; this one came to light
+        from theirs.
+
+        An instrument whose probe has no address yet is left out, as an
+        unresolvable one always was; the ICMP anchor, when it is a name, takes
+        the address the TCP probe to the same host resolved.
+        """
+        probes = dict(self._instrument_probes)   # the loop replaces it on a rebuild
+        resolved = {}
+        for p in probes.values():
+            if isinstance(p, TcpProbe) and p.lookup.addresses:
+                resolved[p.target] = p.lookup.addresses[0]
+        out = {}
+        for key, kind, target in self._instrument_pool():
+            host = target.rsplit(":", 1)[0] if kind == "tcp" else target
+            address = host if _is_address(host) else resolved.get(host)
+            if address:
+                out[key] = address
+        return out
 
     def _new_instrument_series(self):
         self._instrument_series = {

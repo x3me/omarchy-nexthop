@@ -292,6 +292,16 @@ def local_route(anchor: str = "1.1.1.1", sys_net: str = SYS_NET,
     return dict(line, tunnel_iface=r["iface"])
 
 
+def no_lookup(host, port, type=None):
+    """A resolver that refuses, for callers that must never wait on one.
+
+    getaddrinfo cannot be cancelled and has no deadline of its own: a
+    resolver that has gone silent holds it for glibc's two 5 s attempts per
+    name. Handing this to tunnel_routes leaves a name out, the way an
+    unresolvable one always was, instead of stopping the thread for it."""
+    raise OSError("name lookup refused here")
+
+
 def _first_address(host: str, resolve=None):
     try:
         ipaddress.ip_address(host)

@@ -1548,6 +1548,77 @@ class TunnelCheckCadence(unittest.TestCase):
         self.assertEqual(c.latest["vpn"], {"iface": "wg0"})
 
 
+class TheLinkThreadNeverWaitsOnAResolver(unittest.TestCase):
+    """The tunnel check looked every probe's name up on the link thread with no
+    deadline: a silent resolver held the link snapshot ~20 s a minute, and the
+    daemon's start. Found from HopSense's report of the same shape in theirs."""
+
+    def daemon(self, anchor, probes):
+        d = Daemon.__new__(Daemon)
+        d.config = {"internetAnchor": anchor}
+        d._instrument_probes = probes
+        return d
+
+    @staticmethod
+    def tcp(host, addresses):
+        from nexthopd.probes import TcpProbe
+        p = TcpProbe(host, probes_Series(), 1.0)
+        p.lookup.addresses = list(addresses)
+        return p
+
+    def test_targets_are_the_addresses_the_probes_connect_to(self):
+        from nexthopd.probes import PingProbe
+        d = self.daemon("1.1.1.1", {
+            "icmp-anchor": PingProbe("1.1.1.1", probes_Series()),
+            "tcp-anchor": self.tcp("1.1.1.1", ["1.1.1.1"]),
+            "tcp-cf": self.tcp("speed.cloudflare.com", ["198.51.100.10", "198.51.100.11"]),
+            "tcp-google": self.tcp("dns.google", [])})     # never resolved
+        self.assertEqual(d._probe_targets(), {"icmp-anchor": "1.1.1.1",
+                                              "tcp-anchor": "1.1.1.1",
+                                              "tcp-cf": "198.51.100.10"})
+
+    def test_a_named_anchor_takes_the_address_its_tcp_probe_resolved(self):
+        d = self.daemon("one.one.one.one", {
+            "tcp-anchor": self.tcp("one.one.one.one", ["198.51.100.1"])})
+        self.assertEqual(d._probe_targets(), {"icmp-anchor": "198.51.100.1",
+                                              "tcp-anchor": "198.51.100.1"})
+        # Before any probe has an address, a name is left out, not looked up.
+        self.assertEqual(self.daemon("one.one.one.one", {})._probe_targets(), {})
+
+    def test_the_default_check_never_calls_the_resolver(self):
+        import socket
+        from nexthopd.daemon import LinkCollector
+        calls = []
+        original = socket.getaddrinfo
+        socket.getaddrinfo = lambda *a, **k: calls.append(a) or original(*a, **k)
+        try:
+            c = LinkCollector(lambda: "1.1.1.1",
+                              snapshot_fn=lambda a: {"iface": "wlo1"},
+                              targets_fn=lambda: {"tcp-cf": "speed.cloudflare.com"})
+            c._take()
+        finally:
+            socket.getaddrinfo = original
+        self.assertEqual(calls, [])
+        self.assertIsNone(c.latest["vpn"])
+
+    def test_rechecked_when_a_probe_gains_an_address_not_when_it_changes(self):
+        from nexthopd.daemon import LinkCollector
+        targets = {"icmp-anchor": "1.1.1.1"}
+        calls = []
+        c = LinkCollector(lambda: "1.1.1.1", snapshot_fn=lambda a: {"iface": "wlo1"},
+                          targets_fn=lambda: dict(targets),
+                          tunnel_fn=lambda t, i: calls.append(dict(t)),
+                          clock=lambda: 10.0)
+        c._take()                                     # at start: nothing resolved
+        targets["tcp-cf"] = "198.51.100.10"           # the first answer lands
+        c._take()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[-1]["tcp-cf"], "198.51.100.10")
+        targets["tcp-cf"] = "198.51.100.11"           # an anycast answer rotates
+        c._take()
+        self.assertEqual(len(calls), 2)
+
+
 class TunnelStateAndHistory(unittest.TestCase):
     """The verdict word, the per-point flag and the gap, each checked where it
     is produced — three places a mutation survived until these existed."""
