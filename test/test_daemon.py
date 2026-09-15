@@ -32,6 +32,7 @@ from nexthopd.daemon import (  # noqa: E402
     LegState,
     LegWatch,
     LocalEventArbiter,
+    LookupWatch,
     WanEventArbiter,
     check_ready,
     leg_state)
@@ -334,6 +335,292 @@ class CaptiveDetection(unittest.TestCase):
         w = CaptiveWatch(lambda: {"verdict": "open", "proof": None},
                          spawn=run_now)
         self.assertIsNone(w.snapshot())
+
+
+class _Lookups:
+    """Stands in for NameLookup: only the outcomes are read."""
+
+    literal = False
+
+    def __init__(self):
+        from collections import deque
+        self.outcomes = deque(maxlen=128)
+
+    def add(self, ts, ok):
+        self.outcomes.append((ts, ok))
+
+
+class NamesFailing(unittest.TestCase):
+    """Every leg answering while no name resolves (2026-09-14, HopSense's pilot
+    house). The rule is HopSense 0.1.18's, kept identical so the two compare."""
+
+    def setUp(self):
+        self.store = FakeStore()
+        self.w = LookupWatch(self.store)
+        self.lk = _Lookups()
+
+    def feed(self, now, answering=True, legs_down=False, lookups=None):
+        self.w.feed(now, lookups or [self.lk], answering, legs_down)
+
+    def arm(self, at=100.0):
+        self.lk.add(at, True)
+        self.feed(at)
+
+    def fail_every(self, start, step, n, **kw):
+        t = start
+        for _ in range(n):
+            self.lk.add(t, False)
+            self.feed(t, **kw)
+            t += step
+        return t - step
+
+    def test_three_failures_across_ten_seconds_open_it_dated_from_the_first(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 2)
+        self.assertFalse(self.w.failing)
+        self.fail_every(120.0, 5.0, 1)
+        self.assertTrue(self.w.failing)
+        self.assertEqual(self.w.since, 110)
+        self.assertEqual(self.store.opened,
+                         [("dns-failing", "warn", "", LookupWatch.DETAIL)])
+
+    def test_many_failures_in_a_few_seconds_are_not_yet_enough(self):
+        self.arm()
+        last = self.fail_every(110.0, 0.5, 19)        # 9 s of failures
+        self.assertFalse(self.w.failing)
+        self.fail_every(last + 1.0, 1.0, 1)           # now 10 s
+        self.assertTrue(self.w.failing)
+
+    def test_the_first_answer_closes_it_there(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 3)
+        self.lk.add(140.0, True)
+        self.feed(140.5)
+        self.assertFalse(self.w.failing)
+        self.assertEqual(self.store.closed, [1])
+
+    def test_never_armed_on_a_network_where_names_never_resolved(self):
+        # A resolver that filters these names from the start is not an alarm,
+        # and it is what lets a portal that blocks DNS stay a portal.
+        self.fail_every(110.0, 1.0, 60)
+        self.assertFalse(self.w.failing)
+        self.assertFalse(self.w.answered)
+
+    def test_an_answer_breaks_a_run(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 2)
+        self.lk.add(119.0, True)
+        self.feed(119.0)
+        self.fail_every(120.0, 5.0, 2)
+        self.assertFalse(self.w.failing)
+
+    def test_not_while_nothing_answers_that_is_an_outage(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 5, answering=False)
+        self.assertFalse(self.w.failing)
+
+    def test_a_confirmed_outage_drops_the_run_and_closes_an_open_one(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 2)
+        self.lk.add(120.0, False)
+        self.feed(120.0, legs_down=True)
+        self.assertFalse(self.w.failing)
+        # After the outage, the old failures are not back-dated into a run.
+        self.fail_every(130.0, 5.0, 2)
+        self.assertFalse(self.w.failing)
+        self.fail_every(140.0, 5.0, 1)
+        self.assertEqual(self.w.since, 130)
+        self.lk.add(150.0, False)
+        self.feed(150.0, legs_down=True)
+        self.assertFalse(self.w.failing)
+        self.assertEqual(self.store.closed, [1])
+
+    def test_refused_while_rejoining_after_a_sleep_and_closed_where_watching_stopped(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 3)
+        self.assertTrue(self.w.failing)
+        self.w.lost_sight(watched_until=121.0, resumed_at=5000.0)
+        self.assertFalse(self.w.failing)
+        self.assertEqual(len(self.store.closed), 1)
+        last = self.fail_every(5001.0, 1.0, int(RESUME_SETTLE_S) - 2)
+        self.assertFalse(self.w.failing)
+        # Past the settle, a resolver still dead is charged from there.
+        self.fail_every(last + 3.0, 5.0, 3)
+        self.assertTrue(self.w.failing)
+        self.assertGreaterEqual(self.w.since, 5000 + RESUME_SETTLE_S)
+
+    def test_an_answer_ends_the_wake_window_early(self):
+        self.arm()
+        self.w.lost_sight(watched_until=121.0, resumed_at=5000.0)
+        self.lk.add(5002.0, True)
+        self.feed(5002.0)
+        self.fail_every(5003.0, 5.0, 3)
+        self.assertTrue(self.w.failing)
+
+    def test_closed_at_the_last_outcome_when_they_stop_arriving(self):
+        closed_at = []
+        self.store.close_event = lambda eid, ts: closed_at.append(ts)
+        self.arm()
+        last = self.fail_every(110.0, 5.0, 3)
+        self.feed(last + LookupWatch.STALE_S - 1)
+        self.assertTrue(self.w.failing)
+        self.feed(last + LookupWatch.STALE_S + 1)
+        self.assertFalse(self.w.failing)
+        self.assertEqual(closed_at, [int(last)])
+
+    def test_a_new_network_closes_it_and_disarms(self):
+        self.arm()
+        self.fail_every(110.0, 5.0, 3)
+        self.w.reset(130.0)
+        self.assertFalse(self.w.failing)
+        self.assertFalse(self.w.answered)
+        fresh = _Lookups()
+        for t in (131.0, 136.0, 141.0, 146.0):
+            fresh.add(t, False)
+            self.feed(t, lookups=[fresh])
+        self.assertFalse(self.w.failing)
+
+    def test_each_outcome_is_read_once_across_two_instruments(self):
+        self.arm()
+        a, b = _Lookups(), _Lookups()
+        a.add(110.0, False)
+        b.add(111.0, False)
+        for _ in range(5):                   # the same outcomes, read again
+            self.feed(112.0, lookups=[a, b])
+        self.assertEqual(self.w._run_n, 2)
+        self.assertFalse(self.w.failing)
+        b.add(121.0, False)
+        self.feed(121.0, lookups=[a, b])
+        self.assertTrue(self.w.failing)
+        self.assertEqual(self.w.since, 110)
+
+    def test_the_snapshot(self):
+        self.assertIsNone(self.w.snapshot())
+        self.arm(100.4)
+        self.assertEqual(self.w.snapshot(), {"failing": False, "since": None,
+                                             "answered": True, "last_ok_ts": 100})
+        self.fail_every(110.0, 5.0, 3)
+        self.assertEqual(self.w.snapshot()["since"], 110)
+        self.assertTrue(self.w.snapshot()["failing"])
+
+    def test_the_state_says_so_below_an_outage_and_the_index_stands(self):
+        from collections import deque
+        d = Daemon.__new__(Daemon)
+        d.store = self.store
+        d.captive = type("C", (), {"confirmed": False})()
+        d.watch_local, d.watch_wan = LegWatch(), LegWatch()
+        d.local_events = LocalEventArbiter(self.store, lambda *a, **k: None)
+        d.wan_events = WanEventArbiter(self.store, lambda *a, **k: None)
+        d.lookup_watch = self.w
+        self.arm()
+        self.fail_every(110.0, 5.0, 3)
+        self.assertEqual(d.connection_state(95), "dns-failing")
+        self.assertEqual(d.connection_state(40), "dns-failing")
+        self.assertTrue(score.scored_now("dns-failing"))
+        d.watch_wan.down_since = 990.0
+        d.wan_events.down(1000.0, beyond_ok=False, since=990.0)
+        self.assertEqual(d.connection_state(95), "wan-down")
+
+    def test_the_daemon_feeds_it_from_the_named_instruments_only(self):
+        from nexthopd.probes import NameLookup, PingProbe, TcpProbe
+        d = Daemon.__new__(Daemon)
+        d.watch_local, d.watch_wan = LegWatch(), LegWatch()
+        d.local_events = LocalEventArbiter(self.store, lambda *a, **k: None)
+        d.wan_events = WanEventArbiter(self.store, lambda *a, **k: None)
+        d.lookup_watch = self.w
+        d._instrument_series = {}
+        named = TcpProbe("probe.example", probes_Series(), 1.0, "tcp-cf")
+        literal = TcpProbe("192.0.2.1", probes_Series(), 1.0, "tcp-anchor")
+        d._instrument_probes = {"tcp-cf": named, "tcp-anchor": literal,
+                                "icmp-anchor": PingProbe("192.0.2.1", probes_Series())}
+        seen = []
+        d.lookup_watch = type("W", (), {"feed": lambda self, now, lookups, a, l:
+                                        seen.extend(lookups)})()
+        d.follow_lookups(100.0)
+        self.assertEqual(seen, [named.lookup])
+        self.assertIsInstance(named.lookup, NameLookup)
+
+
+class CaptiveIsNotANameThatWillNotResolve(unittest.TestCase):
+    """The trace fetch failing on a name, with every probe answering by
+    address, used to be two strikes and SIGN-IN REQUIRED on a home network."""
+
+    def test_curl_saying_the_name_did_not_resolve(self):
+        self.assertEqual(trace_verdict("", 6), "unresolved")
+        self.assertEqual(trace_verdict(None, 6), "unresolved")
+        # curl's timeout and any other failure stay what they were.
+        self.assertEqual(trace_verdict("", 28), "silent")
+        self.assertEqual(trace_verdict("", 7), "silent")
+        self.assertEqual(trace_verdict("fl=1\nip=103.87.1.2\n", 0), "open")
+
+    def test_what_names_explain_and_what_they_do_not(self):
+        e = CaptiveWatch.explained_by_names
+        # Names resolved here before, now curl cannot resolve: not a portal.
+        self.assertTrue(e("unresolved", True, False))
+        # A portal blocking DNS from the moment of joining: still a portal.
+        self.assertFalse(e("unresolved", False, False))
+        # curl timed out while names are failing: the lookup, not a portal.
+        self.assertTrue(e("silent", True, True))
+        self.assertFalse(e("silent", True, False))
+        # Something answered a name that resolved: never explained by names.
+        self.assertFalse(e("intercepted", True, True))
+        self.assertFalse(e("open", True, True))
+
+    def replay(self, verdict, **names):
+        w = CaptiveWatch(lambda: {"verdict": verdict, "proof": None},
+                         spawn=run_now)
+        for k in range(10):
+            w.tick(1000.0 + 31 * k, True, **names)
+        return w
+
+    def test_a_dead_resolver_on_a_working_line_is_never_a_sign_in_page(self):
+        w = self.replay("unresolved", names_answered=True)
+        self.assertFalse(w.confirmed)
+        self.assertEqual(w.strikes, 0)
+        self.assertEqual(w.verdict, "unresolved")
+        w = self.replay("silent", names_answered=True, names_failing=True)
+        self.assertFalse(w.confirmed)
+        self.assertEqual(w.strikes, 0)
+
+    def test_a_portal_that_blocks_dns_from_the_start_still_is_one(self):
+        self.assertTrue(self.replay("unresolved").confirmed)
+
+    def test_a_portal_without_names_failing_is_unchanged(self):
+        self.assertTrue(self.replay("silent", names_answered=True).confirmed)
+        self.assertTrue(self.replay("intercepted", names_answered=True,
+                                    names_failing=True).confirmed)
+
+    def test_strikes_taken_while_explained_do_not_carry_over(self):
+        verdicts = ["silent"] * 4 + ["silent"]
+        calls = []
+
+        def check():
+            calls.append(1)
+            return {"verdict": verdicts[min(len(calls), len(verdicts)) - 1],
+                    "proof": None}
+
+        w = CaptiveWatch(check, spawn=run_now)
+        for k in range(4):
+            w.tick(1000.0 + 31 * k, True, names_answered=True, names_failing=True)
+        self.assertEqual(w.strikes, 0)
+        # Names recover; one failed fetch is still only one strike.
+        w.tick(1000.0 + 31 * 4, True, names_answered=True, names_failing=False)
+        self.assertEqual(w.strikes, 1)
+        self.assertFalse(w.confirmed)
+
+    def test_the_check_reports_unresolved_from_curls_exit_status(self):
+        from nexthopd import net
+        original = net._run_status
+        try:
+            net._run_status = lambda cmd, timeout=2.0: (6, "")
+            self.assertEqual(net.reachability(),
+                             {"verdict": "unresolved", "proof": None})
+            net._run_status = lambda cmd, timeout=2.0: (0, "fl=1\nip=203.0.113.9\n")
+            self.assertEqual(net.reachability()["verdict"], "open")
+            net._run_status = lambda cmd, timeout=2.0: (None, None)
+            self.assertEqual(net.reachability()["verdict"], "silent")
+        finally:
+            net._run_status = original
 
 
 class CaptiveCheckOffTheLoop(unittest.TestCase):

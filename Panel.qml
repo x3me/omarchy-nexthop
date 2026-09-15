@@ -366,6 +366,7 @@ Panel {
               text: {
                 var s = root.live ? root.live.state : ""
                 if (s === "captive") return "󰦝"   // nf-md-shield_lock: a gate, not a fault
+                if (s === "dns-failing") return "󰇖"   // nf-md-dns
                 if (s === "local-down" || s === "wan-down" || s === "tunnel-down") return "󱚵"
                 return "󰓅"
               }
@@ -408,6 +409,7 @@ Panel {
                     if (!l) return "WAITING FOR DAEMON"
                     if (root.stale) return "NO DATA FOR " + root.staleForS + " S"
                     if (l.state === "captive") return "SIGN-IN REQUIRED"
+                    if (l.state === "dns-failing") return "NAME LOOKUPS FAILING"
                     if (l.state === "local-down") return "ROUTER UNREACHABLE"
                     if (l.state === "wan-down") return "NO INTERNET · ROUTER OK"
                     // Through a VPN it is the tunnel that went silent; nothing

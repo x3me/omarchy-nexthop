@@ -24,7 +24,7 @@ from . import __version__, apps, linkevents, net, score, speedtest
 from .paths import (ensure_state_dir, ensure_runtime_dir, runtime_dir,
                     live_path, recent_path, db_path, lock_path, apps_path)
 from .instruments import Bench, MergedSeries, merged_stats
-from .probes import Series, PingProbe, TcpProbe
+from .probes import Series, PingProbe, TcpProbe, NameLookup
 from .state import write_atomic, retire_legacy_snapshots
 from .store import Store, vpn_matches
 from .update import UpdateWatch
@@ -858,6 +858,155 @@ class IntervalEvent:
         self.detail = None
 
 
+class LookupWatch:
+    """Names have stopped resolving while the internet still answers.
+
+    Every leg can read healthy while nothing opens: on 2026-09-14 a resolver
+    went away on a working line (HopSense's pilot house, eight minutes), the
+    router and every instrument answered by address, and the laptop could not
+    turn one name into an address. The index said 95. Nexthop would have said
+    the same, because every probe it scores is sent to an address — and a day
+    later it would have called the trace fetch failing on the name a sign-in
+    page (CaptiveWatch).
+
+    The evidence is already being gathered: the two named TCP instruments look
+    their host up on every sample (NameLookup), so this reads their outcomes
+    and adds no traffic. HopSense's rule, kept identical so the two can be
+    compared:
+
+    - a `dns-failing` interval opens once FAIL_RUN consecutive lookups have
+      failed across at least FAIL_SPAN_S, dated from the first failure, and
+      only while some instrument still answers — otherwise it is an outage,
+      which the leg watches own. It closes on the first answer;
+    - it is armed only once a lookup has answered on this network (probes are
+      rebuilt on a network change, and so is this). A network whose resolver
+      filters or blocks these names from the start therefore never raises a
+      permanent false alarm — and that same "never answered here" is what
+      lets CaptiveWatch keep treating a portal that blocks DNS as a portal;
+    - never while a leg is in a confirmed outage: the run is dropped, not
+      back-dated, and an open interval closes when the outage is confirmed;
+    - not inside the wake window (RESUME_SETTLE_S) — lookups fail while the
+      Wi-Fi re-joins — and closed at the last watched moment across a gap;
+    - closed at the newest outcome if outcomes stop arriving for STALE_S.
+
+    Observed, never scored: not charged to Reliability (outage_stats counts
+    outages and disruptions only), and the index keeps standing, because the
+    line it describes is working. The state says what is not.
+    """
+
+    FAIL_RUN = 3
+    FAIL_SPAN_S = 10.0
+    # Both named instruments benched is the slowest outcomes can arrive: one
+    # sample each per STANDBY_FACTOR probe intervals, collecting the lookup the
+    # previous sample started, which may itself have waited out its deadline.
+    # Two such gaps with nothing is a watch that stopped.
+    STALE_S = 2 * TCP_PROBE_INTERVAL_S * STANDBY_FACTOR + NameLookup.DEADLINE_S
+    KIND = "dns-failing"
+    DETAIL = "Name lookups failing; the internet answered by address"
+
+    def __init__(self, store):
+        self.store = store
+        self.event_id = None
+        self.since = None           # onset of the open interval
+        self.answered = False       # a lookup has answered on this network
+        self.last_ok = None
+        self.newest = None          # newest outcome read
+        self.refuse_until = None    # the wake window
+        self._run_since = None
+        self._run_n = 0
+        self._cursor = {}           # NameLookup -> newest stamp read from it
+
+    @property
+    def failing(self) -> bool:
+        return self.since is not None
+
+    def feed(self, now: float, lookups, answering: bool, legs_down: bool):
+        """One pass: read what the lookups recorded since the last one.
+
+        `answering`: some instrument heard the internet just now. `legs_down`:
+        either leg is in a confirmed outage."""
+        fresh = []
+        for lookup in lookups:
+            last = self._cursor.get(lookup)
+            got = [o for o in list(lookup.outcomes) if last is None or o[0] > last]
+            if got:
+                self._cursor[lookup] = got[-1][0]
+                fresh.extend(got)
+        fresh.sort()
+        if fresh:
+            self.newest = max(self.newest or fresh[-1][0], fresh[-1][0])
+        if legs_down:
+            self._close(now)
+            self._drop_run()
+            for ts, ok in fresh:
+                if ok:
+                    self.answered = True
+                    self.last_ok = ts
+            return
+        for ts, ok in fresh:
+            if ok:
+                self.answered = True
+                self.last_ok = ts
+                self.refuse_until = None
+                self._drop_run()
+                self._close(ts)
+                continue
+            if not self.answered:
+                continue
+            if self.refuse_until is not None and ts < self.refuse_until:
+                continue
+            if self._run_since is None:
+                self._run_since = ts
+            self._run_n += 1
+            if (self.since is None and answering
+                    and self._run_n >= self.FAIL_RUN
+                    and ts - self._run_since >= self.FAIL_SPAN_S):
+                self.since = int(self._run_since)
+                self.event_id = self.store.open_event(
+                    self.since, self.KIND, "warn", "", self.DETAIL)
+        if self.since is not None and self.newest is not None \
+                and now - self.newest > self.STALE_S:
+            self._close(self.newest)
+            self._drop_run()
+
+    def lost_sight(self, watched_until: float, resumed_at: float,
+                   settle_s: float = RESUME_SETTLE_S):
+        """Watching stopped (UNWATCHED_AFTER_S): close where it stopped, and
+        refuse the failures of re-joining the network after it."""
+        self._close(watched_until)
+        self._drop_run()
+        self.refuse_until = resumed_at + settle_s
+
+    def reset(self, now: float):
+        """A new network, new probes: what failed belonged to the old one."""
+        self._close(now)
+        self._drop_run()
+        self.answered = False
+        self._cursor = {}
+
+    def snapshot(self):
+        if self.newest is None and self.since is None:
+            return None
+        return {"failing": self.failing, "since": self.since,
+                "answered": self.answered,
+                "last_ok_ts": round(self.last_ok) if self.last_ok else None}
+
+    def _drop_run(self):
+        self._run_since = None
+        self._run_n = 0
+
+    def _close(self, at: float):
+        if self.since is None:
+            return
+        if self.event_id is not None:
+            # Integer seconds, and never an empty span: a row whose end is
+            # not after its start reads as an instant.
+            self.store.close_event(self.event_id,
+                                   max(int(at), self.since + 1))
+        self.event_id = None
+        self.since = None
+
+
 class CaptiveWatch:
     """Are we behind a sign-in page rather than on the internet?
 
@@ -911,17 +1060,44 @@ class CaptiveWatch:
         self.strikes = 0
         self._next = 0.0
         self._confirmed = False
+        # (lookups answered on this network, lookups failing now), from
+        # LookupWatch each tick.
+        self._names = (False, False)
 
     @staticmethod
     def _in_thread(fn):
         threading.Thread(target=fn, name="reach", daemon=True).start()
 
     @staticmethod
-    def captive(verdict: str, probes_answering: bool, strikes: int) -> bool:
+    def explained_by_names(verdict: str, names_answered: bool,
+                           names_failing: bool) -> bool:
+        """Is a failed check just names failing to resolve, not a portal?
+
+        A resolver dying on a working line gives CaptiveWatch both of its
+        halves — probes answering by address, the fetch failing on the name —
+        and until 0.2.47 that was called SIGN-IN REQUIRED. Two cases say it is
+        not a portal. curl reporting that the name did not resolve
+        (`unresolved`) on a network where names HAVE resolved: a portal that
+        blocks DNS does so from the moment you join, before anything answers.
+        And, for curl's own timeout, which is also what a lookup stuck in a
+        dead resolver looks like, LookupWatch already holding an open failure.
+        An `intercepted` answer is never explained: a name resolved and
+        something that is not the internet answered it.
+        """
+        if verdict == "unresolved":
+            return names_answered or names_failing
+        return verdict == "silent" and names_failing
+
+    @staticmethod
+    def captive(verdict: str, probes_answering: bool, strikes: int,
+                names_answered: bool = False,
+                names_failing: bool = False) -> bool:
         """The whole claim, in one place: replies but no proof of internet."""
         return (probes_answering
-                and verdict in ("intercepted", "silent")
-                and strikes >= CaptiveWatch.CONFIRM_AFTER)
+                and verdict in ("intercepted", "silent", "unresolved")
+                and strikes >= CaptiveWatch.CONFIRM_AFTER
+                and not CaptiveWatch.explained_by_names(
+                    verdict, names_answered, names_failing))
 
     @property
     def confirmed(self) -> bool:
@@ -941,7 +1117,9 @@ class CaptiveWatch:
         self.strikes = 0
         self._confirmed = False
 
-    def tick(self, now: float, probes_answering: bool):
+    def tick(self, now: float, probes_answering: bool,
+             names_answered: bool = False, names_failing: bool = False):
+        self._names = (names_answered, names_failing)
         self._collect(now)
         if not probes_answering:
             # Nothing is answering at all: not our verdict to make. Drop the
@@ -951,7 +1129,7 @@ class CaptiveWatch:
             return
         if self._inflight or now < self._next:
             self._confirmed = self.captive(
-                self.verdict, probes_answering, self.strikes)
+                self.verdict, probes_answering, self.strikes, *self._names)
             return
         self._inflight = True
         gen = self._gen
@@ -981,12 +1159,13 @@ class CaptiveWatch:
         self.proof = result.get("proof")
         if self.verdict == "open":
             self.strikes = 0
-        else:
+        elif not self.explained_by_names(self.verdict, *self._names):
             self.strikes += 1
         self.checked_ts = round(now)
         self._next = now + (self.RECHECK_OPEN_S if self.verdict == "open"
                             else self.CHECK_EVERY_S)
-        self._confirmed = self.captive(self.verdict, True, self.strikes)
+        self._confirmed = self.captive(self.verdict, True, self.strikes,
+                                       *self._names)
 
     def snapshot(self) -> dict:
         if self.verdict == "unknown":
@@ -1138,6 +1317,7 @@ class Daemon:
         self.local_events = LocalEventArbiter(self.store, self.notify)
         self._watched = None       # (wall, awake_clock) of the last watch pass
         self.captive = CaptiveWatch(net.reachability)
+        self.lookup_watch = LookupWatch(self.store)
         # Is this connection someone's phone sharing its data? Recomputed
         # whenever the route changes, which is the only thing that can
         # change the answer.
@@ -1458,6 +1638,9 @@ class Daemon:
         self.wan_ip = None
         self._wan_ip_at = 0
         self.captive.request()
+        lookups = getattr(self, "lookup_watch", None)
+        if lookups is not None:
+            lookups.reset(time.time())
         self.start_probes()
 
     def stop(self, *_):
@@ -1561,6 +1744,9 @@ class Daemon:
                 watch.lost_sight(now)
                 events.lost_sight(watched_until)
             self._lose_sight_of_path_states(watched_until)
+            lookups = getattr(self, "lookup_watch", None)
+            if lookups is not None:
+                lookups.lost_sight(watched_until, now)
         self._watched = (now, awake)
 
         local = leg_state(self.local.since(LEG_STREAM_WINDOW_S), now)
@@ -1643,6 +1829,17 @@ class Daemon:
                            "Brief interruption through the VPN, recovered on its own")
         eid = self.store.open_event(int(began), "disruption", "warn", leg, detail)
         self.store.close_event(eid, max(int(ended), int(began) + 1))
+
+    def follow_lookups(self, now: float):
+        """Feed LookupWatch what the named instruments' lookups recorded."""
+        lookups = [p.lookup for p in self._instrument_probes.values()
+                   if isinstance(p, TcpProbe) and not p.lookup.literal]
+        legs_down = bool(
+            (self.watch_local.down_since and self.local_events.real_outage)
+            or (self.watch_wan.down_since and self.wan_events.real_outage))
+        self.lookup_watch.feed(now, lookups,
+                               self._any_instrument_alive(OUTAGE_AFTER_S),
+                               legs_down)
 
     def _any_instrument_alive(self, window_s: float) -> bool:
         """Some instrument — seated or benched — heard the internet this
@@ -2052,6 +2249,13 @@ class Daemon:
             # Through a VPN it is the tunnel that went silent, not the
             # internet — judged by the leg the outage was opened on.
             state = "tunnel-down" if self.wan_events.leg == "tunnel" else "wan-down"
+        elif getattr(self, "lookup_watch", None) is not None \
+                and self.lookup_watch.failing:
+            # Every leg answers and names do not resolve, so almost nothing
+            # opens. Not an outage of the line — the index stands, see
+            # LookupWatch — but the one fact the user needs, so it outranks
+            # a band.
+            state = "dns-failing"
         elif idx is not None and idx < 70:
             state = "degraded"
         return state
@@ -2157,6 +2361,9 @@ class Daemon:
                         if self.metered else None),
             # Proof the real internet answered, or why it did not.
             "reach": self.captive.snapshot(),
+            # Whether names resolve: the named instruments' own lookups, see
+            # LookupWatch. Null before the first one has been read.
+            "lookups": self.lookup_watch.snapshot(),
             # What the user's own TCP connections are experiencing, straight
             # from the kernel: their real traffic to their real destinations.
             "sockets": self.app_traffic.latency,
@@ -2347,6 +2554,7 @@ class Daemon:
 
             self.watch_outages(now)
             self.follow_path_states(now)
+            self.follow_lookups(now)
             self.throughput(now, self.route.get("iface", ""))
 
             write_atomic(live_path(), self.compose_live(now))
@@ -2371,7 +2579,9 @@ class Daemon:
             # Off the loop: the check is a curl, and the bar must keep
             # updating at 2 Hz while it runs. tick() only starts and
             # collects it; the address it proves is adopted here.
-            self.captive.tick(now, self._any_instrument_alive(6.0))
+            self.captive.tick(now, self._any_instrument_alive(6.0),
+                              names_answered=self.lookup_watch.answered,
+                              names_failing=self.lookup_watch.failing)
             self.adopt_wan_ip()
 
             self.update_watch.enabled = bool(self.config["updateCheck"])

@@ -98,8 +98,9 @@ BarWidget {
   // State colours resolve through the theme palette: green/yellow/red exist
   // in every Omarchy theme's colors.toml, surfaced via Color singleton.
   readonly property color stateColor: {
-    // A sign-in page is a gate, not a fault: warn, not urgent.
-    if (netState === "captive") return "#e0af68"
+    // A sign-in page is a gate, not a fault: warn, not urgent. Names not
+    // resolving is the same tone — the line works; one service on it does not.
+    if (netState === "captive" || netState === "dns-failing") return "#e0af68"
     if (netState === "local-down" || netState === "wan-down"
         || netState === "tunnel-down") return Color.urgent
     if (netState === "degraded") return "#e0af68"
@@ -111,6 +112,7 @@ BarWidget {
 
   readonly property string glyph: {
     if (netState === "captive") return "󰦝"     // nf-md-shield_lock: a gate
+    if (netState === "dns-failing") return "󰇖" // nf-md-dns
     if (netState === "local-down") return "󱚵"   // nf-md-wifi_strength_alert
     if (netState === "wan-down" || netState === "tunnel-down")
       return "󰲛"                                 // nf-md-web_off / broken link
@@ -127,6 +129,13 @@ BarWidget {
       var s = Math.max(0, Math.round(Date.now() / 1000 - since))
       var m = Math.floor(s / 60)
       return glyph + " " + (m > 0 ? m + "m" + (s % 60) + "s" : s + "s")
+    }
+    if (netState === "dns-failing") {
+      var began = live && live.lookups ? live.lookups.since : 0
+      if (!began) return glyph
+      var d = Math.max(0, Math.round(Date.now() / 1000 - began))
+      var dm = Math.floor(d / 60)
+      return glyph + " " + (dm > 0 ? dm + "m" + (d % 60) + "s" : d + "s")
     }
     if (displayMode === "Icon only") return glyph
     if (displayMode === "Lag")
@@ -225,6 +234,8 @@ BarWidget {
       var l = root.live
       var name = l.link && (l.link.ssid || l.link.name) || ""
       var parts = [name, (l.index !== null ? l.index + " " + l.band : "")]
+      if (l.state === "dns-failing")
+        parts.push("Name lookups failing: most websites won't open")
       if (l.local && l.local.p50 !== null && l.wan && l.wan.p50 !== null)
         parts.push("local " + l.local.p50 + " ms · "
                    + (l.vpn ? "tunnel " : "wan ") + l.wan.p50 + " ms")

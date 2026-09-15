@@ -364,6 +364,132 @@ class PingProbe(threading.Thread):
             self._expire(t)
 
 
+class NameLookup:
+    """Where a named instrument's handshakes go, found apart from timing them.
+
+    Until 0.2.47 TcpProbe handed the host name to `create_connection`, which
+    looked it up inside the timed interval. Three things followed from that,
+    all found on 2026-09-14 when a resolver died while every address kept
+    answering (HopSense's pilot house, `docs/lookups-failing-2026-09-14.md` in
+    that repo): a failed lookup was recorded as a lost packet on the path; a
+    slow one was folded into the round trip, where it could pass for a
+    retransmitted SYN; and nothing anywhere could say that names had stopped
+    resolving, which is the one thing the user was experiencing.
+
+    So the lookup is its own observation. Each sample collects the lookup
+    the previous one started and starts the next, on a worker thread, because
+    `getaddrinfo` cannot be cancelled and a resolver that has gone away can
+    hold it far longer than a probe interval (glibc's default is two 5 s
+    attempts). A lookup still unanswered past DEADLINE_S counts as FAILED on
+    every sample it is stuck through, rather than as no reading: HopSense
+    recorded nothing for those at first, so a dead resolver showed as "no
+    data" for half the minutes it was dead. One lookup is ever in flight.
+
+    The handshake does not wait for it. It goes to the last addresses that
+    did resolve: the path to them has not changed because the resolver
+    stopped answering, and measuring it on its own cadence is still this
+    instrument's job. Waiting was tried first, and a blackholed resolver held
+    the seated instrument's samples 4 s apart — with the connect timeout on
+    top, past the 6 s at which a leg's stream stops being read at all. Only a
+    probe with no address yet waits, since it has nothing to measure without
+    one; one that never gets an answer records nothing, because a DNS failure
+    is not a lost packet on the line. Probes are rebuilt on a network change,
+    so an address never outlives the network it was resolved on.
+
+    Same number of lookups as before — one per sample — so no new traffic
+    and no new destination: the resolver was already being asked.
+    """
+
+    DEADLINE_S = 4.0
+    # Outcomes kept for the daemon to read, newest last. At the fastest cadence
+    # (one a second) this is over a minute, several times what LookupWatch
+    # reads between two passes.
+    KEEP = 128
+    MAX_ADDRESSES = 8
+
+    def __init__(self, host: str, port: int, resolve=None, spawn=None):
+        self.host, self.port = host, port
+        self._resolve = resolve or socket.getaddrinfo
+        self._spawn = spawn or self._in_thread
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._result = None          # addresses list, or None for a failure
+        self._finished_at = None     # wall clock when it came back
+        self._started = None         # monotonic start of the lookup in flight
+        self.addresses = []          # the last answer
+        self.outcomes = deque(maxlen=self.KEEP)   # (wall ts, answered)
+        try:
+            socket.inet_pton(socket.AF_INET6 if ":" in host else socket.AF_INET,
+                             host)
+            self.literal = True
+            self.addresses = [host]
+        except (OSError, ValueError):
+            self.literal = False
+
+    @staticmethod
+    def _in_thread(fn):
+        threading.Thread(target=fn, name="lookup", daemon=True).start()
+
+    def _run(self):
+        try:
+            infos = self._resolve(self.host, self.port, type=socket.SOCK_STREAM)
+            found = []
+            for info in infos:
+                addr = info[4][0]
+                if addr not in found:
+                    found.append(addr)
+            result = found[:self.MAX_ADDRESSES] or None
+        except Exception:
+            # Anything at all. A lookup that raised past this would never
+            # report, and every later sample would count as stuck.
+            result = None
+        with self._lock:
+            # Stamped under the lock, so it can never be earlier than a
+            # "still stuck" failure recorded for this same lookup.
+            self._finished_at = time.time()
+            self._result = result
+            self._done.set()
+
+    def resolve(self, wall: float = None) -> list:
+        """The addresses to connect to for this sample.
+
+        At most one outcome per call on a named host: the answer to the lookup
+        in flight, or a failure while it is stuck past DEADLINE_S. A literal
+        address records nothing — there was no lookup to fail. Answers are
+        stamped when they came back and stuck lookups when found stuck (`wall`
+        overrides both, for tests), so each probe's outcomes are in order.
+        """
+        if self.literal:
+            return list(self.addresses)
+        self._collect(wall)
+        if self._started is None:
+            self._done.clear()
+            self._started = time.monotonic()
+            self._spawn(self._run)
+            if not self.addresses:
+                self._done.wait(self.DEADLINE_S)
+                self._collect(wall)
+        return list(self.addresses)
+
+    def _collect(self, wall):
+        if self._started is None:
+            return
+        with self._lock:
+            finished = self._done.is_set()
+            result, finished_at = self._result, self._finished_at
+            if finished:
+                self._result = None
+                self._done.clear()
+        if finished:
+            self._started = None
+            if result:
+                self.addresses = result
+            self.outcomes.append((finished_at if wall is None else wall,
+                                  bool(result)))
+        elif time.monotonic() - self._started >= self.DEADLINE_S:
+            self.outcomes.append((time.time() if wall is None else wall, False))
+
+
 class TcpProbe(threading.Thread):
     """Connect-time RTT to the anchor's TLS port, feeding a Series.
 
@@ -429,6 +555,7 @@ class TcpProbe(threading.Thread):
         # a slow line are different faults with different owners.
         self.retransmits = 0
         self.unclassified = 0
+        self.lookup = NameLookup(target, port)
 
     def stop(self):
         self._stop.set()
@@ -444,12 +571,25 @@ class TcpProbe(threading.Thread):
             return False
 
     def _once(self):
+        addresses = self.lookup.resolve()
+        if not addresses:
+            # The name has never resolved on this network, so there is no
+            # path to measure. Not a loss: nothing was sent. See NameLookup.
+            return
         started = time.time()
         t0 = time.monotonic()
-        try:
-            sock = socket.create_connection((self.target, self.port),
-                                            timeout=self.CONNECT_TIMEOUT_S)
-        except (OSError, ValueError):
+        # In the order create_connection tries them, with its timeout per
+        # attempt — the same connect as before, minus the lookup it used to
+        # time along with it.
+        sock = None
+        for address in addresses:
+            try:
+                sock = socket.create_connection((address, self.port),
+                                                timeout=self.CONNECT_TIMEOUT_S)
+                break
+            except (OSError, ValueError):
+                continue
+        if sock is None:
             self.series.add(started, None, self._loaded())
             return
         rtt = (time.monotonic() - t0) * 1000.0

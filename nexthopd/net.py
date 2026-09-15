@@ -17,15 +17,22 @@ from typing import Optional
 
 
 def _run(cmd, timeout=2.0) -> Optional[str]:
+    code, stdout = _run_status(cmd, timeout)
+    return stdout if code == 0 else None
+
+
+def _run_status(cmd, timeout=2.0):
+    """(exit code, stdout), or (None, None) when it could not run or timed
+    out. For the one caller whose failures differ by why (reachability)."""
     if not shutil.which(cmd[0]):
-        return None
+        return None, None
     try:
         out = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False
         )
     except (subprocess.TimeoutExpired, OSError):
-        return None
-    return out.stdout if out.returncode == 0 else None
+        return None, None
+    return out.returncode, out.stdout
 
 
 # Gateway ranges that phone and desktop tethering hand out. Each is fixed by
@@ -553,8 +560,13 @@ def parse_trace(text: str) -> Optional[dict]:
     return out if "ip" in out else None
 
 
-def trace_verdict(raw) -> str:
-    """Did the real internet answer? `open` | `intercepted` | `silent`.
+# curl's exit status for "Could not resolve host".
+CURL_COULDNT_RESOLVE_HOST = 6
+
+
+def trace_verdict(raw, curl_exit=None) -> str:
+    """Did the real internet answer? `open` | `intercepted` | `silent` |
+    `unresolved`.
 
     The same fetch that reads the WAN address is also the only thing here
     that can tell the real internet from something standing in for it. A
@@ -574,7 +586,19 @@ def trace_verdict(raw) -> str:
     `intercepted` needs a portal that serves a 200 over a certificate valid
     for speed.cloudflare.com, which is rare. The captive decision does not
     care (both verdicts count against `open`); only this label does.
+
+    `unresolved` (0.2.47) is curl saying it never got as far as asking: the
+    name did not resolve. Until then it was `silent`, and a resolver dying on
+    a working line — every probe answering by address, the trace fetch
+    failing on the name — was exactly the two halves CaptiveWatch takes for a
+    sign-in page. Whether it still counts as one depends on whether names
+    have resolved on this network before; that is CaptiveWatch's call, not
+    this label's. A lookup that times out rather than fails comes back as
+    curl's timeout and stays `silent`, which is why CaptiveWatch also asks
+    the probes' own lookups.
     """
+    if curl_exit == CURL_COULDNT_RESOLVE_HOST:
+        return "unresolved"
     if not raw:
         return "silent"
     return "open" if parse_trace(raw) else "intercepted"
@@ -590,8 +614,9 @@ def reachability() -> dict:
     (CaptiveWatch): on every new network, hourly once the internet has
     answered, every 30 s only while it has not.
     """
-    raw = _run(["curl", "-sf", "--proto", "=https", "--max-time", "5",
-                "--max-filesize", "4096", TRACE_URL], timeout=8.0)
-    verdict = trace_verdict(raw)
+    code, raw = _run_status(["curl", "-sf", "--proto", "=https",
+                             "--max-time", "5", "--max-filesize", "4096",
+                             TRACE_URL], timeout=8.0)
+    verdict = trace_verdict(raw if code == 0 else None, code)
     return {"verdict": verdict,
             "proof": parse_trace(raw) if verdict == "open" else None}

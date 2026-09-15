@@ -54,6 +54,28 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
+  // Only while names fail to resolve, so it costs no height otherwise. Leads
+  // with how long, then says what still works: every leg below reads healthy
+  // and is right to, so without this line the panel contradicts the user,
+  // whose websites will not open.
+  Text {
+    textFormat: Text.PlainText
+    visible: tab.live && tab.live.state === "dns-failing"
+    height: visible ? implicitHeight : 0
+    width: parent.width
+    wrapMode: Text.WordWrap
+    text: {
+      var lk = tab.live ? tab.live.lookups : null
+      var d = lk ? tab.elapsed(lk.since) : ""
+      return (d ? "Failing for " + d + ". " : "")
+        + "Names are not resolving, so most websites won't open. The router "
+        + "and the internet still answer by address: this is DNS, not your line."
+    }
+    color: tab.panel.warnTone
+    font.family: tab.panel.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
   // Only while the tunnel is down, so it costs no height otherwise. Says
   // what failed and, just as plainly, whose fault it is not: a VPN outage is
   // charged to this connection's Reliability but never to the ISP.

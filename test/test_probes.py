@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s test
 """
 
+import socket
 import sys
 import tempfile
 import time
@@ -16,6 +17,7 @@ from nexthopd.probes import (  # noqa: E402
     Series,
     PingProbe,
     TcpProbe,
+    NameLookup,
     RE_REPLY,
     RE_PENDING,
     RE_UNREACH)
@@ -495,6 +497,183 @@ class TcpProbeBehaviour(unittest.TestCase):
         p.CONNECT_TIMEOUT_S = 0.25
         p._once()
         self.assertTrue(s.all()[0][2])
+
+
+class LookupsApartFromHandshakes(unittest.TestCase):
+    """A resolver is not the path. 2026-09-14: names stopped resolving on a
+    working line, and a probe that looked its host up inside the timed connect
+    could only call that lost packets — or, slow enough, a retransmit."""
+
+    INFOS = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+
+    @staticmethod
+    def sync(fn):
+        fn()
+
+    def fails(self, *a, **k):
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    def test_an_address_is_not_looked_up_and_records_nothing(self):
+        spawned = []
+        lk = NameLookup("192.0.2.1", 443, spawn=spawned.append)
+        self.assertEqual(lk.resolve(100.0), ["192.0.2.1"])
+        lk6 = NameLookup("2001:db8::1", 443, spawn=spawned.append)
+        self.assertEqual(lk6.resolve(100.0), ["2001:db8::1"])
+        self.assertEqual(spawned, [])
+        self.assertEqual(len(lk.outcomes) + len(lk6.outcomes), 0)
+
+    def test_an_answer_is_one_outcome_and_the_addresses_to_use(self):
+        lk = NameLookup("probe.example", 443, resolve=lambda *a, **k: self.INFOS * 2,
+                        spawn=self.sync)
+        self.assertEqual(lk.resolve(100.0), ["127.0.0.1"])   # deduplicated
+        self.assertEqual(list(lk.outcomes), [(100.0, True)])
+
+    def test_a_failed_lookup_keeps_the_last_addresses_that_resolved(self):
+        answers = [self.INFOS]
+        lk = NameLookup("probe.example", 443, spawn=self.sync,
+                        resolve=lambda *a, **k: answers[0] if answers[0]
+                        else self.fails())
+        lk.resolve(100.0)
+        answers[0] = None
+        self.assertEqual(lk.resolve(101.0), ["127.0.0.1"])   # asks, no wait
+        self.assertEqual(lk.resolve(102.0), ["127.0.0.1"])   # collects: failed
+        self.assertEqual([ok for _, ok in lk.outcomes], [True, False])
+
+    def test_a_lookup_that_raises_anything_is_a_failure_not_a_hang(self):
+        def odd(*a, **k):
+            raise RuntimeError("not an OSError")
+        lk = NameLookup("probe.example", 443, resolve=odd, spawn=self.sync)
+        self.assertEqual(lk.resolve(100.0), [])
+        self.assertEqual(list(lk.outcomes), [(100.0, False)])
+        lk.resolve(101.0)                    # and the next one is asked again
+        self.assertEqual(len(lk.outcomes), 2)
+
+    def test_a_stuck_lookup_fails_every_sample_it_blocks_and_is_asked_once(self):
+        held = []
+        lk = NameLookup("probe.example", 443,
+                        resolve=lambda *a, **k: self.INFOS, spawn=held.append)
+        lk.DEADLINE_S = 0.05
+        self.assertEqual(lk.resolve(100.0), [])     # no address: it waited
+        self.assertEqual(list(lk.outcomes), [(100.0, False)])
+        t0 = time.monotonic()
+        lk.resolve(101.0)
+        # Still in flight: no second lookup, no second wait, still a failure.
+        self.assertLess(time.monotonic() - t0, 0.04)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(list(lk.outcomes)[-1], (101.0, False))
+        held[0]()                             # the resolver finally answers
+        self.assertEqual(lk.resolve(102.0), ["127.0.0.1"])
+        self.assertEqual(list(lk.outcomes)[-1], (102.0, True))
+        self.assertEqual(len(held), 2)       # collected, and the next one asked
+
+    def test_with_an_address_in_hand_a_dead_resolver_never_delays_a_sample(self):
+        # Waiting was the first version: a blackholed resolver held the seated
+        # instrument 4 s apart, near the 6 s at which a leg stops being read.
+        lk = NameLookup("probe.example", 443, resolve=lambda *a, **k: self.INFOS,
+                        spawn=self.sync)
+        lk.resolve(100.0)
+        held = []
+        lk._spawn = held.append               # every lookup from now hangs
+        lk.DEADLINE_S = 0.2
+        t0 = time.monotonic()
+        for t in (101.0, 102.0, 103.0):
+            self.assertEqual(lk.resolve(t), ["127.0.0.1"])
+        self.assertLess(time.monotonic() - t0, 0.1)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(list(lk.outcomes), [(100.0, True)])   # not yet known
+        time.sleep(0.25)
+        lk.resolve(104.0)
+        self.assertEqual(list(lk.outcomes)[-1], (104.0, False))  # now it is
+
+    def test_outcomes_are_stamped_when_the_answer_came_back(self):
+        # Not when a later sample got round to collecting it: a benched
+        # instrument samples every ten seconds.
+        lk = NameLookup("probe.example", 443, resolve=lambda *a, **k: self.INFOS,
+                        spawn=self.sync)
+        lk.resolve()
+        answered = time.time()
+        lk.resolve()                          # asks; the answer is back at once
+        time.sleep(0.15)
+        lk.resolve()                          # collects it 0.15 s later
+        stamps = [ts for ts, _ in lk.outcomes]
+        self.assertEqual(len(stamps), 2)
+        self.assertLess(stamps[1] - answered, 0.1)
+
+    def test_a_young_lookup_in_flight_is_not_yet_a_failure(self):
+        # Between the wait and the deadline nothing is known either way.
+        held = []
+        lk = NameLookup("probe.example", 443,
+                        resolve=lambda *a, **k: self.INFOS, spawn=held.append)
+        lk.DEADLINE_S = 0.05
+        lk.resolve(100.0)
+        lk.DEADLINE_S = 60.0
+        lk.resolve(101.0)
+        self.assertEqual(list(lk.outcomes), [(100.0, False)])
+
+    def test_the_outcomes_are_bounded(self):
+        lk = NameLookup("probe.example", 443, resolve=self.fails, spawn=self.sync)
+        for i in range(NameLookup.KEEP * 3):
+            lk.resolve(float(i))
+        self.assertEqual(len(lk.outcomes), NameLookup.KEEP)
+
+    def listener(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(64)
+        self.addCleanup(srv.close)
+        return srv.getsockname()[1]
+
+    def test_the_round_trip_does_not_include_the_lookup(self):
+        port = self.listener()
+
+        def slow(*a, **k):
+            time.sleep(0.4)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        s = Series()
+        p = TcpProbe("probe.example", s, 1.0, "t", port=port)
+        p.lookup = NameLookup("probe.example", port, resolve=slow, spawn=self.sync)
+        p._once()
+        rtt = s.all()[0][1]
+        self.assertIsNotNone(rtt)
+        self.assertLess(rtt, 200.0)
+
+    def test_a_dead_resolver_on_a_working_path_still_measures_the_path(self):
+        port = self.listener()
+        answers = [[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]]
+        s = Series()
+        p = TcpProbe("probe.example", s, 1.0, "t", port=port)
+        p.lookup = NameLookup("probe.example", port, spawn=self.sync,
+                              resolve=lambda *a, **k: answers[0] or self.fails())
+        p._once()
+        answers[0] = None
+        p._once()
+        p._once()
+        p._once()
+        self.assertEqual([smp[1] is not None for smp in s.all()], [True] * 4)
+        self.assertEqual([ok for _, ok in p.lookup.outcomes], [True, False, False])
+
+    def test_a_name_that_never_resolved_is_not_a_lost_packet(self):
+        s = Series()
+        p = TcpProbe("probe.example", s, 1.0, "t", port=9)
+        p.lookup = NameLookup("probe.example", 9, resolve=self.fails, spawn=self.sync)
+        p._once()
+        self.assertEqual(s.all(), [])
+        self.assertEqual([ok for _, ok in p.lookup.outcomes], [False])
+
+    def test_every_address_is_tried_in_order_like_create_connection(self):
+        port = self.listener()
+        s = Series()
+        p = TcpProbe("probe.example", s, 1.0, "t", port=port)
+        p.CONNECT_TIMEOUT_S = 0.25
+        # The first address refuses at once (nothing listens on ::1 here, or
+        # there is no IPv6 at all); the second answers.
+        p.lookup = NameLookup("probe.example", port, spawn=self.sync,
+                              resolve=lambda *a, **k: [
+                                  (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0)),
+                                  (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))])
+        p._once()
+        self.assertIsNotNone(s.all()[0][1])
 
 
 if __name__ == "__main__":
