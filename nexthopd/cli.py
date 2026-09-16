@@ -349,8 +349,9 @@ def report_text(store, live: dict, seconds: float, window: str) -> str:
                 start = time.strftime("%a %H:%M", time.localtime(e["ts"]))
                 dur = (f"{e['ended_ts'] - e['ts']}s" if e["ended_ts"]
                        else "ongoing")
+                detail = net.decorate_bssids(e.get("detail", ""))
                 lines.append(f"  {start}  {e['kind']} on {e['leg']} leg, {dur}"
-                             f" — {e['detail']}")
+                             f" — {detail}")
         else:
             lines.append("events: none")
         tests = store.tests(limit=5)

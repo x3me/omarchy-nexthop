@@ -172,21 +172,21 @@ class AccessPointInventory(unittest.TestCase):
             path = Path(d) / "bssid_to_ap_inventory.csv"
             path.write_text(
                 "bssid,ap_name,band,channel,ssid\n"
-                "8C:30:66:72:62:5F,Upstairs Hallway,6 GHz,209,PoolPartyUltra\n"
+                "02:00:00:00:00:01,Hallway AP,6 GHz,37,TestNet\n"
             )
             inventory = net.ApInventory(path)
             self.assertEqual(
-                inventory.lookup("8c:30:66:72:62:5f"), "Upstairs Hallway")
+                inventory.lookup("02:00:00:00:00:01"), "Hallway AP")
 
     def test_utf8_bom_from_spreadsheet_exports_is_accepted(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "bssid_to_ap_inventory.csv"
             path.write_text(
-                "bssid,ap_name\n8c:30:66:72:62:5f,Upstairs Hallway\n",
+                "bssid,ap_name\n02:00:00:00:00:01,Hallway AP\n",
                 encoding="utf-8-sig")
             inventory = net.ApInventory(path)
             self.assertEqual(
-                inventory.lookup("8c:30:66:72:62:5f"), "Upstairs Hallway")
+                inventory.lookup("02:00:00:00:00:01"), "Hallway AP")
 
     def test_invalid_rows_and_unknown_bssids_have_no_name(self):
         with tempfile.TemporaryDirectory() as d:
@@ -242,47 +242,43 @@ class AccessPointInventory(unittest.TestCase):
             "iface": "wlo1", "gateway": "192.168.1.1", "src": "192.168.1.2"}
         net.is_wireless = lambda iface: True
         net.wifi_link = lambda iface: {
-            "bssid": "8c:30:66:72:62:5f", "ssid": "PoolPartyUltra"}
+            "bssid": "02:00:00:00:00:01", "ssid": "TestNet"}
         net.wifi_station = lambda iface: {}
-        net.connection_name_cached = lambda iface, key: "PoolPartyUltra"
+        net.connection_name_cached = lambda iface, key: "TestNet"
         net.AP_INVENTORY = type("Inventory", (), {
-            "lookup": lambda self, bssid: "Upstairs Hallway"})()
+            "lookup": lambda self, bssid: "Hallway AP"})()
         try:
-            self.assertEqual(net.snapshot()["ap_name"], "Upstairs Hallway")
+            self.assertEqual(net.snapshot()["ap_name"], "Hallway AP")
         finally:
             (net.route_to, net.is_wireless, net.wifi_link,
              net.wifi_station, net.connection_name_cached,
              net.AP_INVENTORY) = originals
 
-    def test_historical_event_bssids_are_decorated_for_display(self):
+    def test_historical_event_bssids_use_current_names_for_display(self):
+        names = {
+            "02:00:00:00:00:01": "Kitchen AP",
+            "02:00:00:00:00:02": "Old Hallway Name",
+        }
         inventory = type("Inventory", (), {
-            "lookup": lambda self, bssid: {
-                "aa:aa:aa:aa:aa:aa": "Kitchen",
-                "bb:bb:bb:bb:bb:bb": "Upstairs Hallway",
-            }.get(bssid)})()
-        detail = "Roamed from aa:aa:aa:aa:aa:aa to bb:bb:bb:bb:bb:bb"
+            "lookup": lambda self, bssid: names.get(bssid)})()
+        detail = "Roamed from 02:00:00:00:00:01 to 02:00:00:00:00:02"
         self.assertEqual(
             net.decorate_bssids(detail, inventory),
-            "Roamed from Kitchen (aa:aa:aa:aa:aa:aa) to "
-            "Upstairs Hallway (bb:bb:bb:bb:bb:bb)")
-
-    def test_already_decorated_event_is_not_decorated_twice(self):
-        inventory = type("Inventory", (), {
-            "lookup": lambda self, bssid: "Upstairs Hallway"})()
-        detail = "Roamed to Upstairs Hallway (bb:bb:bb:bb:bb:bb)"
-        self.assertEqual(net.decorate_bssids(detail, inventory), detail)
-
-    def test_stored_name_survives_an_inventory_rename_without_nesting(self):
-        inventory = type("Inventory", (), {
-            "lookup": lambda self, bssid: "Current Hallway Name"})()
-        detail = "Roamed to Stored Hallway Name (bb:bb:bb:bb:bb:bb)"
-        self.assertEqual(net.decorate_bssids(detail, inventory), detail)
+            "Roamed from Kitchen AP (02:00:00:00:00:01) to "
+            "Old Hallway Name (02:00:00:00:00:02)")
+        names["02:00:00:00:00:02"] = "Current Hallway Name"
+        self.assertEqual(
+            net.decorate_bssids(detail, inventory),
+            "Roamed from Kitchen AP (02:00:00:00:00:01) to "
+            "Current Hallway Name (02:00:00:00:00:02)")
 
     def test_bssid_shaped_substrings_inside_words_are_not_decorated(self):
         inventory = type("Inventory", (), {
             "lookup": lambda self, bssid: "Hallway"})()
         detail = "xaa:bb:cc:dd:ee:ff and aa:bb:cc:dd:ee:ffz"
         self.assertEqual(net.decorate_bssids(detail, inventory), detail)
+
+
 class TunnelDetection(unittest.TestCase):
     """Which link a route leaves by, read from the kernel, never from a name.
 

@@ -531,15 +531,7 @@ def decorate_bssids(text: str, inventory=None) -> str:
     def replace(match):
         bssid = match.group(0).lower()
         name = inventory.lookup(bssid)
-        if not name:
-            return match.group(0)
-        # New events may already have been stored as `Name (bssid)`. The
-        # stored name can differ from today's inventory after a rename, so
-        # parentheses—not the current name—identify an already decorated ID.
-        if text[:match.start()].endswith("(") \
-                and text[match.end():].startswith(")"):
-            return match.group(0)
-        return "%s (%s)" % (name, bssid)
+        return "%s (%s)" % (name, bssid) if name else match.group(0)
 
     return BSSID_TOKEN_RE.sub(replace, text)
 

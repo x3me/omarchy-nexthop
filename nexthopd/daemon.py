@@ -410,30 +410,19 @@ class LinkWatch:
         gap_s is how long the link was down when that is known (a confirmed
         gap); otherwise the deauth-to-reauth delay stands in for it.
         """
-        old_bssid = old.get("bssid", "")
-        new_bssid = new.get("bssid", "")
-        old_label = self._ap_label(old)
-        new_label = self._ap_label(new)
         why = linkevents.reason_text(cause["reason"], cause["by_ap"])
         follow = cause.get("gap_s")
         if cause["by_ap"]:
-            kind, lead = "kick", "Kicked by AP %s (%s)" % (old_label, why)
+            kind, lead = "kick", "Kicked by AP %s (%s)" % (old, why)
         elif gap_s is None and follow is not None and follow < self.ROAM_FOLLOW_S:
-            return "roam", "Roamed to " + new_label
+            return "roam", "Roamed to " + new
         else:
             kind, lead = "drop", "Dropped by this machine (%s)" % why
         down = gap_s if gap_s is not None else follow
-        text = lead + ", rejoined" + (
-            "" if new_bssid == old_bssid else " via " + new_label)
+        text = lead + ", rejoined" + ("" if new == old else " via " + new)
         if down is not None and down >= 0.5:
             text += " after " + _short_duration(down)
         return kind, text
-
-    @staticmethod
-    def _ap_label(link):
-        bssid = link.get("bssid", "")
-        name = link.get("ap_name")
-        return "%s (%s)" % (name, bssid) if name and bssid else (name or bssid)
 
     def sample(self, now, link, traffic_bps=0.0):
         # The caller runs twice a second; once a second is plenty here.
@@ -457,8 +446,6 @@ class LinkWatch:
         prev, self.prev = self.prev, dict(link)
         bssid = link.get("bssid", "")
         prev_bssid = prev.get("bssid", "") if prev else ""
-        ssid = link.get("ssid", "")
-        ap_label = self._ap_label(link)
 
         if prev is None:
             # The daemon's first sighting of an existing link is not an
@@ -477,15 +464,15 @@ class LinkWatch:
                 # One row for the whole incident: who ended it, how long it
                 # took to come back, and where. The plain association is
                 # for gaps nobody claimed — suspend, or no `iw event`.
-                kind, text = self._blame(cause, prev, link, gap_s=now - since)
+                kind, text = self._blame(
+                    cause, prev_bssid, bssid, gap_s=now - since)
                 self._instant(now, kind, text)
             else:
-                self._instant(now, "associate",
-                              "Associated with " + (ap_label or ssid or bssid))
+                self._instant(now, "associate", "Associated with " + bssid)
         elif bssid and prev_bssid and bssid != prev_bssid:
             cause = self._cause(prev_bssid, since, now)
-            kind, lead = self._blame(cause, prev, link) if cause \
-                else ("roam", "Roamed to " + ap_label)
+            kind, lead = self._blame(cause, prev_bssid, bssid) if cause \
+                else ("roam", "Roamed to " + bssid)
             parts = [lead]
             if prev.get("channel") and link.get("channel") \
                     and prev["channel"] != link["channel"]:

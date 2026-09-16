@@ -22,8 +22,13 @@ Item {
   readonly property var metered: live && live.metered ? live.metered : null
   readonly property bool tethered: !!(metered && metered.tethered)
 
-  readonly property string middleTitle: tethered ? metered.label
-    : (live && live.link && live.link.ap_name ? live.link.ap_name : "Router")
+  readonly property string middleTitle: tethered ? metered.label : "Router"
+  readonly property string machineDetail: {
+    if (!live || !live.link) return ""
+    var iface = live.link.iface || ""
+    var apName = live.link.ap_name || ""
+    return iface + (iface && apName ? " \u00b7 " : "") + apName
+  }
 
   // The internet probes' routes leave through a VPN (daemon: net.tunnel_routes).
   // Then the path is four stops, not three — laptop, router, VPN, internet —
@@ -260,9 +265,6 @@ Item {
       Text {
         textFormat: Text.PlainText
         anchors.horizontalCenter: parent.horizontalCenter
-        width: parent.width
-        elide: Text.ElideRight
-        horizontalAlignment: Text.AlignHCenter
         text: parent.title
         color: parent.tint
         font.family: Style.font.family
@@ -374,7 +376,7 @@ Item {
     Node {
       icon: "󰌢"   // nf-md-laptop
       title: "This machine"
-      detail: root.live && root.live.link ? (root.live.link.iface || "") : ""
+      detail: root.machineDetail
     }
     Leg {
       ms: root.localMs

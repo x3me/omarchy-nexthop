@@ -50,24 +50,26 @@ class LinkEvents(unittest.TestCase):
         self.assertIn("44", roam["detail"])
         self.assertIn("-61", roam["detail"])
 
-    def test_roam_uses_access_point_names_when_known(self):
+    def test_roam_stores_bssid_not_access_point_name(self):
         t = time.time()
         self.watch.sample(t, {"bssid": "aa:aa:aa:aa:aa:aa",
                               "ap_name": "Kitchen", "channel": 149})
         self.watch.sample(t + 2, {"bssid": "bb:bb:bb:bb:bb:bb",
-                                  "ap_name": "Upstairs Hallway", "channel": 44})
+                                  "ap_name": "Hallway AP", "channel": 44})
         roam = [e for e in self.store.events() if e["kind"] == "roam"][0]
-        self.assertTrue(roam["detail"].startswith("Roamed to Upstairs Hallway"))
-        self.assertIn("bb:bb:bb:bb:bb:bb", roam["detail"])
+        self.assertTrue(
+            roam["detail"].startswith("Roamed to bb:bb:bb:bb:bb:bb"))
+        self.assertNotIn("Hallway AP", roam["detail"])
 
-    def test_same_named_radios_remain_distinct_in_events(self):
+    def test_same_named_radios_are_stored_as_distinct_bssids(self):
         t = time.time()
         self.watch.sample(t, {"bssid": "aa:aa:aa:aa:aa:aa",
-                              "ap_name": "Upstairs Hallway", "channel": 157})
+                              "ap_name": "Hallway AP", "channel": 157})
         self.watch.sample(t + 2, {"bssid": "bb:bb:bb:bb:bb:bb",
-                                  "ap_name": "Upstairs Hallway", "channel": 209})
+                                  "ap_name": "Hallway AP", "channel": 209})
         roam = [e for e in self.store.events() if e["kind"] == "roam"][0]
-        self.assertIn("Upstairs Hallway (bb:bb:bb:bb:bb:bb)", roam["detail"])
+        self.assertIn("bb:bb:bb:bb:bb:bb", roam["detail"])
+        self.assertNotIn("Hallway AP", roam["detail"])
 
     def test_associate_needs_a_confirmed_gap(self):
         t = time.time()
@@ -220,27 +222,30 @@ class LinkAttribution(unittest.TestCase):
         # The lookup window reached back to the last time the link was up.
         self.assertGreaterEqual(events.calls[-1][2], 14.0)
 
-    def test_name_change_does_not_make_the_same_bssid_a_different_ap(self):
+    def test_name_change_is_not_persisted_in_event_history(self):
         events = StubEvents(self.cause(True, 2, None))
         watch = LinkWatch(self.store, events)
         t = time.time()
         watch.sample(t, {"bssid": self.OLD, "ap_name": "Old Hallway Name"})
         for i in range(LinkWatch.GAP_SAMPLES):
             watch.sample(t + 2 + i * 2, {})
-        watch.sample(t + 14, {"bssid": self.OLD, "ap_name": "Upstairs Hallway"})
+        watch.sample(t + 14, {"bssid": self.OLD, "ap_name": "Hallway AP"})
         event = self.store.events()[0]
-        self.assertIn("Kicked by AP Old Hallway Name", event["detail"])
+        self.assertIn("Kicked by AP " + self.OLD, event["detail"])
+        self.assertNotIn("Old Hallway Name", event["detail"])
+        self.assertNotIn("Hallway AP", event["detail"])
         self.assertNotIn(" via ", event["detail"])
 
-    def test_gap_nobody_claimed_is_a_plain_association(self):
+    def test_gap_nobody_claimed_stores_bssid_not_network_name(self):
         watch = LinkWatch(self.store, StubEvents(None))
         t = time.time()
-        link = {"bssid": self.OLD, "ssid": "Office"}
+        link = {"bssid": self.OLD, "ssid": "Private Network"}
         watch.sample(t, link)
         for i in range(LinkWatch.GAP_SAMPLES):
             watch.sample(t + 2 + i * 2, {})
         watch.sample(t + 14, link)
-        self.assertEqual([e["kind"] for e in self.store.events()], ["associate"])
+        event = self.store.events()[0]
+        self.assertEqual(event["detail"], "Associated with " + self.OLD)
 
 
 class NlEventParsing(unittest.TestCase):
