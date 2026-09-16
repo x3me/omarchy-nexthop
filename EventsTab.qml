@@ -147,10 +147,12 @@ Column {
   function roamTargets(members) {
     var seen = []
     for (var i = 0; i < members.length; i++) {
-      var m = /Roamed to ([0-9a-fA-F:]{17})/.exec(members[i].detail || "")
+      var m = /Roamed to (?:(.*?) \()?((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\)?(?:,|$)/
+        .exec(members[i].detail || "")
       if (!m) continue
-      var short = shortMac(m[1])
-      if (seen.indexOf(short) < 0) seen.push(short)
+      var ap = shortMac(m[2])
+      var label = m[1] ? m[1] + " (" + ap + ")" : ap
+      if (seen.indexOf(label) < 0) seen.push(label)
     }
     return seen
   }
@@ -159,12 +161,13 @@ Column {
   function kickSources(members) {
     var aps = [], whys = []
     for (var i = 0; i < members.length; i++) {
-      var m = /Kicked by AP ([0-9a-fA-F:]{17}) \((reason [^)]*)\)/
+      var m = /Kicked by AP (?:(.*?) \()?((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\)? \((reason [^)]*)\)/
         .exec(members[i].detail || "")
       if (!m) continue
-      var short = shortMac(m[1])
-      if (aps.indexOf(short) < 0) aps.push(short)
-      if (whys.indexOf(m[2]) < 0) whys.push(m[2])
+      var ap = shortMac(m[2])
+      var label = m[1] ? m[1] + " (" + ap + ")" : ap
+      if (aps.indexOf(label) < 0) aps.push(label)
+      if (whys.indexOf(m[3]) < 0) whys.push(m[3])
     }
     return {aps: aps, why: whys.length ? whys.join("; ") : null}
   }

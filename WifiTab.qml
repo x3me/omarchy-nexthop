@@ -428,6 +428,8 @@ Column {
         v: tab.link && tab.link.standard ? tab.link.standard : "--" }
       KvRow { width: parent.cell; k: "Interface"
         v: tab.link && tab.link.iface ? tab.link.iface : "--" }
+      KvRow { width: parent.cell; k: "Access point"
+        v: tab.link && tab.link.ap_name ? tab.link.ap_name : "Unknown" }
       KvRow { width: parent.cell; k: "BSSID"
         v: tab.link && tab.link.bssid ? tab.link.bssid : "--" }
       KvRow { width: parent.cell; k: "Gateway"

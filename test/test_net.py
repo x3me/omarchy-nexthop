@@ -3,7 +3,10 @@
 Run: python3 -m unittest discover -s test
 """
 
+import os
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -161,6 +164,119 @@ class ConnectionNameCache(unittest.TestCase):
         net.connection_name_cached("wlo1", ("wlo1", "10.0.0.1", "aa:bb"),
                                    now=131 + net.NAME_CACHE_TTL_S + 1)
         self.assertEqual(len(calls), 3)
+
+
+class AccessPointInventory(unittest.TestCase):
+    def test_csv_maps_bssid_to_access_point_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            path.write_text(
+                "bssid,ap_name,band,channel,ssid\n"
+                "02:00:00:00:00:01,Hallway AP,6 GHz,37,TestNet\n"
+            )
+            inventory = net.ApInventory(path)
+            self.assertEqual(
+                inventory.lookup("02:00:00:00:00:01"), "Hallway AP")
+
+    def test_utf8_bom_from_spreadsheet_exports_is_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            path.write_text(
+                "bssid,ap_name\n02:00:00:00:00:01,Hallway AP\n",
+                encoding="utf-8-sig")
+            inventory = net.ApInventory(path)
+            self.assertEqual(
+                inventory.lookup("02:00:00:00:00:01"), "Hallway AP")
+
+    def test_invalid_rows_and_unknown_bssids_have_no_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            path.write_text(
+                "bssid,ap_name,band,channel,ssid\n"
+                "not-a-bssid,Wrong,5 GHz,36,Office\n"
+                "aa:bb:cc:dd:ee:ff,,5 GHz,36,Office\n"
+            )
+            inventory = net.ApInventory(path)
+            self.assertIsNone(inventory.lookup("not-a-bssid"))
+            self.assertIsNone(inventory.lookup("aa:bb:cc:dd:ee:ff"))
+            self.assertIsNone(inventory.lookup("11:22:33:44:55:66"))
+
+    def test_same_size_rewrite_is_seen_even_when_mtime_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            before = ("bssid,ap_name\n"
+                      "aa:bb:cc:dd:ee:ff,Kitchen\n")
+            after = ("bssid,ap_name\n"
+                     "aa:bb:cc:dd:ee:ff,Hallway\n")
+            self.assertEqual(len(before), len(after))
+            path.write_text(before)
+            inventory = net.ApInventory(path)
+            self.assertEqual(inventory.lookup("aa:bb:cc:dd:ee:ff"), "Kitchen")
+            old_mtime = path.stat().st_mtime_ns
+            path.write_text(after)
+            os.utime(path, ns=(old_mtime, old_mtime))
+            self.assertEqual(inventory.lookup("aa:bb:cc:dd:ee:ff"), "Hallway")
+
+    def test_fifo_inventory_path_cannot_block_a_snapshot(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bssid_to_ap_inventory.csv"
+            os.mkfifo(path)
+            inventory = net.ApInventory(path)
+            done = threading.Event()
+            worker = threading.Thread(
+                target=lambda: (inventory.lookup("aa:bb:cc:dd:ee:ff"), done.set()),
+                daemon=True)
+            worker.start()
+            completed_without_writer = done.wait(0.25)
+            if not completed_without_writer:
+                writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+                os.close(writer)
+                worker.join(1)
+            self.assertTrue(completed_without_writer)
+
+    def test_snapshot_publishes_the_known_access_point_name(self):
+        originals = (net.route_to, net.is_wireless, net.wifi_link,
+                     net.wifi_station, net.connection_name_cached,
+                     net.AP_INVENTORY)
+        net.route_to = lambda anchor: {
+            "iface": "wlo1", "gateway": "192.168.1.1", "src": "192.168.1.2"}
+        net.is_wireless = lambda iface: True
+        net.wifi_link = lambda iface: {
+            "bssid": "02:00:00:00:00:01", "ssid": "TestNet"}
+        net.wifi_station = lambda iface: {}
+        net.connection_name_cached = lambda iface, key: "TestNet"
+        net.AP_INVENTORY = type("Inventory", (), {
+            "lookup": lambda self, bssid: "Hallway AP"})()
+        try:
+            self.assertEqual(net.snapshot()["ap_name"], "Hallway AP")
+        finally:
+            (net.route_to, net.is_wireless, net.wifi_link,
+             net.wifi_station, net.connection_name_cached,
+             net.AP_INVENTORY) = originals
+
+    def test_historical_event_bssids_use_current_names_for_display(self):
+        names = {
+            "02:00:00:00:00:01": "Kitchen AP",
+            "02:00:00:00:00:02": "Old Hallway Name",
+        }
+        inventory = type("Inventory", (), {
+            "lookup": lambda self, bssid: names.get(bssid)})()
+        detail = "Roamed from 02:00:00:00:00:01 to 02:00:00:00:00:02"
+        self.assertEqual(
+            net.decorate_bssids(detail, inventory),
+            "Roamed from Kitchen AP (02:00:00:00:00:01) to "
+            "Old Hallway Name (02:00:00:00:00:02)")
+        names["02:00:00:00:00:02"] = "Current Hallway Name"
+        self.assertEqual(
+            net.decorate_bssids(detail, inventory),
+            "Roamed from Kitchen AP (02:00:00:00:00:01) to "
+            "Current Hallway Name (02:00:00:00:00:02)")
+
+    def test_bssid_shaped_substrings_inside_words_are_not_decorated(self):
+        inventory = type("Inventory", (), {
+            "lookup": lambda self, bssid: "Hallway"})()
+        detail = "xaa:bb:cc:dd:ee:ff and aa:bb:cc:dd:ee:ffz"
+        self.assertEqual(net.decorate_bssids(detail, inventory), detail)
 
 
 class TunnelDetection(unittest.TestCase):
