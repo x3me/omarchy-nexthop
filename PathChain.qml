@@ -23,11 +23,15 @@ Item {
   readonly property bool tethered: !!(metered && metered.tethered)
 
   readonly property string middleTitle: tethered ? metered.label : "Router"
+  // The access point's name when the user has one for this BSSID, else the
+  // interface. Not both: this column is Style.space(84) wide, about thirteen
+  // characters of caption text and eleven in the four-node VPN layout, so
+  // `wlo1 · Upstairs Hallway` elided to `wlo1 · …allway` — the half that
+  // identifies the radio, thrown away to keep the half that does not. The
+  // interface is on the Wi-Fi tab, beside the BSSID and the name.
   readonly property string machineDetail: {
     if (!live || !live.link) return ""
-    var iface = live.link.iface || ""
-    var apName = live.link.ap_name || ""
-    return iface + (iface && apName ? " \u00b7 " : "") + apName
+    return live.link.ap_name || live.link.iface || ""
   }
 
   // The internet probes' routes leave through a VPN (daemon: net.tunnel_routes).
