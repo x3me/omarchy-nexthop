@@ -26,6 +26,7 @@ import stat
 import sys
 import time
 
+from . import net
 from .paths import (apps_path, db_path, live_path, lock_path, manifest_path,
                     recent_path)
 from .state import read_json, read_text_bounded
@@ -196,7 +197,12 @@ def cmd_events(args):
     if not store:
         emit({"events": []})
         return 0
-    emit({"events": store.events(parse_window(args.window))})
+    events = []
+    for row in store.events(parse_window(args.window)):
+        row = dict(row)
+        row["detail"] = net.decorate_bssids(row.get("detail", ""))
+        events.append(row)
+    emit({"events": events})
     return 0
 
 
@@ -343,8 +349,9 @@ def report_text(store, live: dict, seconds: float, window: str) -> str:
                 start = time.strftime("%a %H:%M", time.localtime(e["ts"]))
                 dur = (f"{e['ended_ts'] - e['ts']}s" if e["ended_ts"]
                        else "ongoing")
+                detail = net.decorate_bssids(e.get("detail", ""))
                 lines.append(f"  {start}  {e['kind']} on {e['leg']} leg, {dur}"
-                             f" — {e['detail']}")
+                             f" — {detail}")
         else:
             lines.append("events: none")
         tests = store.tests(limit=5)

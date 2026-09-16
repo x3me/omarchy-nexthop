@@ -191,6 +191,25 @@ class ReportThroughAVpn(unittest.TestCase):
                       "the tunnel, not the ISP line.", text)
         self.assertIn("via VPN", next(l for l in text.splitlines() if "90/30" in l))
 
+    def test_event_bssids_are_decorated_in_the_report(self):
+        from nexthopd import net
+        from nexthopd.cli import report_text
+        from nexthopd.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(Path(d) / "t.db")
+            original = net.AP_INVENTORY
+            net.AP_INVENTORY = type("Inventory", (), {
+                "lookup": lambda self, bssid: "Hallway AP"})()
+            try:
+                store.open_event(int(time.time()), "roam", "info", "local",
+                                 "Roamed to 02:00:00:00:00:01")
+                text = report_text(store, {}, 3600, "1h")
+            finally:
+                net.AP_INVENTORY = original
+                store.close()
+        self.assertIn(
+            "Roamed to Hallway AP (02:00:00:00:00:01)", text)
+
 
 if __name__ == "__main__":
     unittest.main()

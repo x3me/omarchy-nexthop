@@ -447,7 +447,6 @@ class LinkWatch:
         prev, self.prev = self.prev, dict(link)
         bssid = link.get("bssid", "")
         prev_bssid = prev.get("bssid", "") if prev else ""
-        ssid = link.get("ssid", "")
 
         if prev is None:
             # The daemon's first sighting of an existing link is not an
@@ -466,10 +465,11 @@ class LinkWatch:
                 # One row for the whole incident: who ended it, how long it
                 # took to come back, and where. The plain association is
                 # for gaps nobody claimed — suspend, or no `iw event`.
-                kind, text = self._blame(cause, prev_bssid, bssid, gap_s=now - since)
+                kind, text = self._blame(
+                    cause, prev_bssid, bssid, gap_s=now - since)
                 self._instant(now, kind, text)
             else:
-                self._instant(now, "associate", "Associated with " + (ssid or bssid))
+                self._instant(now, "associate", "Associated with " + bssid)
         elif bssid and prev_bssid and bssid != prev_bssid:
             cause = self._cause(prev_bssid, since, now)
             kind, lead = self._blame(cause, prev_bssid, bssid) if cause \

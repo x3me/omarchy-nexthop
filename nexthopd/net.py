@@ -6,13 +6,18 @@ every function degrades to None or {} rather than raising, because a laptop
 that just suspended will fail all of them at once.
 """
 
+import csv
+import io
 import json
 import ipaddress
+import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import time
+from pathlib import Path
 from typing import Optional
 
 
@@ -463,6 +468,91 @@ def wifi_station(iface: str) -> dict:
     return out
 
 
+class ApInventory:
+    """Names for known BSSIDs from the user's XDG config directory."""
+
+    MAX_BYTES = 128 * 1024
+    BSSID_RE = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+
+    def __init__(self, path=None):
+        config_home = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+        self.path = Path(path) if path else Path(config_home) / "nexthop" \
+            / "bssid_to_ap_inventory.csv"
+        self._content = None
+        self._names = {}
+
+    def _refresh(self):
+        try:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                         | os.O_NONBLOCK)
+        except OSError:
+            self._content, self._names = None, {}
+            return
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                self._content, self._names = None, {}
+                return
+            chunks = []
+            remaining = self.MAX_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        except OSError:
+            self._content, self._names = None, {}
+            return
+        finally:
+            os.close(fd)
+        if data == self._content:
+            return
+        self._content = data
+        if len(data) > self.MAX_BYTES:
+            self._names = {}
+            return
+        try:
+            rows = csv.DictReader(io.StringIO(data.decode("utf-8-sig")))
+            if not rows.fieldnames or not {"bssid", "ap_name"}.issubset(rows.fieldnames):
+                self._names = {}
+                return
+            names = {}
+            for row in rows:
+                bssid = (row.get("bssid") or "").strip().lower()
+                name = (row.get("ap_name") or "").strip()
+                if self.BSSID_RE.fullmatch(bssid) and name and len(name) <= 128:
+                    names[bssid] = name
+            self._names = names
+        except (UnicodeDecodeError, csv.Error):
+            self._names = {}
+
+    def lookup(self, bssid: str):
+        self._refresh()
+        key = (bssid or "").strip().lower()
+        return self._names.get(key) if self.BSSID_RE.fullmatch(key) else None
+
+
+AP_INVENTORY = ApInventory()
+
+BSSID_TOKEN_RE = re.compile(
+    r"(?<![\w:])[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}(?![\w:])")
+
+
+def decorate_bssids(text: str, inventory=None) -> str:
+    """Add current friendly names to BSSIDs in display-only event text."""
+    inventory = inventory or AP_INVENTORY
+    text = text or ""
+
+    def replace(match):
+        bssid = match.group(0).lower()
+        name = inventory.lookup(bssid)
+        return "%s (%s)" % (name, bssid) if name else match.group(0)
+
+    return BSSID_TOKEN_RE.sub(replace, text)
+
+
 def connection_name(iface: str) -> str:
     """The name NetworkManager shows, which is what the user calls this network."""
     raw = _run(["nmcli", "-t", "-f", "GENERAL.CONNECTION", "dev", "show", iface])
@@ -518,6 +608,9 @@ def snapshot(anchor: str = "1.1.1.1") -> dict:
     if snap["kind"] == "wifi":
         snap.update(wifi_link(iface))
         snap["station"] = wifi_station(iface)
+        ap_name = AP_INVENTORY.lookup(snap.get("bssid", ""))
+        if ap_name:
+            snap["ap_name"] = ap_name
     key = (iface, snap["gateway"], snap.get("bssid", ""))
     snap["name"] = connection_name_cached(iface, key) or iface
     return snap
