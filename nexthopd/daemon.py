@@ -447,6 +447,7 @@ class LinkWatch:
         prev, self.prev = self.prev, dict(link)
         bssid = link.get("bssid", "")
         prev_bssid = prev.get("bssid", "") if prev else ""
+        ssid = link.get("ssid", "")
 
         if prev is None:
             # The daemon's first sighting of an existing link is not an
@@ -469,7 +470,15 @@ class LinkWatch:
                     cause, prev_bssid, bssid, gap_s=now - since)
                 self._instant(now, kind, text)
             else:
-                self._instant(now, "associate", "Associated with " + bssid)
+                # Both, when both are known. The network name is what the
+                # user recognises the connection by, and dropping it for the
+                # BSSID alone left a row reading "Associated with
+                # 02:00:00:…" for everyone without an AP inventory. The
+                # BSSID says which radio, and is the half a later rename
+                # decorates at display time (net.decorate_bssids); neither
+                # is a name that can go stale in the row itself.
+                self._instant(now, "associate", "Associated with "
+                              + ", ".join(x for x in (ssid, bssid) if x))
         elif bssid and prev_bssid and bssid != prev_bssid:
             cause = self._cause(prev_bssid, since, now)
             kind, lead = self._blame(cause, prev_bssid, bssid) if cause \

@@ -236,16 +236,37 @@ class LinkAttribution(unittest.TestCase):
         self.assertNotIn("Hallway AP", event["detail"])
         self.assertNotIn(" via ", event["detail"])
 
-    def test_gap_nobody_claimed_stores_bssid_not_network_name(self):
+    def test_gap_nobody_claimed_stores_the_network_and_the_bssid(self):
+        """Both facts, and neither of them a name that can go stale.
+
+        The AP name is never stored — a rename must reach old rows, which is
+        what display-time decoration is for — but the SSID is not that kind
+        of name: it is what the user calls the network, it is what this row
+        said before AP names existed, and without it the row reads
+        "Associated with 02:00:00:…" for everyone with no inventory file.
+        """
         watch = LinkWatch(self.store, StubEvents(None))
         t = time.time()
-        link = {"bssid": self.OLD, "ssid": "Private Network"}
+        link = {"bssid": self.OLD, "ssid": "Private Network",
+                "ap_name": "Hallway AP"}
         watch.sample(t, link)
         for i in range(LinkWatch.GAP_SAMPLES):
             watch.sample(t + 2 + i * 2, {})
         watch.sample(t + 14, link)
         event = self.store.events()[0]
-        self.assertEqual(event["detail"], "Associated with " + self.OLD)
+        self.assertEqual(event["detail"],
+                         "Associated with Private Network, " + self.OLD)
+        self.assertNotIn("Hallway AP", event["detail"])
+
+    def test_an_association_with_no_network_name_is_still_the_bssid(self):
+        watch = LinkWatch(self.store, StubEvents(None))
+        t = time.time()
+        watch.sample(t, {"bssid": self.OLD})
+        for i in range(LinkWatch.GAP_SAMPLES):
+            watch.sample(t + 2 + i * 2, {})
+        watch.sample(t + 14, {"bssid": self.OLD})
+        self.assertEqual(self.store.events()[0]["detail"],
+                         "Associated with " + self.OLD)
 
 
 class NlEventParsing(unittest.TestCase):
