@@ -94,7 +94,13 @@ BarWidget {
     ? live.index : null
   readonly property var lagNow: !stale && live && live.lag ? live.lag.now : null
 
-  readonly property color okColor: bar ? bar.foreground : Color.foreground
+  // barForeground, not foreground: the bar keeps `foreground` pinned to the
+  // theme's bar text for every transparency state, while `barForeground` is
+  // the colour the bar itself paints with — theme text on the default bar,
+  // the wallpaper-sampled contrast colour (omarchy-bar-text-color) once the
+  // bar goes transparent. Reading `foreground` here pinned this widget to
+  // the theme text over a light background, where nothing was visible.
+  readonly property color okColor: bar ? bar.barForeground : Color.foreground
   // State colours resolve through the theme palette: green/yellow/red exist
   // in every Omarchy theme's colors.toml, surfaced via Color singleton.
   readonly property color stateColor: {
