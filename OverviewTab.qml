@@ -27,6 +27,51 @@ Column {
     return false
   }
 
+  // The Speed pillar's hover text: what its number is made of and, when the
+  // pillar is dim, why the index is ignoring it. The caption under the pillar
+  // has room for about 21 characters ("114 Mbps · test: 365"); this is the
+  // sentence it abbreviates. Pure — takes live's speed_ctx and metered, reads
+  // nothing else — so test/overview_tip.js can run it.
+  function speedTip(ctx, metered) {
+    function hhmm(ts) {
+      var d = new Date(ts * 1000)
+      return (d.getHours() < 10 ? "0" : "") + d.getHours() + ":"
+        + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes()
+    }
+    if (!ctx) return ""
+    if (metered && metered.care)
+      return "Hourly checks are paused on " + metered.label + ",\n"
+        + "which is sharing its mobile data. Setup turns this off."
+    if (ctx.last_down === null || ctx.last_down === undefined)
+      return ctx.vpn ? "No speed check through this VPN yet."
+        : "No speed check on this network yet."
+    var lines = []
+    if (ctx.basis === "plan") {
+      lines.push("Scored against your plan: " + Math.round(ctx.plan_down)
+        + " Mbps down.")
+      lines.push("Latest check: " + Math.round(ctx.last_down) + " Mbps.")
+      return lines.join("\n")
+    }
+    var checks = ctx.checks_down || []
+    if (checks.length > 1)
+      lines.push("Median of the last " + checks.length + " checks here, newest first:\n"
+        + checks.map(function (v) { return Math.round(v) }).join(" · ") + " Mbps")
+    else
+      lines.push("One check on this network so far: "
+        + Math.round(ctx.last_down) + " Mbps")
+    if (ctx.vpn) lines.push("Through the VPN, so this measures the tunnel.")
+    if (ctx.scored === false) {
+      if (ctx.peak_down && ctx.peak_ts)
+        lines.push("Not counted in the score: a speed test at " + hhmm(ctx.peak_ts)
+          + "\nread " + Math.round(ctx.peak_down) + " Mbps, far above this."
+          + (ctx.peak_until ? "\nCounted again from " + hhmm(ctx.peak_until) + "." : ""))
+      else if (ctx.min_samples && (ctx.samples || 0) < ctx.min_samples)
+        lines.push("Not counted in the score until there are "
+          + ctx.min_samples + " checks here.")
+    }
+    return lines.join("\n")
+  }
+
   // Same shape the bar shows, so the two agree at a glance.
   function elapsed(since) {
     if (!since) return ""
@@ -211,6 +256,8 @@ Column {
     ScorePillar {
       width: parent.cell
       label: "SPEED"
+      tip: tab.speedTip(tab.live ? tab.live.speed_ctx : null,
+                        tab.live ? tab.live.metered : null)
       value: parent.scores.speed !== undefined ? parent.scores.speed : null
       // A figure the index is ignoring must not shout in red as though it
       // were the verdict — it is being reported, not counted.

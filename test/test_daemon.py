@@ -1835,6 +1835,30 @@ class SpeedTrustEndToEnd(unittest.TestCase):
         self.assertEqual(ctx["peak_down"], 251.4)
         self.assertFalse(ctx["scored"])
 
+    def test_the_context_says_what_the_tooltip_needs(self):
+        # The pillar's hover text names the checks behind the median and,
+        # when a test withdrew the figure, when that ends. Published by the
+        # daemon so the QML never copies PEAK_FRESH_S or MIN_SPEED_SAMPLES.
+        self.content(165.3, 600)
+        self.content(96.3, 1800)
+        self.content(113.8, 3600)
+        self.peak(365.3, 120)
+        _, ctx = self.d.speed_score(self.now, self.NET)
+        self.assertEqual(ctx["checks_down"], [165.3, 96.3, 113.8])  # newest first
+        self.assertEqual(ctx["last_down"], 113.8)                   # their median
+        peak_ts = int(self.now - 120)
+        self.assertEqual(ctx["peak_ts"], peak_ts)
+        self.assertEqual(ctx["peak_until"], peak_ts + PEAK_FRESH_S)
+        self.assertEqual(ctx["min_samples"], score.MIN_SPEED_SAMPLES)
+        self.assertFalse(ctx["scored"])
+
+    def test_no_fresh_peak_means_no_peak_times(self):
+        self.content(63.4, 900)
+        self.content(70.0, 300)
+        _, ctx = self.d.speed_score(self.now, self.NET)
+        self.assertIsNone(ctx["peak_ts"])
+        self.assertIsNone(ctx["peak_until"])
+
     def test_a_peak_from_another_network_says_nothing_about_this_one(self):
         self.content(63.4, 900)
         self.content(70.0, 300)

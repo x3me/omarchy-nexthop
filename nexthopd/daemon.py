@@ -2158,7 +2158,7 @@ class Daemon:
         # better evidence of what the line can do than a 12 MB sample. It
         # still does not become the score — a manual test must not flatter
         # it — but it can withdraw a figure it contradicts.
-        peak_down = None
+        peak_down = peak_ts = None
         for t in self.store.tests(limit=6, kind="peak"):
             if not t["ok"] or t["down_mbps"] is None:
                 continue
@@ -2168,14 +2168,24 @@ class Daemon:
                 continue
             if now - t["ts"] > PEAK_FRESH_S:
                 break
-            peak_down = t["down_mbps"]
+            peak_down, peak_ts = t["down_mbps"], t["ts"]
             break
 
         scored = score.speed_scored(down, len(recent), peak_down)
         return spd, {"basis": "auto", "baseline_down": baseline,
                      "last_down": down, "last_up": up,
                      "samples": len(recent), "scored": scored,
-                     "peak_down": peak_down, "vpn": bool(vpn)}
+                     "peak_down": peak_down, "vpn": bool(vpn),
+                     # What the Speed pillar's tooltip explains: the checks
+                     # the median came from (newest first) — "114" beside a
+                     # last check of 165 reads as a fault otherwise — and,
+                     # when a test withdrew the figure, when that ends. The
+                     # rule's numbers are published, not copied into QML.
+                     "checks_down": [t["down_mbps"] for t in recent],
+                     "min_samples": score.MIN_SPEED_SAMPLES,
+                     "peak_ts": peak_ts,
+                     "peak_until": (peak_ts + PEAK_FRESH_S
+                                    if peak_ts is not None else None)}
 
     def bufferbloat(self, window_s: float = 300.0) -> dict:
         """Lag while the link was idle vs while it was carrying traffic.

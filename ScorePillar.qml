@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
 
 // One of the three component scores: label, number, meter, one-line note.
 Column {
@@ -15,6 +16,16 @@ Column {
   // still reading 100 in the first minute of an outage, say. The value is
   // true, the green is not.
   property var toneOverride: null
+
+  // Why the number is what it is, on hover. The note line holds about 21
+  // characters; this is where the rest of the sentence goes. Empty = none.
+  property string tip: ""
+
+  HoverHandler { id: pillarHover }
+  PanelToolTip {
+    visible: pillarHover.hovered && root.tip.length > 0
+    text: root.tip
+  }
 
   readonly property color tone: {
     if (toneOverride) return toneOverride
