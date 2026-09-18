@@ -1134,18 +1134,9 @@ class _Stream:
         return [s for s in self.samples if s[0] >= cutoff]
 
 
-class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
-    """#6: a laptop's sleep recorded as a ten-hour outage, blamed on the ISP.
-
-    Five such rows, two from the reporter and three from this laptop, all
-    began within a second BEFORE the kernel's "PM: suspend entry" — too soon
-    for OUTAGE_AFTER_S to have been crossed while awake. So they were
-    declared after waking, from a run whose start the watch had carried
-    across the freeze. This replays that sequence through watch_outages.
-    """
-
-    T = 1_000_000.0          # the last pass before the lid closed
-    SLEEP = 36_000.0         # ten hours
+class _WatchReplay:
+    """A Daemon with just enough state for watch_outages, on streams and
+    a clock the test drives. Subclasses set T, the replay's origin."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -1160,6 +1151,7 @@ class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
         d.total = _Stream(self.clock)
         d._instrument_series = {"tcp": d.total}
         d.watch_local, d.watch_wan = LegWatch(), LegWatch()
+        d._wan_sampled_at, d._wan_unwatched = None, False
         notify = lambda *a, **k: self.notices.append(a)  # noqa: E731
         d.wan_events = WanEventArbiter(self.store, notify)
         d.local_events = LocalEventArbiter(self.store, notify)
@@ -1179,6 +1171,20 @@ class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
     def tick(self, now, awake_offset=0.0):
         self.clock[0] = now
         self.d.watch_outages(now, awake=now - self.T + awake_offset)
+
+
+class UnwatchedTimeIsNotAnOutage(_WatchReplay, unittest.TestCase):
+    """#6: a laptop's sleep recorded as a ten-hour outage, blamed on the ISP.
+
+    Five such rows, two from the reporter and three from this laptop, all
+    began within a second BEFORE the kernel's "PM: suspend entry" — too soon
+    for OUTAGE_AFTER_S to have been crossed while awake. So they were
+    declared after waking, from a run whose start the watch had carried
+    across the freeze. This replays that sequence through watch_outages.
+    """
+
+    T = 1_000_000.0          # the last pass before the lid closed
+    SLEEP = 36_000.0         # ten hours
 
     def awake_before_sleep(self, wan_down_for=0.0):
         """Healthy until the end, optionally with the internet silent for
@@ -1336,6 +1342,106 @@ class UnwatchedTimeIsNotAnOutage(unittest.TestCase):
         self.assertEqual(self.notices, [])
         self.assertIsNone(arb.event_id)
         self.assertEqual(self.store.events(10 ** 9, now=200)[0]["ended_ts"], 101)
+
+
+class WanRunAcrossALocalOutage(_WatchReplay, unittest.TestCase):
+    """Open item 33: while the router is unreachable the wan watch is not
+    sampled — the internet probes' losses say nothing about the ISP then —
+    but it kept its run and its open event across the gap. When the router
+    came back, a wan outage that began before it was dated back across it,
+    and outage_stats, which sums rows, charged the router's outage twice.
+    Same class as #6: a run carried across time the watch did not look at.
+    """
+
+    T = 2_000_000.0
+
+    def run_legs(self, until, local_ok, wan_ok, t0=None):
+        """Feed both streams every 0.5 s from t0 to `until`, ticking."""
+        t = self.T - 20.0 if t0 is None else t0
+        while t <= until:
+            self.d.local.add(t, 2.0 if local_ok(t) else None)
+            self.d.total.add(t, 8.0 if (local_ok(t) and wan_ok(t)) else None)
+            self.tick(t)
+            t += 0.5
+        return t
+
+    def rows(self, kind="outage"):
+        return sorted((e["leg"], e["ts"], e["ended_ts"])
+                      for e in self.store.events(10 ** 7, now=self.T + 1000)
+                      if e["kind"] == kind)
+
+    def charged(self):
+        down, _, disrupted = self.store.outage_stats(3600, now=self.T + 1000)
+        return round(down * 3600), round(disrupted * 3600)
+
+    def test_a_wan_outage_stops_where_the_router_went_dark(self):
+        # Internet gone from T; router gone T+10..T+40; both back at T+40.
+        T = self.T
+        self.run_legs(T + 60, local_ok=lambda t: not (T + 10 <= t < T + 40),
+                      wan_ok=lambda t: t < T or t >= T + 40)
+        rows = self.rows()
+        wan = [r for r in rows if r[0] == "wan"]
+        local = [r for r in rows if r[0] == "local"]
+        self.assertEqual(len(wan), 1)
+        self.assertEqual(len(local), 1)
+        # Seen from T to the last pass before the router went dark, and no
+        # further: nothing was known about the ISP after that.
+        self.assertEqual(wan[0][1], int(T))
+        self.assertLessEqual(wan[0][2], int(T + 10))
+        self.assertLessEqual(wan[0][2], local[0][1] + 1)
+        # One minute of trouble is charged once: 10 s wan + 30 s router.
+        down, _ = self.charged()
+        self.assertLessEqual(down, 41)
+
+    def test_a_wan_run_under_way_is_not_carried_into_the_router_outage(self):
+        # Internet starts failing at T+8, two seconds before the router
+        # goes dark at T+10 — too short to be an outage yet. The router is
+        # back at T+40 and the internet stays down until T+60.
+        T = self.T
+        self.run_legs(T + 80, local_ok=lambda t: not (T + 10 <= t < T + 40),
+                      wan_ok=lambda t: t < T + 8 or t >= T + 60)
+        wan = [r for r in self.rows() if r[0] == "wan"]
+        self.assertEqual(len(wan), 1)
+        # Dated from the moment the wan could be judged again — the router's
+        # return, with no settle, since the link never went away — and
+        # never from T+8.
+        self.assertEqual(wan[0][1], int(T + 40))
+        self.assertLessEqual(wan[0][2], int(T + 61))
+
+    def test_no_wan_disruption_is_made_of_the_router_outage(self):
+        # As above, but the internet is back with the router: the two
+        # seconds before the router went dark are not a 32 s wan blip.
+        T = self.T
+        self.run_legs(T + 60, local_ok=lambda t: not (T + 10 <= t < T + 40),
+                      wan_ok=lambda t: t < T + 8 or t >= T + 40)
+        self.assertEqual([r for r in self.rows("disruption") if r[0] == "wan"], [])
+        self.assertEqual([r for r in self.rows() if r[0] == "wan"], [])
+
+    def test_one_lost_gateway_ping_does_not_split_an_isp_outage(self):
+        # The wan watch also pauses for a tick whenever the newest gateway
+        # ping is lost. Only a CONFIRMED router outage may stop it, or every
+        # real ISP outage on a gateway that drops the odd ping is cut in two.
+        T = self.T
+        self.run_legs(T + 50, local_ok=lambda t: t != T + 15,
+                      wan_ok=lambda t: not (T <= t < T + 30))
+        wan = [r for r in self.rows() if r[0] == "wan"]
+        self.assertEqual(len(wan), 1)
+        self.assertEqual(wan[0][1], int(T))
+        self.assertEqual(wan[0][2], int(T + 30))
+
+    def test_a_clean_internet_blip_is_stored_and_charged(self):
+        # Router fine, internet silent for three seconds. The reply that
+        # ended the blip is one of the seated instruments' samples; counted
+        # as "something answered during it", it cancelled every wan blip —
+        # none was ever stored before 0.2.56.
+        T = self.T
+        self.run_legs(T + 30, local_ok=lambda t: True,
+                      wan_ok=lambda t: not (T + 10 <= t < T + 13))
+        blips = [r for r in self.rows("disruption") if r[0] == "wan"]
+        self.assertEqual(blips, [("wan", int(T + 10), int(T + 13))])
+        _, disrupted = self.charged()
+        self.assertGreater(disrupted, 0)
+
 
 
 class VpnOnThePath(unittest.TestCase):

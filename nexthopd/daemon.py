@@ -1346,6 +1346,10 @@ class Daemon:
         self.last_signal = None
         self.watch_local = LegWatch()
         self.watch_wan = LegWatch()
+        # The wan watch's own record of when it last looked, and whether it
+        # has stopped for a confirmed router outage — see watch_outages.
+        self._wan_sampled_at = None
+        self._wan_unwatched = False
         self.wan_events = WanEventArbiter(self.store, self.notify)
         self.local_events = LocalEventArbiter(self.store, self.notify)
         self._watched = None       # (wall, awake_clock) of the last watch pass
@@ -1836,7 +1840,30 @@ class Daemon:
         # applies to a confirmed local outage, not to a quiet gateway.
         gateway_quiet = (self.watch_local.down_since is not None
                          and not self.local_events.real_outage)
+        # Once the router is CONFIRMED unreachable, the wan watch has stopped
+        # looking, and it must stop the way any watch that loses sight does
+        # (see lost_sight): close what it had open where it last sampled, and
+        # forget the run. Until 0.2.56 it kept both across the router's
+        # outage, so a wan outage under way was dated across it — two rows
+        # over the same seconds, which outage_stats sums — and a wan run two
+        # seconds old when the router went dark became, once it came back,
+        # an outage or a blip spanning the whole thing (open item 33).
+        # Confirmed only: a single lost gateway ping also pauses the wan
+        # watch for a tick, and resetting on that would split every real
+        # ISP outage on a gateway that drops the odd ping.
+        router_dark = (self.watch_local.down_since is not None
+                       and self.local_events.real_outage)
+        if router_dark and not self._wan_unwatched:
+            self._wan_unwatched = True
+            self.wan_events.lost_sight(self._wan_sampled_at or now)
+            self.watch_wan.lost_sight(now)
         if total is not None and (local_ok is not False or gateway_quiet):
+            if self._wan_unwatched:
+                # Judged afresh from here: nothing before this moment belongs
+                # to a wan run, and no settle — the link never went away.
+                self._wan_unwatched = False
+                self.watch_wan.lost_sight(now, settle_s=0.0)
+            self._wan_sampled_at = now
             move = self.watch_wan.sample(total, now)
             if move == "down":
                 # Did another instrument keep answering while the seated
@@ -1909,13 +1936,20 @@ class Daemon:
         return False
 
     def _any_instrument_replied_between(self, a: float, b: float) -> bool:
-        """Did some instrument hear the internet during [a, b]? Judged on the
+        """Did some instrument hear the internet during [a, b)? Judged on the
         interval itself, so a reply from just before a run of silence cannot
-        vouch for it — which a trailing window longer than the run would."""
+        vouch for it — which a trailing window longer than the run would.
+
+        Half-open, because a run's end IS a reply. A wan run is read off the
+        seated instruments, so the reply that ended it is one of the samples
+        searched here; with the end included, every wan blip vouched for
+        itself and was dropped as "something kept answering". None was ever
+        stored — 0 wan disruptions in this machine's history against 98 wan
+        outages — so wan blips were never charged to Reliability."""
         span = max(0.0, time.time() - a) + 1.0
         for series in self._instrument_series.values():
             for smp in series.since(span):
-                if smp[1] is not None and a <= smp[0] <= b:
+                if smp[1] is not None and a <= smp[0] < b:
                     return True
         return False
 
