@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "barstate.js" as BarState
 
 // The Nexthop panel: header verdict, seven tabs, one alive at a time.
 //
@@ -363,13 +364,9 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: {
-                var s = root.live ? root.live.state : ""
-                if (s === "captive") return "󰦝"   // nf-md-shield_lock: a gate, not a fault
-                if (s === "dns-failing") return "󰇖"   // nf-md-dns
-                if (s === "local-down" || s === "wan-down" || s === "tunnel-down") return "󱚵"
-                return "󰓅"
-              }
+              // The bar entry's glyph, from the same function (barstate.js).
+              text: BarState.stateGlyph(root.live ? root.live.state : "",
+                root.live && !root.stale ? root.live.index : null)
               color: root.bandColor(root.live && !root.stale ? root.live.index : null)
               font.family: root.fontFamily
               font.pixelSize: Style.fontPx(1.6)

@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "barstate.js" as BarState
 
 // Nexthop's bar entry: the one always-visible surface. Colour carries the
 // state — the number is detail, the colour is the verdict. Clicking opens
@@ -102,12 +103,21 @@ BarWidget {
   // the theme text over a light background, where nothing was visible.
   readonly property color okColor: bar ? bar.barForeground : Color.foreground
   // Warn is Tokyo Night's yellow, hardcoded: the shell's Color singleton has
-  // no yellow. On a transparent bar the shell has already answered "what
-  // reads on this wallpaper" once and exposes the answer as barForeground —
-  // the colour the bar paints its own surface with — so the warn states read
-  // it, like the OK state. On an opaque bar the amber sits on the theme bar
-  // background, where it reads.
-  readonly property color warnColor: bar && bar.transparent ? bar.barForeground : "#e0af68"
+  // no yellow, and a theme's own `yellow` is not a warning colour to borrow
+  // (a monochrome theme maps it to a blue). On a transparent bar the shell has
+  // already answered "what reads on this wallpaper" once and exposes the
+  // answer as barForeground — the colour it paints the bar's text and icons
+  // with — so the warn states read it, like the OK state.
+  readonly property color amber: "#e0af68"
+  readonly property color warnColor: {
+    if (bar && bar.transparent) return bar.barForeground
+    // On an opaque bar the background is known exactly: the theme's own. The
+    // amber was picked for a dark bar and reads about 2:1 on a light theme's
+    // (#12), so there the warn states take the bar's text colour too, and the
+    // band's glyph carries the state.
+    if (bar && !BarState.readable(amber, bar.background)) return bar.barForeground
+    return amber
+  }
   // Urgent is the bar's own alert colour — the same bar.urgent that
   // WidgetButton.activeColor reads, tuned through bar.active. The shell does
   // not adapt it on a transparent bar either: the down states carry their
@@ -127,20 +137,9 @@ BarWidget {
   }
 
   // The index bands carry their own glyph, shown in every display mode, so
-  // the band reads without colour — Icon only included. Fault states keep
-  // their own glyphs; below 50 only applies when no leg is down, since a
-  // down leg has already returned its glyph above.
-  readonly property string glyph: {
-    if (netState === "captive") return "󰦝"     // nf-md-shield_lock: a gate
-    if (netState === "dns-failing") return "󰇖" // nf-md-dns
-    if (netState === "local-down") return "󱚵"   // nf-md-wifi_strength_alert
-    if (netState === "wan-down" || netState === "tunnel-down")
-      return "󰲛"                                 // nf-md-web_off / broken link
-    if (netState === "degraded") return "󰾾"     // nf-md-speedometer_medium
-    if (index === null || index >= 80) return "󰓅" // nf-md-speedometer
-    if (index >= 50) return "󰾾"                  // nf-md-speedometer_medium
-    return "󰾿"                                   // nf-md-speedometer_slow
-  }
+  // the band reads without colour — Icon only included. Shared with the
+  // panel header through barstate.js, so the two cannot drift apart again.
+  readonly property string glyph: BarState.stateGlyph(netState, index)
 
   readonly property string barText: {
     if (netState === "no-daemon") return glyph
