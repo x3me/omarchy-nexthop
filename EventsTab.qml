@@ -230,6 +230,9 @@ Column {
   }
 
   function duration(e) {
+    // Closed by the next daemon because the one watching it stopped first:
+    // the stored end is a placeholder second, not a measured one.
+    if (e.end_unknown) return "unknown"
     if (e.ended_ts === e.ts) return "\u2014"
     if (!e.ended_ts) return "ongoing"
     var s = e.ended_ts - e.ts

@@ -335,11 +335,17 @@ def report_text(store, live: dict, seconds: float, window: str) -> str:
             lines.append("measured through a VPN:")
             for e in sorted(spans, key=lambda e: e["ts"]):
                 start = time.strftime("%a %H:%M", time.localtime(e["ts"]))
-                end = (time.strftime("%H:%M", time.localtime(e["ended_ts"]))
-                       if e["ended_ts"] else "now")
+                if e.get("end_unknown"):
+                    # Closed by the next daemon at a placeholder second;
+                    # printing it as an end would shrink the span to nothing.
+                    span = f"{start} onwards (end not seen)"
+                else:
+                    end = (time.strftime("%H:%M", time.localtime(e["ended_ts"]))
+                           if e["ended_ts"] else "now")
+                    span = f"{start}–{end}"
                 m = VPN_DETAIL_IFACE.search(e["detail"] or "")
                 iface = m.group(1) if m else "VPN"
-                lines.append(f"  {start}–{end} measured through a VPN ({iface}): "
+                lines.append(f"  {span} measured through a VPN ({iface}): "
                              "figures in this span describe the tunnel, not "
                              "the ISP line.")
             lines.append("")
@@ -347,8 +353,12 @@ def report_text(store, live: dict, seconds: float, window: str) -> str:
             lines.append("events:")
             for e in events:
                 start = time.strftime("%a %H:%M", time.localtime(e["ts"]))
-                dur = (f"{e['ended_ts'] - e['ts']}s" if e["ended_ts"]
-                       else "ongoing")
+                if e.get("end_unknown"):
+                    dur = "duration unknown (monitoring stopped first)"
+                elif e["ended_ts"]:
+                    dur = f"{e['ended_ts'] - e['ts']}s"
+                else:
+                    dur = "ongoing"
                 detail = net.decorate_bssids(e.get("detail", ""))
                 lines.append(f"  {start}  {e['kind']} on {e['leg']} leg, {dur}"
                              f" — {detail}")

@@ -22,6 +22,7 @@ class EventFolding(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          f"{result.stdout}\n{result.stderr}")
         self.assertIn("named event folding ok", result.stdout)
+        self.assertIn("event durations ok", result.stdout)
 
 
 if __name__ == "__main__":

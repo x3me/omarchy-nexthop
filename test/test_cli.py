@@ -211,5 +211,34 @@ class ReportThroughAVpn(unittest.TestCase):
             "Roamed to Hallway AP (02:00:00:00:00:01)", text)
 
 
+class ReportUnseenEnds(unittest.TestCase):
+    """An event closed by the next daemon has a placeholder end. The report
+    is handed to an ISP, so it must not print that second as a length (#9)."""
+
+    def test_an_orphan_is_reported_without_a_length(self):
+        from nexthopd.cli import report_text
+        from nexthopd.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(Path(d) / "t.db")
+            try:
+                now = int(time.time())
+                store.open_event(now - 600, "outage", "critical", "wan",
+                                 "router answers, nothing past it does")
+                store.open_event(now - 900, "vpn", "info", "tunnel",
+                                 "Measured through a VPN (wg0)")
+                seen = store.open_event(now - 300, "disruption", "warn",
+                                        "local", "brief interruption")
+                store.close_event(seen, now - 297)
+                store.close_orphans(now)
+                text = report_text(store, {}, 3600, "1h")
+            finally:
+                store.close()
+        outage = next(l for l in text.splitlines() if "outage on wan" in l)
+        self.assertIn("duration unknown (monitoring stopped first)", outage)
+        self.assertNotIn(", 1s", outage)
+        self.assertIn("onwards (end not seen) measured through a VPN (wg0)", text)
+        self.assertIn("disruption on local leg, 3s", text)   # seen ends keep theirs
+
+
 if __name__ == "__main__":
     unittest.main()

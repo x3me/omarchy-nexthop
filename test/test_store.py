@@ -474,8 +474,37 @@ class EventWindowSemantics(unittest.TestCase):
         self.assertEqual(frac, 0.0)
         row = self.store.events(10 ** 6, now=self.now)[0]
         self.assertEqual(row["ended_ts"], row["ts"] + 1)
+        # That second is a placeholder, and the row says so (#9).
+        self.assertEqual(row["end_unknown"], 1)
         # Idempotent, and it never touches a properly closed row.
         self.assertEqual(self.store.close_orphans(self.now), 0)
+
+    def test_an_end_that_was_seen_is_not_marked_unknown(self):
+        eid = self.store.open_event(self.now - 60, "outage", "critical", "wan",
+                                    "seen")
+        self.store.close_event(eid, self.now - 50)
+        self.store.close_orphans(self.now)
+        row = self.store.events(10 ** 6, now=self.now)[0]
+        self.assertEqual(row["ended_ts"] - row["ts"], 10)
+        self.assertIsNone(row["end_unknown"])
+
+    def test_an_older_events_table_gains_the_marker(self):
+        # Additive, never a rewrite: rows closed by an older daemon stay
+        # as they were, because which of them were orphans is not known.
+        import sqlite3 as sq
+        path = Path(self.dir.name) / "old-events.db"
+        st = Store(path)
+        st.close_event(st.open_event(100, "outage", "critical", "wan", "old"), 101)
+        st.close()
+        db = sq.connect(path)
+        db.execute("ALTER TABLE events DROP COLUMN end_unknown")
+        db.commit()
+        db.close()
+        st = Store(path)
+        self.addCleanup(st.close)
+        cols = [r[1] for r in st.db.execute("PRAGMA table_info(events)")]
+        self.assertIn("end_unknown", cols)
+        self.assertIsNone(st.events(10 ** 9, now=200)[0]["end_unknown"])
 
     def test_prune_removes_events_past_the_hourly_horizon(self):
         eid = self.store.open_event(self.now - 500 * 86_400, "info", "info",

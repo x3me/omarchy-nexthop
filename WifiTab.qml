@@ -14,6 +14,19 @@ Column {
 
   Component.onCompleted: panel.requestEvents("7d")
 
+  // How long a link event lasted, as the row's right-hand column says it.
+  // Named so test/events_fold.js can run it: an inline binding is reached by
+  // nothing but the eye.
+  function linkDuration(e) {
+    // Closed by the next daemon because the one watching it stopped first:
+    // the stored end is a placeholder second, not a measured one (#9).
+    if (e.end_unknown) return "unknown"
+    if (!e.ended_ts || e.ended_ts === e.ts) return ""
+    var s = e.ended_ts - e.ts
+    return s < 60 ? "for " + s + " s"
+      : "for " + Math.round(s / 60) + " m"
+  }
+
   readonly property var linkEvents: {
     var all = panel.eventsData && panel.eventsData.events
       ? panel.eventsData.events : []
@@ -604,13 +617,7 @@ Column {
             textFormat: Text.PlainText
             width: Style.space(58)
             horizontalAlignment: Text.AlignRight
-            text: {
-              var e = linkRow.modelData
-              if (!e.ended_ts || e.ended_ts === e.ts) return ""
-              var s = e.ended_ts - e.ts
-              return s < 60 ? "for " + s + " s"
-                : "for " + Math.round(s / 60) + " m"
-            }
+            text: tab.linkDuration(linkRow.modelData)
             color: tab.panel.dim
             font.family: tab.panel.fontFamily
             font.pixelSize: Style.font.caption

@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS tests (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL, ended_ts INTEGER, kind TEXT, severity TEXT,
-  leg TEXT, detail TEXT
+  leg TEXT, detail TEXT, end_unknown INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS tests_kind_ts ON tests(kind, ts);
@@ -169,11 +169,12 @@ class Store:
                               ("minute", "drain_settled"),
                               ("minute", "drain_src"),
                               ("minute", "vpn"), ("tests", "vpn"),
-                              ("hour", "vpn")):
+                              ("hour", "vpn"), ("events", "end_unknown")):
+            kind = ("TEXT" if column in ("network", "probes", "drain_src", "vpn")
+                    else "INTEGER" if column == "end_unknown" else "REAL")
             try:
                 self.db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {column} "
-                    f"{'TEXT' if column in ('network', 'probes', 'drain_src', 'vpn') else 'REAL'}")
+                    f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             except sqlite3.OperationalError:
                 pass  # column already there
 
@@ -306,11 +307,20 @@ class Store:
         than at a guessed later time: undercharging by the lost tail is
         the safe direction, and inventing a duration is not.
 
+        That one second is a storage convenience, not a measurement, so the
+        row says so: `end_unknown` is set and every reader shows the length
+        as unknown instead of printing "1s" as though someone timed it.
+        A column rather than a note in `detail`, because the Events tab
+        describes an outage with a fixed sentence and never shows its
+        detail — a note would have been invisible on exactly the rows that
+        need it (#9).
+
         Called once, after the lock is held — a second daemon that loses
         the flock must not close the running one's events on its way out.
         """
         cur = self.db.execute(
-            "UPDATE events SET ended_ts = ts + 1 WHERE ended_ts IS NULL")
+            "UPDATE events SET ended_ts = ts + 1, end_unknown = 1 "
+            "WHERE ended_ts IS NULL")
         self.db.commit()
         return cur.rowcount
 
