@@ -281,6 +281,17 @@ class OutagePresentation(unittest.TestCase):
         self.assertEqual(score.lag_band(self.DEAD),
                          {"best": None, "typical": None, "worst": None})
 
+    def test_measured_lag_refuses_the_anchor_scoring_keeps(self):
+        # One refusal for every caller that shows, stores or compares a lag.
+        self.assertIsNone(score.measured_lag(self.DEAD))
+        self.assertIsNone(score.measured_lag({"count": 0}))
+        self.assertIsNone(score.measured_lag(None))
+        self.assertEqual(score.lag_ms(self.DEAD), 1500.0)      # untouched
+        lossy = {"count": 500, "p50": 5.0, "p75": 6.0, "p95": 20.0,
+                 "max": 30.0, "loss": 0.4, "jitter": 1.0}
+        # Anything that did reply is the scored figure, unchanged.
+        self.assertEqual(score.measured_lag(lossy), score.lag_ms(lossy))
+
     def test_partial_loss_still_reports_a_band(self):
         lossy = {"count": 500, "p50": 5.0, "p75": 6.0, "p95": 20.0,
                  "max": 30.0, "loss": 0.4, "jitter": 1.0}

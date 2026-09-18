@@ -2068,7 +2068,7 @@ class Daemon:
 
         def run():
             try:
-                idle = score.lag_ms(self.total.stats(60))
+                idle = score.measured_lag(self.total.stats(60))
                 started = time.time()
                 r = speedtest.peak_test(self.config["peakEngine"])
                 loaded_st = merged_stats([[s for s in lst if s[0] >= started]
@@ -2198,8 +2198,11 @@ class Daemon:
         idle_st = merged_stats([sp[0] for sp in splits])
         loaded_st = merged_stats([sp[1] for sp in splits])
         n_idle, n_loaded = idle_st["count"], loaded_st["count"]
-        idle_lag = score.lag_ms(idle_st) if n_idle else None
-        loaded_lag = score.lag_ms(loaded_st) if n_loaded else None
+        # measured_lag, not lag_ms: a half in which every probe was lost has
+        # no latency, and lag_ms's 1500 anchor published as `loaded` became a
+        # 187x "inflation" and, through pressure, a congested verdict.
+        idle_lag = score.measured_lag(idle_st)
+        loaded_lag = score.measured_lag(loaded_st)
         # A handful of samples on either side produces noise, not a ratio —
         # observed live, a five-sample loaded window read as 0.59, i.e. the
         # link answering *faster* under load. Both sides need enough

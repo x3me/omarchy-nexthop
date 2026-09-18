@@ -906,6 +906,62 @@ class DisruptionProducer(unittest.TestCase):
         self.assertGreater(disrupted, 0.0)
 
 
+class BufferbloatWithNoReplies(unittest.TestCase):
+    """The loaded or idle half of the split can be entirely lost. `lag_ms`
+    answers 1500 there so Responsiveness can land on zero; published as a
+    latency it became `loaded: 1500.0`, `inflation: 187.5` and, through
+    pressure, a congested line with ~1490 ms of queue (open item 20).
+
+    Calls the real Daemon.bufferbloat — the ratio tests below re-derive the
+    arithmetic and so could not see what the method fed into it."""
+
+    @staticmethod
+    def bloat(lists):
+        from nexthopd.daemon import Daemon
+
+        class Total:
+            def each(self, seconds=None):
+                return [list(lst) for lst in lists]
+
+        class Stub:
+            _drain = staticmethod(Daemon._drain)
+            total = Total()
+
+            def _active_keys(self):
+                return []
+
+        return Daemon.bufferbloat(Stub(), 300.0)
+
+    @staticmethod
+    def stream(idle_rtt, loaded_rtt, n=12):
+        """n idle samples then n loaded ones, one instrument, 1 s apart."""
+        t = 1_000_000.0
+        return ([(t + i, idle_rtt, False) for i in range(n)]
+                + [(t + n + i, loaded_rtt, True) for i in range(n)])
+
+    def test_a_loaded_half_with_no_replies_has_no_latency(self):
+        b = self.bloat([self.stream(8.0, None)])
+        self.assertEqual(b["idle"], 8.0)
+        self.assertEqual(b["loaded_samples"], 12)     # the probes did go out
+        self.assertIsNone(b["loaded"])
+        self.assertIsNone(b["inflation"])
+        # And nothing downstream can manufacture a queue out of it.
+        p = score.pressure(socket_queue_ms=None, loaded_ms=b["loaded"],
+                           idle_ms=b["idle"])
+        self.assertIsNone(p["state"])
+
+    def test_an_idle_half_with_no_replies_has_no_latency(self):
+        b = self.bloat([self.stream(None, 40.0)])
+        self.assertIsNone(b["idle"])
+        self.assertEqual(b["loaded"], 40.0)
+        self.assertIsNone(b["inflation"])
+
+    def test_a_real_split_is_untouched(self):
+        b = self.bloat([self.stream(8.0, 40.0)])
+        self.assertEqual((b["idle"], b["loaded"], b["inflation"]),
+                         (8.0, 40.0, 5.0))
+
+
 class InflationPlausibility(unittest.TestCase):
     """Queueing can only add delay, so a ratio below 1 is not a reading."""
 

@@ -93,7 +93,11 @@ BarWidget {
   readonly property string netState: !live || stale ? "no-daemon" : (live.state || "online")
   readonly property var index: !stale && live && live.index !== null && live.index !== undefined
     ? live.index : null
-  readonly property var lagNow: !stale && live && live.lag ? live.lag.now : null
+  // `typical`, not `now`: the same p75 fold, but withheld when the whole
+  // window was lost, where `now` keeps the 1500 anchor Responsiveness scores
+  // against. The Overview reads it for the same reason.
+  readonly property var lagNow: !stale && live && live.lag
+    && live.lag.typical !== undefined ? live.lag.typical : null
 
   // barForeground, not foreground: the bar keeps `foreground` pinned to the
   // theme's bar text for every transparency state, while `barForeground` is

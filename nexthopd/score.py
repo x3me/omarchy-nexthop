@@ -101,6 +101,26 @@ def lag_ms(stats: dict):
     return round(base + 1.5 * jitter + loss * loss_cost_ms(base), 1)
 
 
+def measured_lag(stats: dict):
+    """`lag_ms` for anything that shows, stores or compares it — never the
+    scoring anchor.
+
+    When every sample in the window was lost, `lag_ms` answers 1500 so that
+    Responsiveness lands on zero, which is its job. But 1500 is an anchor,
+    not a round trip, and every place that treated it as one published a
+    measurement nobody took: the panel printed "best 1500 · typical 1500 ms
+    · worst 1500" for a link that was not replying at all; the loaded half
+    of `bufferbloat` published `loaded: 1500.0` and `inflation: 187.5`; and
+    `pressure` subtracted idle from it and called the line congested with
+    ~1490 ms of queue. With no reply there is no latency to report, so this
+    reports none. One function, so the refusal cannot be forgotten by the
+    next caller the way it was by three.
+    """
+    if not stats or stats.get("p75") is None:
+        return None
+    return lag_ms(stats)
+
+
 def lag_band(stats: dict) -> dict:
     """Lag at three latency percentiles: best, typical, worst.
 
@@ -114,19 +134,14 @@ def lag_band(stats: dict) -> dict:
     Sharing the fold makes the ordering hold by construction and makes loss
     move all three together, which is what a reader assumes a range means.
     """
-    if not stats or stats.get("count", 0) == 0:
-        return {"best": None, "typical": None, "worst": None}
-    if stats.get("p75") is None:
-        # Everything in the window was lost. `lag_ms` answers 1500 here so
-        # Responsiveness lands on zero, which is its job — but 1500 is an
-        # anchor, not a measurement, and the panel used to print it three
-        # times as though the link were replying slowly. There is no latency
-        # to display, so display none.
+    if not stats:
         return {"best": None, "typical": None, "worst": None}
     out = {}
     prev = None
     for name, key in (("best", "p50"), ("typical", "p75"), ("worst", "p95")):
-        v = lag_ms(dict(stats, p75=stats.get(key)))
+        # A fully lost window has no percentiles, so all three are withheld
+        # rather than printed as the scoring anchor — see measured_lag.
+        v = measured_lag(dict(stats, p75=stats.get(key)))
         # p95 can equal p75 on a short window, and a percentile can be
         # missing; neither may let the range read backwards.
         if v is not None and prev is not None:
