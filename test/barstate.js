@@ -21,7 +21,7 @@ function rgb(hex) {
 }
 
 // Every state names itself; a fault glyph wins over the index band.
-const SPEEDO = "\u{F04C5}", MEDIUM = "\u{F0FBE}", SLOW = "\u{F0FBF}";
+const SPEEDO = "\u{F04C5}", MEDIUM = "\u{F0F85}", SLOW = "\u{F0F86}";
 equal(B.stateGlyph("online", 100), SPEEDO, "good band");
 equal(B.stateGlyph("online", 80), SPEEDO, "80 is good");
 equal(B.stateGlyph("online", 79), MEDIUM, "79 is fair");

@@ -14,14 +14,14 @@
 function stateGlyph(state, index) {
     if (state === "captive") return "󰦝"          // nf-md-shield_lock: a gate
     if (state === "dns-failing") return "󰇖"      // nf-md-dns
-    if (state === "local-down") return "󱚵"       // nf-md-wifi_strength_alert
+    if (state === "local-down") return "󱚵"       // nf-md-wifi_alert
     if (state === "wan-down" || state === "tunnel-down")
-        return "󰲛"                               // nf-md-web_off
-    if (state === "degraded") return "󰾾"         // nf-md-speedometer_medium
+        return "󰲛"                               // nf-md-network_off
+    if (state === "degraded") return "󰾅"         // nf-md-speedometer_medium
     if (index === null || index === undefined || index >= 80)
         return "󰓅"                               // nf-md-speedometer
-    if (index >= 50) return "󰾾"                  // nf-md-speedometer_medium
-    return "󰾿"                                   // nf-md-speedometer_slow
+    if (index >= 50) return "󰾅"                  // nf-md-speedometer_medium
+    return "󰾆"                                   // nf-md-speedometer_slow
 }
 
 /** WCAG relative luminance of a colour with r, g, b in 0..1 (a QML color). */
