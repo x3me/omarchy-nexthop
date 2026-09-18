@@ -61,22 +61,6 @@ launch.
 omarchy plugin add https://github.com/x3me/omarchy-nexthop.git --enable
 ```
 
-Updating is Omarchy's own `omarchy plugin update`, which shows you
-what changed before applying it. Nexthop checks once a day whether a newer
-version is published and marks the panel header if so; it never installs
-anything itself.
-
-If the update refuses to apply, you probably edited a file in the plugin
-yourself — most likely `Panel.qml`, to work around the Omarchy 4.0.3 bug
-that left the panel stuck open. That fix has been in Nexthop since 0.2.27,
-so the local edit can go:
-
-```bash
-git -C ~/.config/omarchy/plugins/io.github.x3me.nexthop status --short   # see what you changed
-git -C ~/.config/omarchy/plugins/io.github.x3me.nexthop checkout -- Panel.qml
-omarchy plugin update io.github.x3me.nexthop
-```
-
 Requirements: `python3`, `ping`, `curl`, `ss`, `ip` and `git` (all present on
 a stock Omarchy; `git` only serves the daily update check), `iw` for Wi-Fi
 detail, `wl-copy` for Copy report, optionally `nmcli` for the metered flag
@@ -93,6 +77,40 @@ and `speedtest` (Ookla) for peak tests.
 The event log, naming who did what — including the router that kicks:
 
 ![Events tab](docs/events.png)
+
+## Updating
+
+Nexthop never updates itself, and Omarchy does not tell you when a plugin
+has a newer version, so an install stays exactly where it was until you run:
+
+```bash
+omarchy plugin update io.github.x3me.nexthop
+```
+
+It shows you what changed before applying it. Worth running if you
+installed before 10 September 2026: the panel that would not close on
+Omarchy 4.0.3 was fixed in 0.2.27, and a Reliability score stuck at 0 after
+the daemon stopped mid-outage in 0.2.21. Issues have been filed here for
+both, from versions that predated the fix. To see yours:
+
+```bash
+grep '"version"' ~/.config/omarchy/plugins/io.github.x3me.nexthop/manifest.json
+```
+
+From 0.2.3 on, Nexthop also checks once a day whether a newer version is
+published and puts a small mark beside the verdict in the panel header; it
+never installs anything itself.
+
+If the update refuses to apply, you probably edited a file in the plugin
+yourself — most likely `Panel.qml`, to work around the Omarchy 4.0.3 bug
+that left the panel stuck open. That fix has been in Nexthop since 0.2.27,
+so the local edit can go:
+
+```bash
+git -C ~/.config/omarchy/plugins/io.github.x3me.nexthop status --short   # see what you changed
+git -C ~/.config/omarchy/plugins/io.github.x3me.nexthop checkout -- Panel.qml
+omarchy plugin update io.github.x3me.nexthop
+```
 
 ## Using it
 

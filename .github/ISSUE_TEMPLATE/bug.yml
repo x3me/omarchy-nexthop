@@ -1,0 +1,38 @@
+name: Something looks wrong
+description: A figure, a verdict or the panel itself behaving unexpectedly
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please update first.** Nexthop never updates itself and Omarchy does not say when a plugin has a new version, so installs stay where they were. Some reports here turned out to be fixed already, in a version the reporter did not have yet:
+
+        ```bash
+        omarchy plugin update io.github.x3me.nexthop
+        ```
+  - type: input
+    id: version
+    attributes:
+      label: Nexthop version
+      description: "Run: `grep '\"version\"' ~/.config/omarchy/plugins/io.github.x3me.nexthop/manifest.json`"
+      placeholder: "0.2.55"
+    validations:
+      required: true
+  - type: checkboxes
+    id: updated
+    attributes:
+      label: Updated?
+      options:
+        - label: I ran `omarchy plugin update io.github.x3me.nexthop` and it still happens
+  - type: input
+    id: omarchy
+    attributes:
+      label: Omarchy version
+      description: "Run: `pacman -Q omarchy`"
+      placeholder: "omarchy 4.0.4-1"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: A screenshot of the panel helps. Please leave out anything you would not post publicly — your public address, and Wi-Fi BSSIDs (MAC addresses), which can be located through public databases.
+    validations:
+      required: true
