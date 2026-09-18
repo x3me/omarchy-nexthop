@@ -1151,7 +1151,7 @@ class _WatchReplay:
         d.total = _Stream(self.clock)
         d._instrument_series = {"tcp": d.total}
         d.watch_local, d.watch_wan = LegWatch(), LegWatch()
-        d._wan_sampled_at, d._wan_unwatched = None, False
+        d._wan_sampled_at, d._wan_unwatched, d._wan_resumed_at = None, False, None
         notify = lambda *a, **k: self.notices.append(a)  # noqa: E731
         d.wan_events = WanEventArbiter(self.store, notify)
         d.local_events = LocalEventArbiter(self.store, notify)
@@ -1416,6 +1416,61 @@ class WanRunAcrossALocalOutage(_WatchReplay, unittest.TestCase):
                       wan_ok=lambda t: t < T + 8 or t >= T + 40)
         self.assertEqual([r for r in self.rows("disruption") if r[0] == "wan"], [])
         self.assertEqual([r for r in self.rows() if r[0] == "wan"], [])
+
+    def wan_rows(self):
+        return [(e["ts"], e["ended_ts"], e["detail"])
+                for e in sorted(self.store.events(10 ** 7, now=self.T + 1000),
+                                key=lambda e: e["ts"])
+                if e["kind"] == "outage" and e["leg"] == "wan"]
+
+    def test_a_redial_after_the_router_returns_is_not_blamed_on_the_isp(self):
+        # Router out T+10..T+40, then its WAN takes 15 s to come back. The
+        # user had no internet all along, so it is charged from the router's
+        # return — but in words that do not name the ISP (matches HopSense).
+        T = self.T
+        self.run_legs(T + 70, local_ok=lambda t: not (T + 10 <= t < T + 40),
+                      wan_ok=lambda t: t < T + 10 or t >= T + 55)
+        wan = self.wan_rows()
+        self.assertEqual(wan, [(int(T + 40), int(T + 55),
+                                WanEventArbiter.NOT_BACK_DETAIL)])
+        alarms = [n[0] for n in self.notices]
+        self.assertIn("No internet yet", alarms)
+        self.assertNotIn("No internet", alarms)      # the ISP-blaming one
+
+    def test_a_short_redial_is_a_blip(self):
+        T = self.T
+        self.run_legs(T + 60, local_ok=lambda t: not (T + 10 <= t < T + 40),
+                      wan_ok=lambda t: t < T + 10 or t >= T + 43)
+        self.assertEqual(self.wan_rows(), [])
+        blips = [r for r in self.rows("disruption") if r[0] == "wan"]
+        self.assertEqual(blips, [("wan", int(T + 40), int(T + 43))])
+
+    def test_an_outage_after_the_internet_came_back_keeps_its_words(self):
+        # Something past the router answered after it returned, so a later
+        # outage is an ordinary one.
+        T = self.T
+        self.run_legs(T + 90, local_ok=lambda t: not (T + 10 <= t < T + 40),
+                      wan_ok=lambda t: not (T + 10 <= t < T + 40
+                                            or T + 60 <= t < T + 75))
+        wan = self.wan_rows()
+        self.assertEqual(len(wan), 1)
+        self.assertEqual(wan[0][0], int(T + 60))
+        self.assertEqual(wan[0][2], WanEventArbiter.OUTAGE_DETAIL)
+
+    def test_a_tunnel_keeps_its_own_words_after_the_router_returns(self):
+        # Through a VPN the silence is the tunnel's, whichever moment it began.
+        arb = WanEventArbiter(self.store, lambda *a, **k: None)
+        arb.tunnel = True
+        self.assertEqual(arb.words(after_router=True)[:2],
+                         (arb.TUNNEL_LEG, arb.TUNNEL_OUTAGE_DETAIL))
+        arb.tunnel = False
+        self.assertEqual(arb.words(after_router=True)[1], arb.NOT_BACK_DETAIL)
+
+    def test_the_events_tab_matches_the_stored_words(self):
+        # describe() keys on the detail string; a rename on either side
+        # would silently fall back to "the fault was upstream".
+        qml = (REPO / "EventsTab.qml").read_text(encoding="utf-8")
+        self.assertIn('"%s"' % WanEventArbiter.NOT_BACK_DETAIL, qml)
 
     def test_one_lost_gateway_ping_does_not_split_an_isp_outage(self):
         # The wan watch also pauses for a tick whenever the newest gateway

@@ -73,4 +73,15 @@ const Link = new Function(
 equal(Link({ts: 100, ended_ts: 101, end_unknown: 1}), "unknown", "link orphan");
 equal(Link({ts: 100, ended_ts: 112, end_unknown: null}), "for 12 s", "link seen");
 equal(Link({ts: 100, ended_ts: 100}), "", "link instant");
+
+// A wan outage that began as the router came back is not blamed upstream.
+const Describe = new Function(extract("shortMac") + "\n" + extract("describe")
+  + "\nreturn describe;")();
+equal(Describe({kind: "outage", leg: "wan",
+                detail: "internet not back yet after the router returned"}),
+      "Internet not back yet after the router returned.", "not back yet");
+equal(Describe({kind: "outage", leg: "wan",
+                detail: "router answers, nothing past it does"}),
+      "No internet. The router still answered, so the fault was upstream.",
+      "ordinary wan outage");
 console.log("event durations ok");

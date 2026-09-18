@@ -218,6 +218,11 @@ Column {
   property bool copied: false
 
   function describe(e) {
+    // Began the moment the router came back: its own WAN reconnect or the
+    // ISP's, which nothing here can tell apart — so not "upstream".
+    if (e.kind === "outage" && e.leg === "wan"
+        && e.detail === "internet not back yet after the router returned")
+      return "Internet not back yet after the router returned."
     if (e.kind === "outage" && e.leg === "wan")
       return "No internet. The router still answered, so the fault was upstream."
     if (e.kind === "outage" && e.leg === "local")

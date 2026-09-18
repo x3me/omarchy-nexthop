@@ -712,18 +712,18 @@ class LegArbiter:
         """The leg the current (or last) event was opened on."""
         return self._words[0]
 
-    def words(self):
+    def words(self, after_router=False):
         """(leg, outage detail, alarm, recovery) for an event opened now."""
         return self.LEG, self.OUTAGE_DETAIL, self.ALARM, self.RECOVERED
 
-    def down(self, now, beyond_ok: bool, since=None):
+    def down(self, now, beyond_ok: bool, since=None, after_router=False):
         # `since` is when the silence began; the row carries the onset, not
         # the tick that crossed the threshold.
         began = int(since if since is not None else now)
         # Fixed when the event opens: an outage that began through a VPN is
         # announced and recovered in the VPN's words even if the tunnel is
         # gone by the time it ends.
-        self._words = self.words()
+        self._words = self.words(after_router)
         leg, outage_detail = self._words[0], self._words[1]
         if beyond_ok:
             self.kind = self.QUIET_KIND
@@ -792,6 +792,16 @@ class WanEventArbiter(LegArbiter):
              "the fault is on the ISP side.")
     RECOVERED = ("Internet recovered", "Replies from the internet again.")
 
+    # An outage that began the very moment the router came back, with nothing
+    # past it answering since. That is the router re-dialling its WAN (PPPoE,
+    # DHCP) or the ISP taking it back, and nothing here can tell which, so it
+    # is charged — the user had no internet — but not blamed on the ISP the
+    # way OUTAGE_DETAIL and ALARM do. Same strings as HopSense (8390cedc);
+    # EventsTab.describe() matches NOT_BACK_DETAIL, pinned by a test.
+    NOT_BACK_DETAIL = "internet not back yet after the router returned"
+    NOT_BACK_ALARM = ("No internet yet",
+                      "The router is back, but nothing past it answers yet.")
+
     # While the internet probes go through a VPN, what goes silent past the
     # router is the tunnel or its server, and nothing may name the ISP for it
     # [D, Plamen, 2026-09-13]. Stored on its own leg, because the Events tab
@@ -805,10 +815,13 @@ class WanEventArbiter(LegArbiter):
                         "Replies through the tunnel again.")
     tunnel = False          # set by the daemon each pass from its VPN state
 
-    def words(self):
-        if self.tunnel:
+    def words(self, after_router=False):
+        if self.tunnel:                 # a tunnel keeps its own words
             return (self.TUNNEL_LEG, self.TUNNEL_OUTAGE_DETAIL,
                     self.TUNNEL_ALARM, self.TUNNEL_RECOVERED)
+        if after_router:
+            return (self.LEG, self.NOT_BACK_DETAIL, self.NOT_BACK_ALARM,
+                    self.RECOVERED)
         return super().words()
 
 
@@ -1350,6 +1363,7 @@ class Daemon:
         # has stopped for a confirmed router outage — see watch_outages.
         self._wan_sampled_at = None
         self._wan_unwatched = False
+        self._wan_resumed_at = None
         self.wan_events = WanEventArbiter(self.store, self.notify)
         self.local_events = LocalEventArbiter(self.store, self.notify)
         self._watched = None       # (wall, awake_clock) of the last watch pass
@@ -1862,6 +1876,7 @@ class Daemon:
                 # Judged afresh from here: nothing before this moment belongs
                 # to a wan run, and no settle — the link never went away.
                 self._wan_unwatched = False
+                self._wan_resumed_at = now
                 self.watch_wan.lost_sight(now, settle_s=0.0)
             self._wan_sampled_at = now
             move = self.watch_wan.sample(total, now)
@@ -1871,8 +1886,12 @@ class Daemon:
                 # handshake that merely straddled the moment the line died
                 # cannot vouch for the window after it.
                 since = self.watch_wan.down_since
+                # The resume clamps a run's start to the resume moment, so a
+                # start exactly there means nothing past the router has
+                # answered since it came back — see NOT_BACK_DETAIL.
                 self.wan_events.down(
-                    now, self._any_instrument_replied_between(since, now), since)
+                    now, self._any_instrument_replied_between(since, now), since,
+                    after_router=since == self._wan_resumed_at)
             elif move == "up":
                 self.wan_events.up(now)
                 # The internet is back — or something answering for it is.
