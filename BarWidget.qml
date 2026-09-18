@@ -101,28 +101,45 @@ BarWidget {
   // bar goes transparent. Reading `foreground` here pinned this widget to
   // the theme text over a light background, where nothing was visible.
   readonly property color okColor: bar ? bar.barForeground : Color.foreground
-  // State colours resolve through the theme palette: green/yellow/red exist
-  // in every Omarchy theme's colors.toml, surfaced via Color singleton.
+  // Warn is Tokyo Night's yellow, hardcoded: the shell's Color singleton has
+  // no yellow. On a transparent bar the shell has already answered "what
+  // reads on this wallpaper" once and exposes the answer as barForeground —
+  // the colour the bar paints its own surface with — so the warn states read
+  // it, like the OK state. On an opaque bar the amber sits on the theme bar
+  // background, where it reads.
+  readonly property color warnColor: bar && bar.transparent ? bar.barForeground : "#e0af68"
+  // Urgent is the bar's own alert colour — the same bar.urgent that
+  // WidgetButton.activeColor reads, tuned through bar.active. The shell does
+  // not adapt it on a transparent bar either: the down states carry their
+  // own glyph and the outage timer.
+  readonly property color urgentColor: bar ? bar.urgent : Color.urgent
   readonly property color stateColor: {
     // A sign-in page is a gate, not a fault: warn, not urgent. Names not
     // resolving is the same tone — the line works; one service on it does not.
-    if (netState === "captive" || netState === "dns-failing") return "#e0af68"
+    if (netState === "captive" || netState === "dns-failing") return warnColor
     if (netState === "local-down" || netState === "wan-down"
-        || netState === "tunnel-down") return Color.urgent
-    if (netState === "degraded") return "#e0af68"
+        || netState === "tunnel-down") return urgentColor
+    if (netState === "degraded") return warnColor
     if (index === null) return okColor
     if (index >= 80) return okColor
-    if (index >= 50) return "#e0af68"
-    return Color.urgent
+    if (index >= 50) return warnColor
+    return urgentColor
   }
 
+  // The index bands carry their own glyph, shown in every display mode, so
+  // the band reads without colour — Icon only included. Fault states keep
+  // their own glyphs; below 50 only applies when no leg is down, since a
+  // down leg has already returned its glyph above.
   readonly property string glyph: {
     if (netState === "captive") return "󰦝"     // nf-md-shield_lock: a gate
     if (netState === "dns-failing") return "󰇖" // nf-md-dns
     if (netState === "local-down") return "󱚵"   // nf-md-wifi_strength_alert
     if (netState === "wan-down" || netState === "tunnel-down")
       return "󰲛"                                 // nf-md-web_off / broken link
-    return "󰓅"                                   // nf-md-speedometer
+    if (netState === "degraded") return "󰾾"     // nf-md-speedometer_medium
+    if (index === null || index >= 80) return "󰓅" // nf-md-speedometer
+    if (index >= 50) return "󰾾"                  // nf-md-speedometer_medium
+    return "󰾿"                                   // nf-md-speedometer_slow
   }
 
   readonly property string barText: {
