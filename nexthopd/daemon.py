@@ -674,10 +674,20 @@ class LegArbiter:
     falling silent opens a real `outage`, which alarms once it has lasted
     NOTIFY_AFTER_S.
 
-    Escalation is one-way. If the far side goes quiet too during a quiet
-    spell, the quiet event closes and a real outage opens, because an outage
-    that begins mid-spell must still alarm. Nothing walks back the other
-    way: flapping between verdicts would teach people to ignore both.
+    The verdict follows the evidence both ways. If the far side goes quiet
+    too during a quiet spell, the quiet event closes and a real outage opens,
+    because an outage that begins mid-spell must still alarm. And if the far
+    side answers again while the leg is still silent, the outage closes then
+    and a quiet event takes over: packets are crossing the leg, so it is not
+    down. Until 0.2.60 that second move did not exist ("flapping would teach
+    people to ignore both verdicts"), and an open outage could close only on
+    the leg's own reply — which a gateway that never answers pings never
+    sends. Joined during a moment of total silence, such a network showed
+    ROUTER UNREACHABLE, index withheld, over a working line until the network
+    changed (HopSense, Istanbul airport; replayed here: 40 s of real silence
+    charged as 1,200 s). A move either way needs its own evidence — every
+    path silent for OUTAGE_AFTER_S, or a reply from beyond — so a line that
+    alternates between them really is dropping, and recording it is right.
 
     The two legs differ only in wording — which kind, which detail, which
     notification — so those are class attributes and the mechanism is shared.
@@ -741,6 +751,17 @@ class LegArbiter:
         if self.kind == self.QUIET_KIND and not beyond_ok:
             self.store.close_event(self.event_id, int(now))
             self.down(now, False)
+            return
+        if self.kind == "outage" and beyond_ok:
+            # Something past the leg answers while the leg stays silent: the
+            # outage ended here, observed, and the leg is merely quiet from
+            # now on. Say it came back only if we said it went away.
+            self.store.close_event(self.event_id, int(now))
+            if self._notified:
+                recovered = self._words[3]
+                self.notify(recovered[0], recovered[1])
+            self._clear()
+            self.down(now, True)
             return
         if (self.kind == "outage" and not self._notified
                 and self._notify_at is not None and now >= self._notify_at):

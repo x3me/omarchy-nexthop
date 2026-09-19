@@ -177,7 +177,7 @@ class WanArbitration(unittest.TestCase):
             self.arb.tick(t + NOTIFY_AFTER_S + i, beyond_ok=False)
         self.assertEqual(len(self.notices), 1)
 
-    def test_escalates_one_way_when_the_rest_stop_too(self):
+    def test_escalates_when_the_rest_stop_too(self):
         t = time.time()
         self.arb.down(t, beyond_ok=True)
         self.arb.tick(t + 2, beyond_ok=True)        # still quiet, still no alarm
@@ -235,7 +235,7 @@ class LocalArbitration(unittest.TestCase):
         self.arb.tick(100.0 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.assertEqual(len(self.notes), 1)
 
-    def test_escalation_is_one_way(self):
+    def test_the_verdict_follows_the_evidence_both_ways(self):
         self.arb.down(100.0, beyond_ok=True)
         # The far side goes quiet too: an outage starting mid-spell must alarm.
         self.arb.tick(110.0, beyond_ok=False)
@@ -243,10 +243,24 @@ class LocalArbitration(unittest.TestCase):
         self.assertEqual(self.notes, [])         # inside the alarm delay
         self.arb.tick(110.0 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
         self.assertEqual(len(self.notes), 1)
-        # Nothing walks it back down again — flapping teaches people to
-        # ignore both verdicts.
+        # The internet answers through the silent gateway again: not down.
+        # Until 0.2.60 nothing walked this back, and a gateway that never
+        # answers pings kept ROUTER UNREACHABLE up over a working line.
         self.arb.tick(140.0, beyond_ok=True)
+        self.assertFalse(self.arb.real_outage)
+        self.assertEqual(self.arb.kind, "gateway-quiet")
+        self.assertEqual(len(self.notes), 2)     # the alarm gets its recovery
+        # And everything silent again escalates again, alarm and all.
+        self.arb.tick(150.0, beyond_ok=False)
         self.assertTrue(self.arb.real_outage)
+        self.arb.tick(150.0 + NOTIFY_AFTER_S + 0.1, beyond_ok=False)
+        self.assertEqual(len(self.notes), 3)
+
+    def test_a_walk_back_before_the_alarm_sends_nothing(self):
+        self.arb.down(100.0, beyond_ok=False)
+        self.arb.tick(102.0, beyond_ok=True)     # inside the alarm delay
+        self.assertEqual(self.arb.kind, "gateway-quiet")
+        self.assertEqual(self.notes, [])         # no alarm, so no recovery
 
     def test_recovery_only_notifies_for_a_real_outage(self):
         self.arb.down(100.0, beyond_ok=True)
@@ -1497,6 +1511,57 @@ class WanRunAcrossALocalOutage(_WatchReplay, unittest.TestCase):
         _, disrupted = self.charged()
         self.assertGreater(disrupted, 0)
 
+
+
+class RouterThatNeverAnswersPings(_WatchReplay, unittest.TestCase):
+    """Open item 39 (HopSense, Istanbul airport): a gateway that never
+    answers pings, joined during a moment when nothing past it answered
+    either. The router outage declared then was right — and then it could
+    never end, because an open outage closed only on the router's own reply.
+    ROUTER UNREACHABLE, index withheld, over a working line for as long as
+    the laptop stayed on that network."""
+
+    T = 3_000_000.0
+
+    def run_legs(self, until, wan_ok, t0):
+        """The gateway never answers from T on; the internet as `wan_ok`."""
+        t = t0
+        while t <= until:
+            self.d.local.add(t, 2.0 if t < self.T else None)
+            self.d.total.add(t, 8.0 if wan_ok(t) else None)
+            self.tick(t)
+            t += 0.5
+
+    def local_rows(self):
+        return [(e["kind"], e["ts"], e["ended_ts"])
+                for e in sorted(self.store.events(10 ** 7, now=self.T + 5000),
+                                key=lambda e: e["ts"])
+                if e["leg"] == "local"]
+
+    def test_the_airport(self):
+        # Nothing answers for the first 40 s after joining; then the
+        # internet works, through a router that still refuses every ping.
+        T = self.T
+        self.run_legs(T + 1200, lambda t: t < T or t >= T + 40, t0=T - 20)
+        rows = self.local_rows()
+        self.assertEqual(rows[0], ("outage", int(T), int(T + 40)))
+        self.assertEqual(rows[1][:2], ("gateway-quiet", int(T + 40)))
+        self.assertIsNone(rows[1][2])                 # still quiet, and calm
+        self.assertFalse(self.d.local_events.real_outage)
+        down, _, _ = self.store.outage_stats(3600, now=T + 1200)
+        self.assertEqual(round(down * 3600), 40)      # not 1,200
+
+    def test_silence_after_the_walk_back_is_an_outage_again(self):
+        T = self.T
+        self.run_legs(T + 200, lambda t: t < T or T + 40 <= t < T + 100
+                      or t >= T + 120, t0=T - 20)
+        kinds = [r[0] for r in self.local_rows()]
+        self.assertEqual(kinds, ["outage", "gateway-quiet", "outage",
+                                 "gateway-quiet"])
+        second = self.local_rows()[2]
+        # Declared once every instrument had been silent OUTAGE_AFTER_S.
+        self.assertEqual(second[1], int(T + 100 + OUTAGE_AFTER_S))
+        self.assertEqual(second[2], int(T + 120))
 
 
 class VpnOnThePath(unittest.TestCase):
