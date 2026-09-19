@@ -34,6 +34,20 @@ class IwParsing(unittest.TestCase):
         self.assertEqual(info["standard"], "802.11ax")
         self.assertEqual(info["width_mhz"], 40)
 
+    def test_ssid_hex_escapes_are_decoded(self):
+        # `iw` prints non-ASCII SSID bytes as \xNN; the name must come out as
+        # the real text, not the escapes.
+        cases = {
+            r"\xe3\x83\x8f\xe3\x83\x83\xe3\x82\xab\xe3\x83\xbc": "ハッカー",
+            r"Cafe\x20Wifi\xc3\xa9": "Cafe Wifié",     # mixed ASCII + UTF-8
+            r"Plain-SSID": "Plain-SSID",               # no escapes: untouched
+            r"back\x5cslash": "back\\slash",           # iw escapes a backslash
+            r"bad\xffbytes": "bad" + chr(0xFFFD) + "bytes",  # bad UTF-8 survives
+        }
+        for escaped, expected in cases.items():
+            with self.subTest(escaped=escaped):
+                self.assertEqual(net._unescape_iw_ssid(escaped), expected)
+
     def test_channel_map(self):
         self.assertEqual(net._freq_to_channel(2412), 1)
         self.assertEqual(net._freq_to_channel(2484), 14)
