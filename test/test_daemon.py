@@ -1894,6 +1894,49 @@ class TunnelStateAndHistory(unittest.TestCase):
         self.assertTrue(all(now - 605 <= t < now - 300 for t in flagged))
         self.assertNotIn("vpn", pts[0])          # absent, not false, off the VPN
 
+    def test_each_leg_reports_loss_over_its_own_sends(self):
+        # `loss` pools both legs, so a bucket where only the internet probes
+        # ran read as the router down on the connector (HopSense). Each leg
+        # now says for itself, and null means it sent nothing there.
+        from collections import deque
+        d = self.daemon()
+        now = 2_000_000.0
+
+        class Local:
+            def all(self):
+                # Router ping in the second bucket only; one of its two lost.
+                return [(now - 1800 + 5.5, 2.0, False),
+                        (now - 1800 + 6.5, None, False)]
+
+        class Total:
+            def each(self, seconds=None):
+                # Internet probes in the first two buckets, all answered.
+                return [[(now - 1800 + 0.5, 8.0, False),
+                         (now - 1800 + 5.2, 8.0, False)]]
+
+        d.local, d.total = Local(), Total()
+        d.aux_ring = deque(maxlen=400)
+        d.rates = (None, None)
+        d.last_signal = None
+        written = {}
+        real = daemon_mod.write_atomic
+        daemon_mod.write_atomic = lambda path, data, **kw: written.update(data=data)
+        try:
+            Daemon.flush_recent(d, now)
+        finally:
+            daemon_mod.write_atomic = real
+        first, second, third = written["data"]["points"][:3]
+        # Only the internet probes ran: the router leg sent nothing, which is
+        # a gap for it — the pooled figure alone would have drawn it down.
+        self.assertEqual((first["local"], first["loss"]), (None, 0.0))
+        self.assertIsNone(first["local_loss"])
+        self.assertEqual(first["total_loss"], 0.0)
+        # Both ran: each leg's own share.
+        self.assertEqual((second["local_loss"], second["total_loss"]), (0.5, 0.0))
+        # Nothing ran: both keys present and null, not absent.
+        self.assertEqual((third["local_loss"], third["total_loss"], third["loss"]),
+                         (None, None, None))
+
     def test_an_unwatched_gap_closes_the_vpn_span_where_watching_stopped(self):
         d = self.daemon()
         clock = [1000.0]

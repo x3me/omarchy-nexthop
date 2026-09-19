@@ -2573,6 +2573,17 @@ class Daemon:
                 # a gap is drawn as nothing, a down as an outage.
                 "loss": round((len(l) - len(lr) + lost_t) /
                               max(1, len(l) + n_t), 3) if (l or n_t) else None,
+                # Each leg's own loss over its own sends; null when that leg
+                # sent nothing in the bucket. `loss` above pools both legs, so
+                # a bucket where only the internet probes ran — the router
+                # ping at its 5 s maximum landing just past a bucket edge, or
+                # restarting — read as the ROUTER down on the connector (31 of
+                # 360 buckets in a replay, every probe answered). Found by
+                # HopSense. Null rather than absent, so a reader can tell "sent
+                # nothing" from a file written before these existed.
+                "local_loss": (round((len(l) - len(lr)) / len(l), 3)
+                               if l else None),
+                "total_loss": round(lost_t / n_t, 3) if n_t else None,
                 "rx": round(a[0], 1) if a and a[0] is not None else None,
                 "tx": round(a[1], 1) if a and a[1] is not None else None,
                 "sig": a[2] if a else None,

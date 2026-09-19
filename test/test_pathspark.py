@@ -36,6 +36,7 @@ class SparklineGeometry(unittest.TestCase):
         # The same harness checks that each connector keeps only the points
         # measured on its own path (tunnel or not).
         self.assertIn("tunnel slots ok", r.stdout)
+        self.assertIn("legs judged on their own sends", r.stdout)
 
 
 if __name__ == "__main__":

@@ -130,4 +130,15 @@ want(Spark.slots(mixed, "wan", 3, false), [{ v: 7 }, null, null], "line");
 want(Spark.slots(mixed, "wan", 3), [{ v: 7 }, { v: 148 }, { down: true }], "unfiltered");
 want(Spark.slots(mixed, "local", 3, true), [{ v: 2 }, { v: 2 }, { v: 2 }], "router leg");
 
-console.log(`ok — ${checks} marks, all inside the canvas; tunnel slots ok`);
+// Each leg is judged on its own sends. `loss` pools both, so a bucket where
+// only one leg's probes ran is a gap for the other, not an outage (HopSense).
+const legs = [
+  { local: null, total: 8, wan: 6, loss: 0, local_loss: null, total_loss: 0 },    // router ping absent
+  { local: 2, total: null, wan: null, loss: 0, local_loss: 0, total_loss: null }, // internet probes absent
+  { local: null, total: null, wan: null, loss: 1, local_loss: 1, total_loss: 1 }, // everything lost
+  { local: null, total: 8, wan: 6, loss: 0 },                                     // pre-0.2.59 file
+];
+want(Spark.slots(legs, "local", 4), [null, { v: 2 }, { down: true }, { down: true }], "router leg, own sends");
+want(Spark.slots(legs, "wan", 4), [{ v: 6 }, null, { down: true }, { v: 6 }], "internet leg, own sends");
+
+console.log(`ok — ${checks} marks, all inside the canvas; tunnel slots ok; legs judged on their own sends`);

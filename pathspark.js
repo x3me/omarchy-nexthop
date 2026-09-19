@@ -55,6 +55,11 @@ var DOWN_GAP = 2;
  * bucket, which is a gap rather than an outage. A bucket that sampled and got
  * no reply carries a loss figure with no `total`, and that is down.
  *
+ * But `loss` pools both legs' probes, so each leg is judged on its own:
+ * `local_loss` / `total_loss` are null when that leg sent nothing, which is a
+ * gap for that leg however busy the other was. Files from before 0.2.59 lack
+ * both keys, and for them the pooled `loss` is all there is.
+ *
  * `tunnel`, when given, keeps only the points whose own `vpn` flag matches it
  * and leaves the rest as gaps: the TUNNEL connector draws only what went
  * through the VPN, the WAN connector only what did not. A point is judged by
@@ -74,11 +79,15 @@ function slots(points, key, n, tunnel) {
             continue;
         }
         if (key === "local") {
+            // The router probe sent nothing here: say nothing, not "down".
+            if ("local_loss" in p && p.local_loss === null) { out.push(null); continue; }
             // The router itself did not answer.
             if (p.local === null || p.local === undefined) { out.push({ down: true }); continue; }
             out.push({ v: p.local });
             continue;
         }
+        // No internet probe was sent here: a gap, not an outage.
+        if ("total_loss" in p && p.total_loss === null) { out.push(null); continue; }
         // Nothing beyond the router answered at all.
         if (p.total === null || p.total === undefined) { out.push({ down: true }); continue; }
         // It answered, but the subtraction was withheld — unknown, not zero,
