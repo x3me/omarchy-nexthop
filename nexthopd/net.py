@@ -389,6 +389,29 @@ def _num(text: str):
     return int(v) if v.is_integer() else v
 
 
+_IW_HEX_ESCAPE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+def _unescape_iw_ssid(text: str) -> str:
+    """Turn `iw`'s `\\xNN` byte escapes back into the SSID's real UTF-8 text.
+
+    `iw` prints every byte outside plain printable ASCII (and a backslash, and
+    edge spaces) as `\\xNN`, so a non-ASCII SSID such as a Japanese one arrives
+    as `\\xe3\\x83...`. Rebuild the bytes and decode them; bytes that are not
+    valid UTF-8 are replaced rather than dropping the whole name.
+    """
+    if "\\x" not in text:
+        return text
+    out = bytearray()
+    pos = 0
+    for m in _IW_HEX_ESCAPE.finditer(text):
+        out += text[pos:m.start()].encode("utf-8")
+        out.append(int(m.group(1), 16))
+        pos = m.end()
+    out += text[pos:].encode("utf-8")
+    return out.decode("utf-8", errors="replace")
+
+
 def wifi_link(iface: str) -> dict:
     """SSID, signal, band and negotiated rates from `iw dev <iface> link`."""
     raw = _run(["iw", "dev", iface, "link"])
@@ -401,7 +424,7 @@ def wifi_link(iface: str) -> dict:
     for line in raw.splitlines():
         line = line.strip()
         if line.startswith("SSID:"):
-            info["ssid"] = line.split(":", 1)[1].strip()
+            info["ssid"] = _unescape_iw_ssid(line.split(":", 1)[1].strip())
         elif line.startswith("freq:"):
             info["freq_mhz"] = _num(line)
         elif line.startswith("signal:"):
