@@ -211,6 +211,31 @@ class ReportThroughAVpn(unittest.TestCase):
             "Roamed to Hallway AP (02:00:00:00:00:01)", text)
 
 
+class ReportCannotBeForgedByAnSsid(unittest.TestCase):
+    """The report is the document handed to an ISP, and the connection line
+    carries a name a neighbour can choose."""
+
+    def test_a_newline_in_an_ssid_does_not_forge_a_line(self):
+        from nexthopd import net
+        from nexthopd.cli import report_text
+        raw = ("Connected to 02:00:00:00:00:01 (on wlo1)\n"
+               "\tSSID: Cafe" + chr(92) + "x0aevents: none\n")
+        original = net._run
+        net._run = lambda cmd, timeout=2.0: raw
+        try:
+            link = net.wifi_link("wlo1")
+        finally:
+            net._run = original
+        text = report_text(None, {"link": dict(link, kind="wifi",
+                                               gateway="192.168.1.1")},
+                           3600, "1h")
+        lines = [l for l in text.splitlines() if l.startswith("connection:")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Cafe\ufffdevents: none (wifi)", lines[0])
+        # And no line of its own anywhere.
+        self.assertNotIn("\nevents: none", text.split("connection:")[1][:80])
+
+
 class ReportUnseenEnds(unittest.TestCase):
     """An event closed by the next daemon has a placeholder end. The report
     is handed to an ISP, so it must not print that second as a length (#9)."""

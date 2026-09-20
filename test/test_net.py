@@ -48,6 +48,47 @@ class IwParsing(unittest.TestCase):
             with self.subTest(escaped=escaped):
                 self.assertEqual(net._unescape_iw_ssid(escaped), expected)
 
+    def test_a_hostile_ssid_cannot_carry_control_characters(self):
+        # 32 bytes a neighbour chooses reach the panel, the event log and the
+        # report. Decoding the \xNN escapes (0.2.60) was right; it also took
+        # away the only thing holding those bytes back.
+        raw = ("Connected to 02:00:00:00:00:01 (on wlo1)\n"
+               "\tSSID: Cafe" + chr(92) + "x0agateway 10.0.0.1, loss 0.00%\n"
+               "\tfreq: 5180.0\n")
+        original = net._run
+        net._run = lambda cmd, timeout=2.0: raw
+        try:
+            info = net.wifi_link("wlo1")
+        finally:
+            net._run = original
+        self.assertNotIn("\n", info["ssid"])
+        self.assertEqual(info["ssid"], "Cafe\ufffdgateway 10.0.0.1, loss 0.00%"[:32])
+
+    def test_clean_name_keeps_names_and_refuses_the_rest(self):
+        keep = {"Excitel": "Excitel", "ハッカー": "ハッカー", "Café 📶": "Café 📶",
+                "Guest (2.4 GHz)": "Guest (2.4 GHz)"}
+        for text, expected in keep.items():
+            self.assertEqual(net.clean_name(text), expected, text)
+        for bad, expected in (("Cafe\nforged", "Cafe\ufffdforged"),
+                              ("Home\rgone", "Home\ufffdgone"),
+                              ("free\u202ewifi", "free\ufffdwifi"),   # bidi override
+                              ("A\u200bB", "A\ufffdB"),               # zero width
+                              ("bell\x07", "bell\ufffd")):
+            self.assertEqual(net.clean_name(bad), expected, bad)
+        self.assertEqual(net.clean_name("x" * 90, net.SSID_MAX_CHARS),
+                         "x" * net.SSID_MAX_CHARS)
+        self.assertEqual(net.clean_name(""), "")
+
+    def test_a_connection_name_is_cleaned_too(self):
+        # nmcli hands back real UTF-8, so it never needed unescaping — and a
+        # bidi override in a connection name reached the panel before 0.2.61.
+        original = net._run
+        net._run = lambda cmd, timeout=2.0: "GENERAL.CONNECTION:free\u202ewifi\n"
+        try:
+            self.assertEqual(net.connection_name("wlo1"), "free\ufffdwifi")
+        finally:
+            net._run = original
+
     def test_channel_map(self):
         self.assertEqual(net._freq_to_channel(2412), 1)
         self.assertEqual(net._freq_to_channel(2484), 14)

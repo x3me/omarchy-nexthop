@@ -16,6 +16,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import unicodedata
 import time
 from pathlib import Path
 from typing import Optional
@@ -412,6 +413,41 @@ def _unescape_iw_ssid(text: str) -> str:
     return out.decode("utf-8", errors="replace")
 
 
+# A network's name reaches the panel, the event log and the report a user
+# hands to their ISP. An SSID is 32 bytes a neighbour chooses, and a
+# NetworkManager connection name is whatever those bytes became, so both are
+# wire data and neither may arrive as free text (the doctrine's invariant 8).
+# Until 0.2.61 `iw`'s own \xNN escaping was all that held it back, and 0.2.60's
+# decoding — rightly — removed that: a newline in an SSID then forged lines in
+# the report ("connection: Cafe\ngateway 10.0.0.1, loss 0.00%").
+#
+# Categories rather than a list: Cc is the C0/C1 controls (newline, carriage
+# return, escape), Cf the format characters (the bidi overrides that reverse
+# displayed text, the zero-width joiners), Cs unpaired surrogates, Cn
+# unassigned. Everything a name legitimately contains — letters, marks,
+# digits, punctuation, symbols, ordinary spaces, emoji — is a different
+# category and passes through untouched.
+UNSAFE_CATEGORIES = ("Cc", "Cf", "Cs", "Cn")
+# 32 bytes is the 802.11 maximum, so an SSID cannot decode to more than 32
+# characters. A connection name is the user's own, and only needs a bound.
+SSID_MAX_CHARS = 32
+NAME_MAX_CHARS = 64
+
+
+def clean_name(text: str, limit: int = NAME_MAX_CHARS) -> str:
+    """A network name safe to show, log and paste into a report.
+
+    Each unsafe character becomes U+FFFD rather than vanishing: a name built
+    to look like something else should read as tampered with, not as the
+    something else with a piece quietly missing.
+    """
+    if not text:
+        return ""
+    out = "".join("\ufffd" if unicodedata.category(c) in UNSAFE_CATEGORIES
+                  else c for c in text[:limit])
+    return out
+
+
 def wifi_link(iface: str) -> dict:
     """SSID, signal, band and negotiated rates from `iw dev <iface> link`."""
     raw = _run(["iw", "dev", iface, "link"])
@@ -424,7 +460,9 @@ def wifi_link(iface: str) -> dict:
     for line in raw.splitlines():
         line = line.strip()
         if line.startswith("SSID:"):
-            info["ssid"] = _unescape_iw_ssid(line.split(":", 1)[1].strip())
+            info["ssid"] = clean_name(
+                _unescape_iw_ssid(line.split(":", 1)[1].strip()),
+                SSID_MAX_CHARS)
         elif line.startswith("freq:"):
             info["freq_mhz"] = _num(line)
         elif line.startswith("signal:"):
@@ -584,7 +622,10 @@ def connection_name(iface: str) -> str:
     for line in raw.splitlines():
         if line.startswith("GENERAL.CONNECTION:"):
             name = line.split(":", 1)[1].strip()
-            return "" if name in ("", "--") else name
+            # nmcli hands back real UTF-8, so it never needed unescaping —
+            # and never got cleaned either: a bidi override in a connection
+            # name reached the panel before 0.2.61.
+            return "" if name in ("", "--") else clean_name(name)
     return ""
 
 
