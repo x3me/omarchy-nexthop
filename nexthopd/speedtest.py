@@ -344,20 +344,22 @@ CONTENT_STREAM_FLOOR = 500_000
 CONTENT_DOWN_STREAM_CAP = 8_000_000
 CONTENT_UP_STREAM_CAP = 2_000_000
 
-# Above the rate at which the download cap binds, the hourly check cannot
-# hold its target window however it is sized — 8 MB a stream is 0.64 s of a
-# 400 Mbps line — and buying that back hourly is 55 GB a month. It is bought
-# once a day instead: a pass sized for SUSTAINED_TARGET_S, capped so a single
-# request stays well under the size speed.cloudflare.com starts refusing (a
-# 20 MB request 429s on an address that has been busy, 3 MB does not; the
-# quota is per source address and CGNAT subscribers share it — open item 24).
-SUSTAINED_TARGET_S = 4.0
-SUSTAINED_DOWN_STREAM_CAP = 25_000_000
-
-
-def cap_binds_above_mbps(streams: int = 4) -> float:
-    """The line rate at which CONTENT_TARGET_S stops being reachable."""
-    return CONTENT_DOWN_STREAM_CAP * 8 / 1e6 / CONTENT_TARGET_S * streams
+# Above ~170 Mbps (cap x 8 / CONTENT_TARGET_S x streams) the cap binds and the
+# window shrinks: 0.64 s of a 400 Mbps line, 0.32 s of 800. That is accepted
+# rather than bought, and 0.2.64 removed the daily sustained pass that used to
+# buy it. Three reasons, in the order they decided it:
+#   - Speed is the median of the last three checks on a network, so a single
+#     larger figure among hourly ones is always the largest of the three and
+#     never the median. Simulated through the real scorer: 92.2 with and
+#     without it, and the baseline's p90 did not move either.
+#   - The experience curve is nearly flat up there. Reading a 400 Mbps line as
+#     258 scores 92.2 where the truth scores 95.0. Under ~170 Mbps, where the
+#     curve is steep, the hourly check already holds its whole window.
+#   - A 1.5 s window at 340 Mbps is ~64 MB however many streams it is split
+#     across, which is ~46 GB a month hourly. The cost is the window, not the
+#     request size, so more streams do not buy it either.
+# What is left is honest: above the cap the figure is a floor, and a manual
+# peak test remains the way to ask what the line can really do.
 
 
 def content_stream_bytes(hint_mbps, streams: int, cap: int,
@@ -383,7 +385,7 @@ def content_stream_bytes(hint_mbps, streams: int, cap: int,
 
 
 def content_test(down_hint_mbps=None, up_hint_mbps=None,
-                 streams: int = 4, sustained: bool = False) -> dict:
+                 streams: int = 4) -> dict:
     """The scheduled check.
 
     Both directions are carried by `streams` parallel connections, each sized
@@ -397,35 +399,12 @@ def content_test(down_hint_mbps=None, up_hint_mbps=None,
     16 MB took nine seconds of the link every hour.
     """
     started = time.time()
-    # A sustained pass buys the window the hourly one cannot afford: same
-    # code, a longer target and a larger cap. The daemon asks for one once a
-    # day, and only on a line fast enough that the hourly cap binds.
-    down_target = SUSTAINED_TARGET_S if sustained else CONTENT_TARGET_S
-    down_cap = (SUSTAINED_DOWN_STREAM_CAP if sustained
-                else CONTENT_DOWN_STREAM_CAP)
-    per_stream = content_stream_bytes(down_hint_mbps, streams, down_cap,
-                                      down_target)
+    per_stream = content_stream_bytes(down_hint_mbps, streams,
+                                      CONTENT_DOWN_STREAM_CAP)
     up_per_stream = content_stream_bytes(up_hint_mbps, streams,
                                          CONTENT_UP_STREAM_CAP)
     down_mbps, down_n = _parallel_download(
-        CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=60)
-    refused = False
-    if sustained and down_mbps is None:
-        # Refused (the size that 429s first) or too slow to finish: fall back
-        # to the ordinary shape, so a day's sustained pass failing never
-        # costs the hour its figure.
-        #
-        # And say that it happened. The fallback's figure is indistinguishable
-        # from an ordinary hourly check, so a line whose address is always
-        # over quota — CGNAT, where subscribers share one — would simply never
-        # be measured properly, and nothing in the history would show it
-        # (HopSense, 2026-09-21).
-        per_stream = content_stream_bytes(down_hint_mbps, streams,
-                                          CONTENT_DOWN_STREAM_CAP)
-        sustained, refused = False, True
-        down_mbps, retry_n = _parallel_download(
-            CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=30)
-        down_n += retry_n
+        CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=30)
     if down_mbps is None and per_stream < CONTENT_DOWN_STREAM_CAP:
         # Sized from history, and the line turned out to be faster than that
         # history says — so fast that the streams finished inside the window
@@ -447,9 +426,6 @@ def content_test(down_hint_mbps=None, up_hint_mbps=None,
     return {
         "kind": "content",
         "engine": "cloudflare",
-        "sustained": sustained,
-        # Asked for a sustained pass and did not get one.
-        "sustained_refused": refused,
         "ok": down_mbps is not None,
         "down_mbps": round(down_mbps, 1) if down_mbps else None,
         "up_mbps": round(up_mbps, 1) if up_mbps else None,

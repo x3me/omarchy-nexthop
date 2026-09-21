@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.x3me.nexthop",
   "name": "Nexthop",
-  "version": "0.2.63",
+  "version": "0.2.64",
   "author": "Extreme Labs",
   "license": "MIT",
   "description": "Splits your Wi-Fi from your ISP, hop by hop. Continuous latency, jitter and loss on both legs of your connection, with history, outage detection and speed tests.",
@@ -81,7 +81,7 @@
         "type": "boolean",
         "label": "Measure content speed automatically",
         "defaultValue": true,
-        "description": "A short download and a small upload that score Speed honestly. Up to about 40 MB per check on a fast line, a fraction of that on a slower one, plus one longer pass a day (~100 MB) on lines fast enough to need it."
+        "description": "A short download and a small upload that score Speed honestly. Up to about 40 MB per check on a fast line, and a fraction of that on a slower one."
       },
       {
         "key": "contentSpeedIntervalMin",

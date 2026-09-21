@@ -213,21 +213,6 @@ NOTIFY_AFTER_S = 5.0
 # a transient fault. One retry after this long; a second failure waits the
 # interval, so a blocked endpoint is not hammered.
 CONTENT_RETRY_S = 300.0
-# How often a line fast enough to outrun the hourly check's window is
-# measured properly — see speedtest.SUSTAINED_TARGET_S. Daily, because the
-# window costs bytes: ~100 MB a day against the ~40 MB an hourly check can
-# cost, and hourly at that size is both 55 GB a month and the request size
-# speed.cloudflare.com refuses first.
-SUSTAINED_EVERY_S = 86400.0
-
-
-def _check_shape(result: dict) -> str:
-    """The `detail` a content row carries: which shape measured it."""
-    if result.get("sustained"):
-        return Daemon.SHAPE_SUSTAINED
-    if result.get("sustained_refused"):
-        return Daemon.SHAPE_REFUSED
-    return ""
 
 
 class Config:
@@ -2043,36 +2028,6 @@ class Daemon:
             "explicit": explicit,
         }
 
-    # What a stored content row says about the shape that produced it.
-    SHAPE_SUSTAINED = "sustained"
-    SHAPE_REFUSED = "sustained-refused"
-
-    def _sustained_due(self, network: str, down_hint, now: float) -> bool:
-        """Is today's sustained pass owed on this network?
-
-        Only where it buys something: below the rate at which the download
-        cap binds, the hourly check already holds its whole target window and
-        a longer pass would measure the same thing for more bytes. A network
-        with no sustained pass in recent history gets one now — including the
-        first check on a fast line, whose hint comes from the same network's
-        own history.
-        """
-        if not down_hint or down_hint < speedtest.cap_binds_above_mbps():
-            return False
-        vpn = self.vpn_identity()
-        for t in self.store.tests(limit=80, kind="content"):
-            if (t.get("network") or "") != network:
-                continue
-            if not vpn_matches(t.get("vpn"), vpn):
-                continue
-            if (t.get("detail") or "") in (self.SHAPE_SUSTAINED,
-                                           self.SHAPE_REFUSED):
-                # A refusal counts as the day's attempt: retrying every hour
-                # on an address that is over quota spends requests to be told
-                # no, and the row already records that it was asked for.
-                return now - t["ts"] >= SUSTAINED_EVERY_S
-        return True
-
     def maybe_content_test(self, now: float):
         if not self.config["contentSpeed"]:
             return
@@ -2113,13 +2068,11 @@ class Daemon:
         self.content_running = True
 
         down_hint, up_hint = self._content_hint(network, self.vpn_identity())
-        sustained = self._sustained_due(network, down_hint, now)
 
         def run():
             try:
                 r = speedtest.content_test(down_hint_mbps=down_hint,
-                                           up_hint_mbps=up_hint,
-                                           sustained=sustained)
+                                           up_hint_mbps=up_hint)
                 after = self.link.latest
                 if (after.get("ssid") or after.get("name") or "") != network \
                         or (self.vpn or {}).get("iface") != tunnel_before:
@@ -2131,12 +2084,7 @@ class Daemon:
                     self.store.put_test(int(r["started"]), "content", r["engine"],
                                         down_mbps=r["down_mbps"], up_mbps=r["up_mbps"],
                                         bytes=r["bytes"], ok=True, network=network,
-                                        vpn=self.vpn_identity(),
-                                        # Which shape produced it, so the next
-                                        # day knows when the last one ran and a
-                                        # reader can tell a 0.6 s sample from a
-                                        # 4 s one.
-                                        detail=_check_shape(r))
+                                        vpn=self.vpn_identity())
                     # A fresh result should reprice the baseline promptly.
                     self._baseline_cache = None
                     self._content_retry_used = False
