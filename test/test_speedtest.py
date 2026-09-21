@@ -488,21 +488,49 @@ class ContentStreamSizing(unittest.TestCase):
         def ceiling(cap):
             return (cap * 8 / 1e6) / speedtest.MIN_TIMED_WINDOW_S * streams
 
+        # 0.2.62 raised the download cap to hold a 1.5 s window, which raises
+        # this with it: 8 MB a stream is timeable up to ~5.1 Gbps.
         self.assertAlmostEqual(ceiling(speedtest.CONTENT_DOWN_STREAM_CAP),
-                               1920.0, places=1)
+                               5120.0, places=1)
         self.assertAlmostEqual(ceiling(speedtest.CONTENT_UP_STREAM_CAP),
                                1280.0, places=1)
 
     def test_the_whole_check_stays_within_its_declared_budget(self):
-        """What the README promises: up to ~20 MB, and only on a fast line."""
+        """What the manifest and README promise: up to ~40 MB an hourly check
+        on a fast line, ~100 MB for the daily sustained pass, less below."""
         from nexthopd import speedtest
         streams = 4
         worst = (speedtest.CONTENT_DOWN_STREAM_CAP
                  + speedtest.CONTENT_UP_STREAM_CAP) * streams
-        self.assertLessEqual(worst, 20_000_000)
-        typical = (self.sized(100.0, speedtest.CONTENT_DOWN_STREAM_CAP)
-                   + self.sized(20.0, speedtest.CONTENT_UP_STREAM_CAP)) * streams
-        self.assertLess(typical, worst / 2)
+        self.assertLessEqual(worst, 40_000_000)
+        sustained = (speedtest.SUSTAINED_DOWN_STREAM_CAP
+                     + speedtest.CONTENT_UP_STREAM_CAP) * streams
+        self.assertLessEqual(sustained, 110_000_000)
+        # A 50/10 line — the shape most users have — pays a quarter of the cap.
+        typical = (self.sized(50.0, speedtest.CONTENT_DOWN_STREAM_CAP)
+                   + self.sized(10.0, speedtest.CONTENT_UP_STREAM_CAP)) * streams
+        self.assertLess(typical, worst / 3)
+
+    def test_the_window_each_shape_actually_holds(self):
+        """Why 0.2.62 exists: the old 0.5 s target measured TCP's ramp, and
+        measured it noisily — 0.95 s read 102 Mbps at a 1.5x spread where
+        1.87 s read 137 at 1.04x, interleaved on one line."""
+        from nexthopd import speedtest as st
+        streams = 4
+        for mbps in (25, 100, 170):
+            n = st.content_stream_bytes(mbps, streams, st.CONTENT_DOWN_STREAM_CAP)
+            self.assertAlmostEqual((n * 8 / 1e6) / (mbps / streams),
+                                   st.CONTENT_TARGET_S, places=1, msg=str(mbps))
+        # Above the cap the hourly check cannot hold it, which is what the
+        # daily sustained pass is for: four times the window at 400 Mbps.
+        fast = 400
+        hourly = st.content_stream_bytes(fast, streams, st.CONTENT_DOWN_STREAM_CAP)
+        daily = st.content_stream_bytes(fast, streams,
+                                        st.SUSTAINED_DOWN_STREAM_CAP,
+                                        st.SUSTAINED_TARGET_S)
+        self.assertGreater(fast, st.cap_binds_above_mbps())
+        self.assertAlmostEqual((hourly * 8 / 1e6) / (fast / streams), 0.64, places=2)
+        self.assertAlmostEqual((daily * 8 / 1e6) / (fast / streams), 2.0, places=2)
 
 
 class AHintThatUnderSizesHealsItself(unittest.TestCase):
@@ -548,6 +576,29 @@ class AHintThatUnderSizesHealsItself(unittest.TestCase):
         self.assertEqual(r["down_mbps"], 420.0)
         # Both passes were paid for; the budget must say so.
         self.assertEqual(r["bytes"], 2_000_000 + 12_000_000 + 2_000_000)
+
+    def test_the_daily_pass_asks_for_a_longer_window_and_says_so(self):
+        from nexthopd import speedtest as st
+        r, d_calls, _ = self.run_check(
+            [(430.0, 100_000_000)], [(95.0, 8_000_000)],
+            down_hint_mbps=400.0, up_hint_mbps=100.0, sustained=True)
+        self.assertIn(str(st.SUSTAINED_DOWN_STREAM_CAP), d_calls[0])
+        self.assertTrue(r["sustained"])
+        self.assertEqual(r["down_mbps"], 430.0)
+
+    def test_a_refused_daily_pass_falls_back_to_the_hourly_shape(self):
+        # The sustained size is the one speed.cloudflare.com refuses first
+        # (a 20 MB request 429s on a busy address). A day's pass failing must
+        # not cost the hour its figure.
+        from nexthopd import speedtest as st
+        r, d_calls, _ = self.run_check(
+            [(None, 0), (150.0, 32_000_000)], [(95.0, 8_000_000)],
+            down_hint_mbps=400.0, up_hint_mbps=100.0, sustained=True)
+        self.assertEqual(len(d_calls), 2)
+        self.assertIn(str(st.SUSTAINED_DOWN_STREAM_CAP), d_calls[0])
+        self.assertIn(str(st.CONTENT_DOWN_STREAM_CAP), d_calls[1])
+        self.assertEqual(r["down_mbps"], 150.0)
+        self.assertFalse(r["sustained"])      # it is not what it asked for
 
     def test_a_withheld_upload_is_retried_once_at_the_cap(self):
         from nexthopd import speedtest

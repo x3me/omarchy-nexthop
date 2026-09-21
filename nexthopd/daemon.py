@@ -213,6 +213,12 @@ NOTIFY_AFTER_S = 5.0
 # a transient fault. One retry after this long; a second failure waits the
 # interval, so a blocked endpoint is not hammered.
 CONTENT_RETRY_S = 300.0
+# How often a line fast enough to outrun the hourly check's window is
+# measured properly — see speedtest.SUSTAINED_TARGET_S. Daily, because the
+# window costs bytes: ~100 MB a day against the ~40 MB an hourly check can
+# cost, and hourly at that size is both 55 GB a month and the request size
+# speed.cloudflare.com refuses first.
+SUSTAINED_EVERY_S = 86400.0
 
 
 class Config:
@@ -2028,6 +2034,28 @@ class Daemon:
             "explicit": explicit,
         }
 
+    def _sustained_due(self, network: str, down_hint, now: float) -> bool:
+        """Is today's sustained pass owed on this network?
+
+        Only where it buys something: below the rate at which the download
+        cap binds, the hourly check already holds its whole target window and
+        a longer pass would measure the same thing for more bytes. A network
+        with no sustained pass in recent history gets one now — including the
+        first check on a fast line, whose hint comes from the same network's
+        own history.
+        """
+        if not down_hint or down_hint < speedtest.cap_binds_above_mbps():
+            return False
+        vpn = self.vpn_identity()
+        for t in self.store.tests(limit=80, kind="content"):
+            if (t.get("network") or "") != network:
+                continue
+            if not vpn_matches(t.get("vpn"), vpn):
+                continue
+            if (t.get("detail") or "") == "sustained":
+                return now - t["ts"] >= SUSTAINED_EVERY_S
+        return True
+
     def maybe_content_test(self, now: float):
         if not self.config["contentSpeed"]:
             return
@@ -2042,9 +2070,9 @@ class Daemon:
         if self.watch_wan.down_since or self.watch_local.down_since \
                 or not self.tests_idle():
             return
-        # Someone's phone is paying for this. The check is ~14 MB and runs
-        # hourly, which is around 336 MB a day of a data plan the user did
-        # not offer. Skipped rather than shrunk: a smaller sample would
+        # Someone's phone is paying for this. The check runs hourly and costs
+        # up to ~40 MB on a fast line, so around a gigabyte a day of a data
+        # plan the user did not offer. Skipped rather than shrunk: a smaller sample would
         # still cost money and would measure worse. Speed then scores None
         # on this network, and the index already skips a component it does
         # not have rather than inventing one.
@@ -2068,11 +2096,13 @@ class Daemon:
         self.content_running = True
 
         down_hint, up_hint = self._content_hint(network, self.vpn_identity())
+        sustained = self._sustained_due(network, down_hint, now)
 
         def run():
             try:
                 r = speedtest.content_test(down_hint_mbps=down_hint,
-                                           up_hint_mbps=up_hint)
+                                           up_hint_mbps=up_hint,
+                                           sustained=sustained)
                 after = self.link.latest
                 if (after.get("ssid") or after.get("name") or "") != network \
                         or (self.vpn or {}).get("iface") != tunnel_before:
@@ -2084,7 +2114,12 @@ class Daemon:
                     self.store.put_test(int(r["started"]), "content", r["engine"],
                                         down_mbps=r["down_mbps"], up_mbps=r["up_mbps"],
                                         bytes=r["bytes"], ok=True, network=network,
-                                        vpn=self.vpn_identity())
+                                        vpn=self.vpn_identity(),
+                                        # Which shape produced it, so the next
+                                        # day knows when the last one ran and a
+                                        # reader can tell a 0.6 s sample from a
+                                        # 4 s one.
+                                        detail="sustained" if r.get("sustained") else "")
                     # A fresh result should reprice the baseline promptly.
                     self._baseline_cache = None
                     self._content_retry_used = False
