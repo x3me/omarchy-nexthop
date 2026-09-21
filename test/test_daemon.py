@@ -716,10 +716,64 @@ class CaptiveCheckOffTheLoop(unittest.TestCase):
                     dm.captive.proof = None
                     dm.adopt_wan_ip()
                     self.assertEqual(dm.wan_ip["ip"], "203.0.113.9")
+                    # Adopting the first address is not a change.
+                    self.assertIsNone(getattr(dm, "_content_boost_at", None))
                 finally:
                     dm.store.close()
             finally:
                 del _os.environ["XDG_STATE_HOME"]
+
+
+class ANewPublicAddressBooksACheck(unittest.TestCase):
+    """The line behind the router can change without the router changing —
+    a WAN failover, a re-provisioned link — and the network's speed history
+    would go on describing the old one. The public address is the only hint
+    this machine has, so it buys a check, never a baseline reset: on CGNAT
+    the address rotates while the line stays the same."""
+
+    def setUp(self):
+        from nexthopd.daemon import Daemon
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["XDG_STATE_HOME"] = self.dir.name
+        self.d = Daemon()
+        self.d.wan_ip = {"ip": "203.0.113.9", "family": "v4", "checked_ts": 10}
+        self.d._wan_ip_at = 10
+        self.d._content_boost_at = None
+
+    def tearDown(self):
+        self.d.store.close()
+        del os.environ["XDG_STATE_HOME"]
+        self.dir.cleanup()
+
+    def adopt(self, ip, checked):
+        self.d.captive.proof = {"ip": ip, "family": "v4"}
+        self.d.captive.checked_ts = checked
+        self.d.adopt_wan_ip()
+
+    def test_a_different_address_books_one(self):
+        self.adopt("198.51.100.7", 20)
+        self.assertIsNotNone(self.d._content_boost_at)
+        # After the same settle a network change gets, not at once: a link
+        # still coming up is not the line's capability.
+        self.assertGreater(self.d._content_boost_at,
+                           time.time() + daemon_mod.CONTENT_SETTLE_AFTER_CHANGE_S - 5)
+
+    def test_the_same_address_books_nothing(self):
+        self.adopt("203.0.113.9", 20)
+        self.assertIsNone(self.d._content_boost_at)
+
+    def test_the_baseline_is_left_alone(self):
+        # The whole point: a rotated address must not cost the network its
+        # history. Nothing here clears stored tests or the baseline cache.
+        now = time.time()
+        for h in range(8):
+            self.d.store.put_test(int(now - h * 3600), "content", "cloudflare",
+                                  down_mbps=300.0, up_mbps=50.0, ok=True,
+                                  network="home")
+        self.adopt("198.51.100.7", 20)
+        self.assertEqual(len(self.d.store.tests(limit=20, kind="content")), 8)
+        self.assertIsNotNone(
+            self.d.store.baseline_speed(network="home", now=now, min_samples=5))
 
 
 class RouteChangeKeepsHistoryThroughAnOutage(unittest.TestCase):

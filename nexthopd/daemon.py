@@ -213,6 +213,10 @@ NOTIFY_AFTER_S = 5.0
 # a transient fault. One retry after this long; a second failure waits the
 # interval, so a blocked endpoint is not hammered.
 CONTENT_RETRY_S = 300.0
+# How long after a change — a new network, a tunnel coming or going, a new
+# public address — before the prompt check runs. Long enough that a roam or a
+# reconnection in progress is not sampled as the line's capability.
+CONTENT_SETTLE_AFTER_CHANGE_S = 90.0
 
 
 class Config:
@@ -1630,7 +1634,7 @@ class Daemon:
             # Speed is kept per (network, tunnel), so the other side of the
             # change may have no check at all; measure it soon, after the
             # same settle a network change gets.
-            self._content_boost_at = now + 90
+            self._content_boost_at = now + CONTENT_SETTLE_AFTER_CHANGE_S
 
     def _lose_sight_of_path_states(self, watched_until):
         """An unwatched gap ends every open span where watching stopped; the
@@ -2002,8 +2006,20 @@ class Daemon:
         proof, checked = self.captive.proof, self.captive.checked_ts
         if not proof or not checked or checked == self._wan_ip_at:
             return
+        before = (self.wan_ip or {}).get("ip")
         self._wan_ip_at = checked
         self.wan_ip = dict(proof, checked_ts=checked)
+        if before and self.wan_ip.get("ip") not in (None, before):
+            # Same local network, a different public address: the line behind
+            # this router may not be the line the history describes — a WAN
+            # failover, a re-provisioned link, or simply the ISP rotating the
+            # address. Measure soon, after the settle a network change gets.
+            #
+            # Only a check, never the baseline. On CGNAT the address rotates
+            # while the line stays exactly the same, so discarding 30 days of
+            # a network's history on this signal would destroy good data to
+            # chase a hint (HopSense, 2026-09-21, who built the same half).
+            self._content_boost_at = time.time() + CONTENT_SETTLE_AFTER_CHANGE_S
 
     def refresh_metered(self):
         """Tethering, or a connection the user has marked metered.
@@ -2438,7 +2454,7 @@ class Daemon:
             # stale for up to an hour here. Measure soon — after a settle
             # delay, so a roam in progress is not sampled as the network's
             # capability.
-            self._content_boost_at = now + 90
+            self._content_boost_at = now + CONTENT_SETTLE_AFTER_CHANGE_S
         if network:
             self._content_network = network
         if snap.get("kind") == "wifi":
