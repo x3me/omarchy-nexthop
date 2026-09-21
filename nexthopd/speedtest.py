@@ -409,13 +409,20 @@ def content_test(down_hint_mbps=None, up_hint_mbps=None,
                                          CONTENT_UP_STREAM_CAP)
     down_mbps, down_n = _parallel_download(
         CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=60)
+    refused = False
     if sustained and down_mbps is None:
         # Refused (the size that 429s first) or too slow to finish: fall back
         # to the ordinary shape, so a day's sustained pass failing never
         # costs the hour its figure.
+        #
+        # And say that it happened. The fallback's figure is indistinguishable
+        # from an ordinary hourly check, so a line whose address is always
+        # over quota — CGNAT, where subscribers share one — would simply never
+        # be measured properly, and nothing in the history would show it
+        # (HopSense, 2026-09-21).
         per_stream = content_stream_bytes(down_hint_mbps, streams,
                                           CONTENT_DOWN_STREAM_CAP)
-        sustained = False
+        sustained, refused = False, True
         down_mbps, retry_n = _parallel_download(
             CLOUDFLARE_DOWN.format(n=per_stream), streams, timeout=30)
         down_n += retry_n
@@ -441,6 +448,8 @@ def content_test(down_hint_mbps=None, up_hint_mbps=None,
         "kind": "content",
         "engine": "cloudflare",
         "sustained": sustained,
+        # Asked for a sustained pass and did not get one.
+        "sustained_refused": refused,
         "ok": down_mbps is not None,
         "down_mbps": round(down_mbps, 1) if down_mbps else None,
         "up_mbps": round(up_mbps, 1) if up_mbps else None,

@@ -2194,6 +2194,21 @@ class TheDailySustainedPass(unittest.TestCase):
         self.check(daemon_mod.SUSTAINED_EVERY_S + 60, detail="sustained")
         self.assertTrue(self.due())
 
+    def test_a_refusal_counts_as_the_day_s_attempt_and_is_recorded(self):
+        # Retrying hourly on an address that is over quota spends requests to
+        # be told no; the row says it was asked for, so the gap is visible.
+        self.check(3600, detail="sustained-refused")
+        self.assertFalse(self.due())
+        self.check(daemon_mod.SUSTAINED_EVERY_S + 60, detail="sustained-refused")
+        stored = [t["detail"] for t in self.d.store.tests(limit=9, kind="content")]
+        self.assertIn("sustained-refused", stored)
+
+    def test_the_stored_shape_says_which_pass_measured_it(self):
+        self.assertEqual(daemon_mod._check_shape({"sustained": True}), "sustained")
+        self.assertEqual(daemon_mod._check_shape({"sustained_refused": True}),
+                         "sustained-refused")
+        self.assertEqual(daemon_mod._check_shape({}), "")
+
     def test_another_network_s_pass_does_not_count(self):
         self.check(60, detail="sustained", network="SomeHotel")
         self.assertTrue(self.due())

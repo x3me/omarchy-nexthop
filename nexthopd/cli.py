@@ -373,8 +373,14 @@ def report_text(store, live: dict, seconds: float, window: str) -> str:
                 down = f"{t['down_mbps']:.0f}" if t["down_mbps"] else "--"
                 up = f"{t['up_mbps']:.0f}" if t["up_mbps"] else "--"
                 via = "  via VPN" if t.get("vpn") else ""
+                # Which shape measured it: a check that held a long transfer,
+                # or one whose longer pass the server refused (the size that
+                # is rate-limited first). Otherwise a refusal is invisible.
+                shape = {"sustained": "  sustained",
+                         "sustained-refused": "  longer pass refused"}.get(
+                    t.get("detail") or "", "")
                 lines.append(f"  {when}  {t['kind']:<8} {down}/{up} Mbps"
-                             f"  ({t['engine']}){via}")
+                             f"  ({t['engine']}){via}{shape}")
     return "\n".join(lines)
 
 

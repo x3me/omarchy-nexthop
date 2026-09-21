@@ -221,6 +221,15 @@ CONTENT_RETRY_S = 300.0
 SUSTAINED_EVERY_S = 86400.0
 
 
+def _check_shape(result: dict) -> str:
+    """The `detail` a content row carries: which shape measured it."""
+    if result.get("sustained"):
+        return Daemon.SHAPE_SUSTAINED
+    if result.get("sustained_refused"):
+        return Daemon.SHAPE_REFUSED
+    return ""
+
+
 class Config:
     """Settings, read from the file the QML side writes.
 
@@ -2034,6 +2043,10 @@ class Daemon:
             "explicit": explicit,
         }
 
+    # What a stored content row says about the shape that produced it.
+    SHAPE_SUSTAINED = "sustained"
+    SHAPE_REFUSED = "sustained-refused"
+
     def _sustained_due(self, network: str, down_hint, now: float) -> bool:
         """Is today's sustained pass owed on this network?
 
@@ -2052,7 +2065,11 @@ class Daemon:
                 continue
             if not vpn_matches(t.get("vpn"), vpn):
                 continue
-            if (t.get("detail") or "") == "sustained":
+            if (t.get("detail") or "") in (self.SHAPE_SUSTAINED,
+                                           self.SHAPE_REFUSED):
+                # A refusal counts as the day's attempt: retrying every hour
+                # on an address that is over quota spends requests to be told
+                # no, and the row already records that it was asked for.
                 return now - t["ts"] >= SUSTAINED_EVERY_S
         return True
 
@@ -2119,7 +2136,7 @@ class Daemon:
                                         # day knows when the last one ran and a
                                         # reader can tell a 0.6 s sample from a
                                         # 4 s one.
-                                        detail="sustained" if r.get("sustained") else "")
+                                        detail=_check_shape(r))
                     # A fresh result should reprice the baseline promptly.
                     self._baseline_cache = None
                     self._content_retry_used = False

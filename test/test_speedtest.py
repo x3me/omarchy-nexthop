@@ -584,6 +584,7 @@ class AHintThatUnderSizesHealsItself(unittest.TestCase):
             down_hint_mbps=400.0, up_hint_mbps=100.0, sustained=True)
         self.assertIn(str(st.SUSTAINED_DOWN_STREAM_CAP), d_calls[0])
         self.assertTrue(r["sustained"])
+        self.assertFalse(r["sustained_refused"])
         self.assertEqual(r["down_mbps"], 430.0)
 
     def test_a_refused_daily_pass_falls_back_to_the_hourly_shape(self):
@@ -599,6 +600,10 @@ class AHintThatUnderSizesHealsItself(unittest.TestCase):
         self.assertIn(str(st.CONTENT_DOWN_STREAM_CAP), d_calls[1])
         self.assertEqual(r["down_mbps"], 150.0)
         self.assertFalse(r["sustained"])      # it is not what it asked for
+        # And the refusal is recorded: the fallback's figure looks exactly
+        # like an ordinary hourly check, so an address permanently over quota
+        # would never be measured properly and nothing would show it.
+        self.assertTrue(r["sustained_refused"])
 
     def test_a_withheld_upload_is_retried_once_at_the_cap(self):
         from nexthopd import speedtest
