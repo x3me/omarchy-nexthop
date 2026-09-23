@@ -62,6 +62,21 @@ CHECK_SETTLE_S = 60.0
 # But a link that is simply slow must still be measured eventually, or Speed
 # never scores at all. Defer this long at most, then take what is there.
 CHECK_DEFER_MAX_S = 600.0
+# A scheduled check measures the line, so it waits for the machine to stop
+# using it: this long with nothing above `load_floor_bps` (a tenth of the
+# line's measured speed, floored). The machine's own download in the same
+# seconds would halve the reading and the median would carry it for hours.
+CHECK_QUIET_S = 30.0
+# ...but not all day: after this long waiting the slot is skipped, stored as
+# skipped, and the next one is due an interval later. A skipped check costs
+# nothing; one taken over a busy line costs the Speed figure.
+CHECK_QUIET_MAX_WAIT_S = 1800.0
+# And for the machine to have been awake this long since watching last
+# stopped (a suspend, or the daemon starting). HopSense's incident: a MacBook
+# asleep overnight woke for under a minute every ~15 min, the overdue check
+# ran in each wake on the radio the sleeping machine had kept, read 4-42
+# Mbps on a 196 Mbps line, and the index went from ~91 at bedtime to 27.
+CHECK_AWAKE_S = 120.0
 # How recently a peak test must have run, on this network, to be allowed to
 # contradict the everyday basis.
 PEAK_FRESH_S = 3600.0
@@ -86,6 +101,28 @@ def check_ready(now: float, assoc_since, rate_low_since, waiting_since,
     if rate_low_since is not None:
         return False
     return True
+
+
+def check_gate(now: float, busy_at, awake_since, quiet_waiting_since,
+               quiet_s: float = CHECK_QUIET_S,
+               max_wait_s: float = CHECK_QUIET_MAX_WAIT_S,
+               awake_s: float = CHECK_AWAKE_S) -> str:
+    """"run", "wait" or "skip" for a due scheduled check. Pure, so it is
+    testable. Only the scheduled check asks: a test someone asked for runs.
+
+    Awake first, since a machine that just woke is also busy re-joining and
+    its traffic says nothing about its user. Then quiet: the line must have
+    carried nothing above the busy floor for `quiet_s`, and a wait that has
+    lasted `max_wait_s` gives the slot up rather than measure over traffic.
+    """
+    if awake_since is not None and now - awake_since < awake_s:
+        return "wait"
+    if busy_at is not None and now - busy_at < quiet_s:
+        if quiet_waiting_since is not None \
+                and now - quiet_waiting_since >= max_wait_s:
+            return "skip"
+        return "wait"
+    return "run"
 
 
 # A stream whose newest sample is older than this has stopped talking — a
@@ -1384,6 +1421,9 @@ class Daemon:
         # Same floor the link-event logic uses, for the same reason: below
         # it, Wi-Fi power save makes the link look busy when nobody is.
         self.link_loaded = False
+        # The last moment the line was busy, for the scheduled check's quiet
+        # gate (check_gate). None until it first is.
+        self._busy_at = None
         # 5-second aux samples riding along in recent.json: throughput and
         # signal, so the panel's charts have history the moment they open.
         self.aux_ring = deque(maxlen=400)
@@ -1403,6 +1443,9 @@ class Daemon:
         self.wan_events = WanEventArbiter(self.store, self.notify)
         self.local_events = LocalEventArbiter(self.store, self.notify)
         self._watched = None       # (wall, awake_clock) of the last watch pass
+        # When watching last (re)started: the daemon's start, or the pass
+        # that found a gap (a suspend). The scheduled check's awake gate.
+        self._watching_since = time.time()
         self.captive = CaptiveWatch(net.reachability)
         self.lookup_watch = LookupWatch(self.store)
         # Is this connection someone's phone sharing its data? Recomputed
@@ -1439,6 +1482,8 @@ class Daemon:
         self.last_content_test = 0.0
         # Set while a due content check is waiting for the link to settle.
         self._check_waiting_since = None
+        # Set while a due content check is waiting for a quiet line.
+        self._quiet_waiting_since = None
         self.last_minute_flush = 0.0
         self.last_rollup = 0.0
         self.peak_requested = threading.Event()
@@ -1809,6 +1854,8 @@ class Daemon:
                 self.rates = ((rx1 - rx0) / dt, (tx1 - tx0) / dt)
                 self.link_loaded = ((self.rates[0] or 0.0) + (self.rates[1] or 0.0)
                                     >= self.load_floor_bps(now))
+                if self.link_loaded:
+                    self._busy_at = now
             else:
                 # Counter reset (interface bounced) — start the window over.
                 self.counter_samples = [self.counter_samples[-1]]
@@ -1859,6 +1906,7 @@ class Daemon:
             lookups = getattr(self, "lookup_watch", None)
             if lookups is not None:
                 lookups.lost_sight(watched_until, now)
+            self._watching_since = now
         self._watched = (now, awake)
 
         local = leg_state(self.local.since(LEG_STREAM_WINDOW_S), now)
@@ -2101,6 +2149,30 @@ class Daemon:
         if self.metered and self.config["meteredCare"]:
             return
 
+        # Not over the machine's own traffic, and not in the first moments of
+        # a wake — see check_gate.
+        gate = check_gate(now, self._busy_at, self._watching_since,
+                          self._quiet_waiting_since)
+        if gate == "wait":
+            if self._busy_at is not None and now - self._busy_at < CHECK_QUIET_S \
+                    and self._quiet_waiting_since is None:
+                self._quiet_waiting_since = now
+            return
+        if gate == "skip":
+            # Stored so a line busy every hour shows as that, not as a Speed
+            # figure that silently stopped updating.
+            self.store.put_test(int(now), "content", "", ok=False,
+                                detail="skipped-busy", network=self._network_name(),
+                                vpn=self.vpn_identity(),
+                                quiet_s=round(now - self._busy_at, 1),
+                                awake_s=round(now - self._watching_since, 1),
+                                asked=False)
+            self._quiet_waiting_since = None
+            self._content_boost_at = None
+            self.last_content_test = now
+            return
+        self._quiet_waiting_since = None
+
         # Wait for a link worth measuring, but not forever — see check_ready.
         if not check_ready(now, self.link_watch.assoc_since,
                            self.link_watch.low_since,
@@ -2111,9 +2183,12 @@ class Daemon:
         self._check_waiting_since = None
         self._content_boost_at = None
         self.last_content_test = now
+        # Recorded with the result, so a regression of check_gate shows in
+        # the stored checks and not only in the suite.
+        quiet_s = None if self._busy_at is None else round(now - self._busy_at, 1)
+        awake_s = round(now - self._watching_since, 1)
 
-        snap = self.link.latest
-        network = snap.get("ssid") or snap.get("name") or ""
+        network = self._network_name()
         tunnel_before = (self.vpn or {}).get("iface")
         self.content_running = True
 
@@ -2134,7 +2209,9 @@ class Daemon:
                     self.store.put_test(int(r["started"]), "content", r["engine"],
                                         down_mbps=r["down_mbps"], up_mbps=r["up_mbps"],
                                         bytes=r["bytes"], ok=True, network=network,
-                                        vpn=self.vpn_identity())
+                                        vpn=self.vpn_identity(),
+                                        quiet_s=quiet_s, awake_s=awake_s,
+                                        asked=False)
                     # A fresh result should reprice the baseline promptly.
                     self._baseline_cache = None
                     self._content_retry_used = False
@@ -2145,6 +2222,10 @@ class Daemon:
                 self.content_running = False
 
         threading.Thread(target=run, daemon=True, name="content-test").start()
+
+    def _network_name(self) -> str:
+        snap = self.link.latest
+        return snap.get("ssid") or snap.get("name") or ""
 
     def _content_hint(self, network: str, vpn: str = None):
         """What this network has shown, so the next check can size itself.
@@ -2206,10 +2287,12 @@ class Daemon:
                         ping_idle=r.get("ping_idle") or idle, ping_loaded=loaded,
                         jitter=r.get("jitter"), bytes=r.get("bytes"),
                         server=r.get("server"), ok=True,
-                        detail=r.get("url", ""), network=network, vpn=vpn)
+                        detail=r.get("url", ""), network=network, vpn=vpn,
+                        asked=True)
                 else:
                     self.store.put_test(int(r["started"]), "peak", r["engine"],
-                                        ok=False, network=network, vpn=vpn)
+                                        ok=False, network=network, vpn=vpn,
+                                        asked=True)
             finally:
                 self.peak_running = False
 

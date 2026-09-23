@@ -161,7 +161,9 @@ to use their address.
     self-healed interruptions at half
   - *Speed* — scored from small periodic **content checks** (up to ~40 MB on
     a fast line, ~5 MB on a slow one, hourly by default), not from
-    saturating speed tests. No configuration:
+    saturating speed tests. A check waits until this machine has left the
+    line quiet for 30 s (and skips the hour after 30 min of waiting), and
+    never runs in the first two minutes after a wake. No configuration:
     the score answers "is it fast enough" on an experience-anchored curve
     (diminishing returns past ~100 Mbps), minus a penalty when the line
     drops well below **its own recent p90** — so shared-office variance

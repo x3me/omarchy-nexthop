@@ -370,6 +370,10 @@ def report_text(store, live: dict, seconds: float, window: str) -> str:
             lines.append("speed tests:")
             for t in tests:
                 when = time.strftime("%a %H:%M", time.localtime(t["ts"]))
+                if t.get("detail") == "skipped-busy":
+                    lines.append(f"  {when}  {t['kind']:<8} skipped: this"
+                                 " machine kept the line busy")
+                    continue
                 down = f"{t['down_mbps']:.0f}" if t["down_mbps"] else "--"
                 up = f"{t['up_mbps']:.0f}" if t["up_mbps"] else "--"
                 via = "  via VPN" if t.get("vpn") else ""

@@ -2130,6 +2130,110 @@ class ContentCheckReadiness(unittest.TestCase):
         self.assertFalse(check_ready(now, now - 1, now - 1, now - 5))
 
 
+class CheckGate(unittest.TestCase):
+    """A scheduled check waits for a quiet line and a machine that has been
+    awake a while (HopSense's overnight MacBook, docs 2026-09-23)."""
+
+    NOW = 100_000.0
+
+    def gate(self, busy_ago=None, awake_for=3600.0, waiting_for=None):
+        now = self.NOW
+        return daemon_mod.check_gate(
+            now, None if busy_ago is None else now - busy_ago, now - awake_for,
+            None if waiting_for is None else now - waiting_for)
+
+    def test_a_quiet_awake_machine_runs(self):
+        self.assertEqual(self.gate(), "run")
+        self.assertEqual(self.gate(busy_ago=daemon_mod.CHECK_QUIET_S), "run")
+
+    def test_the_machines_own_traffic_holds_it(self):
+        self.assertEqual(self.gate(busy_ago=5), "wait")
+        self.assertEqual(self.gate(busy_ago=daemon_mod.CHECK_QUIET_S - 1), "wait")
+
+    def test_a_line_busy_for_half_an_hour_gives_the_slot_up(self):
+        cap = daemon_mod.CHECK_QUIET_MAX_WAIT_S
+        self.assertEqual(self.gate(busy_ago=1, waiting_for=cap - 1), "wait")
+        self.assertEqual(self.gate(busy_ago=1, waiting_for=cap), "skip")
+        # A quiet line runs however long it waited.
+        self.assertEqual(self.gate(busy_ago=60, waiting_for=cap * 2), "run")
+
+    def test_a_brief_wake_never_measures(self):
+        awake = daemon_mod.CHECK_AWAKE_S
+        self.assertEqual(self.gate(awake_for=40), "wait")
+        self.assertEqual(self.gate(awake_for=awake - 1), "wait")
+        self.assertEqual(self.gate(awake_for=awake), "run")
+        # Not even one that has waited out the quiet cap.
+        self.assertEqual(self.gate(busy_ago=1, awake_for=40,
+                                   waiting_for=daemon_mod.CHECK_QUIET_MAX_WAIT_S),
+                         "wait")
+
+
+class CheckGateEndToEnd(unittest.TestCase):
+    """The gate through maybe_content_test, with a real store and the
+    transfer stubbed."""
+
+    def setUp(self):
+        from unittest import mock
+        from nexthopd.daemon import Daemon
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["XDG_STATE_HOME"] = self.dir.name
+        self.d = Daemon()
+        self.addCleanup(self.cleanup)
+        self.now = time.time()
+        self.d.metered = False
+        self.d.last_content_test = self.now - 7200
+        self.d._watching_since = self.now - 3600
+        self.calls = []
+
+        def fake(**kw):
+            self.calls.append(kw)
+            return {"ok": True, "started": self.now, "engine": "cloudflare",
+                    "down_mbps": 300.0, "up_mbps": 100.0, "bytes": 1}
+        p = mock.patch.object(daemon_mod.speedtest, "content_test", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def cleanup(self):
+        self.d.store.close()
+        del os.environ["XDG_STATE_HOME"]
+        self.dir.cleanup()
+
+    def run_check(self):
+        import threading
+        self.d.maybe_content_test(self.now)
+        for t in threading.enumerate():
+            if t.name == "content-test":
+                t.join(5)
+        return self.d.store.tests(limit=5, kind="content")
+
+    def test_a_run_records_what_the_gate_saw(self):
+        self.d._busy_at = self.now - 100
+        rows = self.run_check()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual((rows[0]["quiet_s"], rows[0]["awake_s"], rows[0]["asked"]),
+                         (100.0, 3600.0, 0))
+
+    def test_busy_waits_and_stores_nothing(self):
+        self.d._busy_at = self.now - 2
+        self.assertEqual(self.run_check(), [])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.d._quiet_waiting_since, self.now)
+
+    def test_busy_for_the_whole_wait_is_stored_as_skipped(self):
+        self.d._busy_at = self.now - 2
+        self.d._quiet_waiting_since = self.now - daemon_mod.CHECK_QUIET_MAX_WAIT_S
+        rows = self.run_check()
+        self.assertEqual(self.calls, [])
+        self.assertEqual((rows[0]["ok"], rows[0]["detail"]), (0, "skipped-busy"))
+        self.assertEqual(self.d.last_content_test, self.now)   # slot consumed
+        self.assertIsNone(self.d._quiet_waiting_since)
+
+    def test_a_fresh_wake_waits(self):
+        self.d._watching_since = self.now - 30
+        self.assertEqual(self.run_check(), [])
+        self.assertEqual(self.calls, [])
+
+
 class SpeedTrustEndToEnd(unittest.TestCase):
     """The same thing through speed_score, where the samples come from the
     store and the peak has to be matched to this network."""

@@ -169,9 +169,12 @@ class Store:
                               ("minute", "drain_settled"),
                               ("minute", "drain_src"),
                               ("minute", "vpn"), ("tests", "vpn"),
-                              ("hour", "vpn"), ("events", "end_unknown")):
+                              ("hour", "vpn"), ("events", "end_unknown"),
+                              ("tests", "quiet_s"), ("tests", "awake_s"),
+                              ("tests", "asked")):
             kind = ("TEXT" if column in ("network", "probes", "drain_src", "vpn")
-                    else "INTEGER" if column == "end_unknown" else "REAL")
+                    else "INTEGER" if column in ("end_unknown", "asked")
+                    else "REAL")
             try:
                 self.db.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
@@ -208,12 +211,15 @@ class Store:
         self.db.execute(
             """INSERT OR REPLACE INTO tests
                (ts, kind, engine, down_mbps, up_mbps, ping_idle, ping_loaded,
-                jitter, bytes, server, ok, detail, network, vpn)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                jitter, bytes, server, ok, detail, network, vpn,
+                quiet_s, awake_s, asked)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (int(ts), kind, engine, kw.get("down_mbps"), kw.get("up_mbps"),
              kw.get("ping_idle"), kw.get("ping_loaded"), kw.get("jitter"),
              kw.get("bytes"), kw.get("server"), 1 if kw.get("ok", True) else 0,
-             kw.get("detail", ""), kw.get("network", ""), kw.get("vpn") or None),
+             kw.get("detail", ""), kw.get("network", ""), kw.get("vpn") or None,
+             kw.get("quiet_s"), kw.get("awake_s"),
+             None if kw.get("asked") is None else int(bool(kw["asked"]))),
         )
         self.db.commit()
 
