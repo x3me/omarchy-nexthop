@@ -457,18 +457,28 @@ def wan_from(total: dict, local: dict) -> dict:
         v = max(prev, v)
         out[key] = round(v, 2)
         prev = v
+    # The same rule for the rest of the leg as for its percentiles: without
+    # the router's reading, unknown, not zero. `last`, jitter and loss kept
+    # `or 0.0` after the percentiles stopped, so a gateway that sent nothing
+    # put the whole round trip's figure — the Wi-Fi's loss included — under
+    # the ISP's name (102 of 9,670 stored minutes here; HopSense, 2026-09-23).
+    # A router that sent probes and heard none back is no reading either:
+    # its loss of 1.0 would subtract the internet's loss down to a perfect 0.
+    heard = local.get("last") is not None
     t, l = total.get("last"), local.get("last")
-    if t is None or (l is not None and l > t + WAN_INVERSION_TOLERANCE_MS):
+    if t is None or l is None or l > t + WAN_INVERSION_TOLERANCE_MS:
         out["last"] = None
     else:
-        out["last"] = round(max(0.0, t - (l or 0.0)), 2)
+        out["last"] = round(max(0.0, t - l), 2)
     # Jitter does not subtract: variance on the local link propagates into
     # the total, so the honest reading is "no less than the total's jitter
     # minus the local's", floored at zero.
     tj, lj = total.get("jitter"), local.get("jitter")
-    out["jitter"] = None if tj is None else round(max(0.0, tj - (lj or 0.0)), 2)
+    out["jitter"] = (None if tj is None or lj is None or not heard
+                     else round(max(0.0, tj - lj), 2))
     tl, ll = total.get("loss"), local.get("loss")
-    out["loss"] = None if tl is None else max(0.0, tl - (ll or 0.0))
+    out["loss"] = (None if tl is None or ll is None or not heard
+                   else max(0.0, tl - ll))
     return out
 
 

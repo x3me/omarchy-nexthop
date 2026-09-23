@@ -139,8 +139,8 @@ class Scoring(unittest.TestCase):
         self.assertLessEqual(w["p95"], w["max"])
 
     def test_wan_loss_never_negative(self):
-        w = score.wan_from({"count": 10, "loss": 0.0, "p50": 5.0},
-                           {"count": 10, "loss": 0.1, "p50": 2.0})
+        w = score.wan_from({"count": 10, "loss": 0.0, "p50": 5.0, "last": 5.0},
+                           {"count": 10, "loss": 0.1, "p50": 2.0, "last": 2.0})
         self.assertEqual(w["loss"], 0.0)
 
     def test_speed_prefers_download(self):
@@ -225,8 +225,28 @@ class UnknownWanLeg(unittest.TestCase):
         # Substituting zero used to make the derived leg equal the total, so
         # a silent gateway produced a confident healthy internet figure that
         # was really the whole round trip wearing the wan leg's label.
-        for key in ("p50", "p75", "p95", "max"):
+        for key in ("p50", "p75", "p95", "max", "last", "jitter", "loss"):
             self.assertIsNone(w[key], key)
+
+    def test_a_router_that_sent_nothing_charges_the_isp_nothing(self):
+        # No local samples at all: every statistic None. The total's loss is
+        # the Wi-Fi's as much as the ISP's, and nothing here can split it.
+        total = {"count": 60, "p50": 9.0, "p75": 11.0, "p95": 20.0,
+                 "max": 30.0, "loss": 0.2, "jitter": 3.0, "last": 9.0}
+        none = {"count": 0, "loss": None, "p50": None, "p75": None,
+                "p95": None, "jitter": None, "last": None, "max": None}
+        w = score.wan_from(total, none)
+        for key in ("last", "jitter", "loss"):
+            self.assertIsNone(w[key], key)
+
+    def test_a_router_that_answered_nothing_cannot_zero_the_isp_loss(self):
+        # Pings refused: loss 1.0 is a reading about the router's control
+        # plane, and subtracting it would report a perfect 0 for the ISP.
+        total = {"count": 60, "p50": 9.0, "p75": 11.0, "p95": 20.0,
+                 "max": 30.0, "loss": 0.2, "jitter": 3.0, "last": 9.0}
+        refused = {"count": 60, "loss": 1.0, "p50": None, "p75": None,
+                   "p95": None, "jitter": None, "last": None, "max": None}
+        self.assertIsNone(score.wan_from(total, refused)["loss"])
 
     def test_known_local_still_subtracts(self):
         total = {"count": 500, "p50": 10.0, "p75": 12.0, "p95": 20.0,
@@ -236,6 +256,9 @@ class UnknownWanLeg(unittest.TestCase):
         w = score.wan_from(total, local)
         self.assertEqual(w["p50"], 8.0)
         self.assertGreaterEqual(w["p95"], w["p50"])
+        self.assertEqual(w["last"], 8.0)
+        self.assertEqual(w["jitter"], 0.6)
+        self.assertEqual(w["loss"], 0.0)
 
 
 class LagBand(unittest.TestCase):
