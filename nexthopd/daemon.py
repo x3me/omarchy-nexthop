@@ -715,6 +715,7 @@ class LegArbiter:
         self.kind = None          # QUIET_KIND | "outage" while down
         self._notify_at = None    # when the alarm becomes due
         self._notified = False    # whether it actually fired
+        self._opened_at = None    # onset of the open row, for the escalation
         self._words = self.words()
 
     @property
@@ -734,6 +735,7 @@ class LegArbiter:
         # `since` is when the silence began; the row carries the onset, not
         # the tick that crossed the threshold.
         began = int(since if since is not None else now)
+        self._opened_at = began
         # Fixed when the event opens: an outage that began through a VPN is
         # announced and recovered in the VPN's words even if the tunnel is
         # gone by the time it ends.
@@ -751,10 +753,19 @@ class LegArbiter:
         self._notify_at = now + NOTIFY_AFTER_S
         self._notified = False
 
-    def tick(self, now, beyond_ok: bool):
+    def tick(self, now, beyond_ok: bool, silent_since=None):
         if self.kind == self.QUIET_KIND and not beyond_ok:
-            self.store.close_event(self.event_id, int(now))
-            self.down(now, False)
+            # `beyond_ok` goes false only once everything past the leg has
+            # been silent for OUTAGE_AFTER_S, so this tick is the
+            # confirmation, not the onset. The outage starts where that
+            # silence began, like every other row, and the quiet row ends
+            # there — dated at the tick, each escalation was charged four
+            # seconds short and the quiet row four seconds long. Never
+            # before the quiet row itself opened.
+            onset = now if silent_since is None else \
+                min(now, max(silent_since, self._opened_at or silent_since))
+            self.store.close_event(self.event_id, int(onset))
+            self.down(now, False, since=onset)
             return
         if self.kind == "outage" and beyond_ok:
             # Something past the leg answers while the leg stays silent: the
@@ -1868,8 +1879,7 @@ class Daemon:
             elif move == "disruption":
                 self.record_disruption("local", self.watch_local)
             elif self.watch_local.down_since is not None:
-                self.local_events.tick(
-                    now, self._any_instrument_alive(OUTAGE_AFTER_S))
+                self.local_events.tick(now, *self._escalation(now))
 
         # The wan watch normally ignores any window where the local leg lost
         # packets: if the router is unreachable, the internet probe's losses
@@ -1925,8 +1935,7 @@ class Daemon:
             elif move == "disruption":
                 self.record_disruption("wan", self.watch_wan)
             elif self.watch_wan.down_since is not None:
-                self.wan_events.tick(
-                    now, self._any_instrument_alive(OUTAGE_AFTER_S))
+                self.wan_events.tick(now, *self._escalation(now))
 
     def record_disruption(self, leg: str, watch, beyond_ok=None):
         """A run that recovered before it became an outage.
@@ -1978,6 +1987,31 @@ class Daemon:
             if any(s[1] is not None for s in series.since(window_s)):
                 return True
         return False
+
+    def _beyond_silent_since(self, now: float):
+        """When everything past the leg fell silent: the first unanswered
+        sample, on any instrument, after the newest reply on any of them.
+        None when nothing in the stream window says (no reply seen), and the
+        caller then dates the escalation at the tick."""
+        newest = None
+        for series in self._instrument_series.values():
+            for smp in series.since(LEG_STREAM_WINDOW_S):
+                if smp[1] is not None and (newest is None or smp[0] > newest):
+                    newest = smp[0]
+        if newest is None:
+            return None
+        first = None
+        for series in self._instrument_series.values():
+            for smp in series.since(LEG_STREAM_WINDOW_S):
+                if smp[1] is None and smp[0] > newest \
+                        and (first is None or smp[0] < first):
+                    first = smp[0]
+        return first if first is not None and first <= now else None
+
+    def _escalation(self, now: float):
+        """(beyond_ok, silent_since) for an arbiter's tick."""
+        alive = self._any_instrument_alive(OUTAGE_AFTER_S)
+        return alive, (None if alive else self._beyond_silent_since(now))
 
     def _any_instrument_replied_between(self, a: float, b: float) -> bool:
         """Did some instrument hear the internet during [a, b)? Judged on the

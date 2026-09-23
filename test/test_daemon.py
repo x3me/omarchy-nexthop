@@ -1612,10 +1612,33 @@ class RouterThatNeverAnswersPings(_WatchReplay, unittest.TestCase):
         kinds = [r[0] for r in self.local_rows()]
         self.assertEqual(kinds, ["outage", "gateway-quiet", "outage",
                                  "gateway-quiet"])
-        second = self.local_rows()[2]
-        # Declared once every instrument had been silent OUTAGE_AFTER_S.
-        self.assertEqual(second[1], int(T + 100 + OUTAGE_AFTER_S))
+        quiet, second = self.local_rows()[1:3]
+        # Declared once every instrument had been silent OUTAGE_AFTER_S, and
+        # dated from where that silence began, like every other row. Until
+        # 0.2.67 it was dated at the confirming tick: the outage four seconds
+        # short, the quiet row four seconds long.
+        self.assertEqual(second[1], int(T + 100))
+        self.assertEqual(quiet[2], int(T + 100))
         self.assertEqual(second[2], int(T + 120))
+
+    def test_a_confirmation_that_never_came_leaves_it_quiet(self):
+        # Beyond silent for less than OUTAGE_AFTER_S: not an outage at all.
+        T = self.T
+        self.run_legs(T + 200, lambda t: t < T or T + 40 <= t < T + 100
+                      or t >= T + 100 + OUTAGE_AFTER_S - 1, t0=T - 20)
+        self.assertEqual([r[0] for r in self.local_rows()],
+                         ["outage", "gateway-quiet"])
+
+    def test_silence_onset_is_the_first_unanswered_sample(self):
+        self.d.total.add(10.0, 8.0)
+        self.d.total.add(10.5, None)
+        self.d.total.add(11.0, None)
+        self.clock[0] = 16.0
+        self.assertEqual(self.d._beyond_silent_since(16.0), 10.5)
+        # Nothing answered in the window: no onset to claim.
+        self.d.total.samples.clear()
+        self.d.total.add(12.0, None)
+        self.assertIsNone(self.d._beyond_silent_since(16.0))
 
 
 class VpnOnThePath(unittest.TestCase):
