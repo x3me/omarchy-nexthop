@@ -215,6 +215,128 @@ class SpeedScoring(unittest.TestCase):
         self.assertGreater(spd, 50)
 
 
+class SpeedFromTheLinkNow(unittest.TestCase):
+    """Speed takes its median only from checks that describe the link now:
+    none older than SPEED_CHECK_MAX_AGE_S, none from before a Wi-Fi band
+    change on the same network (HopSense rule, 2026-09-23)."""
+
+    def setUp(self):
+        from nexthopd.daemon import Daemon
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        from nexthopd.store import Store
+        self.store = Store(Path(self.dir.name) / "t.db")
+        self.addCleanup(self.store.close)
+        self.now = time.time()
+        d = Daemon.__new__(Daemon)
+        d.store = self.store
+        d.config = {"planDownMbps": 0, "planUpMbps": 0}
+        d.vpn = None
+        d.wan_ip = None
+
+        class Link:
+            latest = {"band": "5 GHz"}
+        d.link = Link()
+        self.d = d
+
+    def put(self, ago, mbps, band="5 GHz"):
+        self.store.put_test(int(self.now - ago), "content", "cloudflare",
+                            down_mbps=mbps, up_mbps=mbps / 3, ok=True,
+                            network="home", band=band)
+
+    def test_an_evening_check_does_not_describe_the_morning(self):
+        # Literal hours, not the constant: the rule is "three hours".
+        self.put(4 * 3600, 30.0)
+        self.put(3 * 3600 + 60, 40.0)
+        spd, ctx = self.d.speed_score(self.now, "home")
+        self.assertIsNone(spd)
+        self.assertEqual(ctx["stale"], "age")
+        self.assertEqual(ctx["stale_ts"], int(self.now - 3 * 3600 - 60))
+        self.assertIsNone(ctx["last_down"])
+
+    def test_old_checks_leave_the_median(self):
+        self.put(5 * 3600, 20.0)
+        self.put(2 * 3600, 300.0)
+        self.put(600, 320.0)
+        _, ctx = self.d.speed_score(self.now, "home")
+        self.assertEqual(ctx["checks_down"], [320.0, 300.0])
+        self.assertTrue(ctx["scored"])
+
+    def test_one_recent_check_is_shown_and_cannot_score(self):
+        self.put(5 * 3600, 300.0)
+        self.put(600, 310.0)
+        spd, ctx = self.d.speed_score(self.now, "home")
+        self.assertIsNotNone(spd)
+        self.assertEqual(ctx["samples"], 1)
+        self.assertFalse(ctx["scored"])
+
+    def test_checks_from_before_a_band_change_are_retired(self):
+        self.put(1800, 40.0, band="2.4 GHz")
+        self.put(1200, 45.0, band="2.4 GHz")
+        spd, ctx = self.d.speed_score(self.now, "home")
+        self.assertIsNone(spd)
+        self.assertEqual((ctx["stale"], ctx["band"]), ("band", "5 GHz"))
+        # And a 5 GHz check older than the 2.4 GHz ones is from before the
+        # change too: the cut is at the first check on another band.
+        self.put(2400, 300.0, band="5 GHz")
+        self.assertIsNone(self.d.speed_score(self.now, "home")[0])
+        self.put(300, 310.0, band="5 GHz")
+        _, ctx = self.d.speed_score(self.now, "home")
+        self.assertEqual(ctx["checks_down"], [310.0])
+
+    def test_rows_stored_before_bands_were_recorded_are_not_cut_on_band(self):
+        self.put(1200, 300.0, band=None)
+        self.put(600, 310.0, band=None)
+        _, ctx = self.d.speed_score(self.now, "home")
+        self.assertEqual(ctx["samples"], 2)
+
+    def test_wired_has_no_band_to_cut_on(self):
+        self.d.link.latest = {}
+        self.put(1200, 300.0, band="2.4 GHz")
+        self.put(600, 310.0, band="2.4 GHz")
+        self.assertEqual(self.d.speed_score(self.now, "home")[1]["samples"], 2)
+
+    def test_the_30_day_baseline_is_not_cut(self):
+        for i in range(6):
+            self.put(86400 * (i + 1), 400.0)
+        self.put(600, 380.0)
+        self.put(300, 390.0)
+        _, ctx = self.d.speed_score(self.now, "home")
+        self.assertEqual(ctx["baseline_down"], 400.0)
+
+
+class BandChangeSchedulesACheck(unittest.TestCase):
+    def setUp(self):
+        from nexthopd.daemon import Daemon
+        self.d = Daemon.__new__(Daemon)
+        self.d._content_boost_at = None
+
+    def test_a_band_change_on_the_same_network_checks_again_soon(self):
+        from nexthopd.daemon import CONTENT_SETTLE_AFTER_CHANGE_S as SETTLE
+        self.d._follow_band(100.0, "home", "2.4 GHz")
+        self.assertIsNone(self.d._content_boost_at)       # first sighting
+        self.d._follow_band(200.0, "home", "5 GHz")
+        self.assertEqual(self.d._content_boost_at, 200.0 + SETTLE)
+
+    def test_at_most_once_per_gap(self):
+        from nexthopd.daemon import BAND_CHECK_MIN_GAP_S as GAP
+        self.d._follow_band(0.0, "home", "2.4 GHz")
+        self.d._follow_band(10.0, "home", "5 GHz")
+        self.d._content_boost_at = None
+        self.d._follow_band(20.0, "home", "2.4 GHz")      # steering back
+        self.assertIsNone(self.d._content_boost_at)
+        self.d._follow_band(10.0 + GAP, "home", "5 GHz")
+        self.assertIsNotNone(self.d._content_boost_at)
+
+    def test_a_new_network_is_not_a_band_change(self):
+        # The network change schedules its own check.
+        self.d._follow_band(0.0, "home", "2.4 GHz")
+        self.d._follow_band(10.0, "cafe", "5 GHz")
+        self.assertIsNone(self.d._content_boost_at)
+        self.d._follow_band(20.0, "cafe", "5 GHz")
+        self.assertIsNone(self.d._content_boost_at)
+
+
 class UnknownWanLeg(unittest.TestCase):
     def test_missing_local_yields_unknown_not_the_whole_round_trip(self):
         total = {"count": 500, "p50": 3.5, "p75": 4.0, "p95": 18.0,

@@ -45,13 +45,23 @@ equal(tip(Object.assign({}, auto, {scored: false, peak_down: 365.3,
 
 equal(tip({basis: "auto", last_down: 88.4, samples: 1, min_samples: 2,
            checks_down: [88.4], scored: false, vpn: false}, null),
-      "One check on this network so far: 88 Mbps\n"
+      "One recent check on this network: 88 Mbps\n"
       + "Not counted in the score until there are 2 checks here.",
       "too few checks");
 
 equal(tip(Object.assign({}, auto, {vpn: true}), null),
       "Median of the last 3 checks here, newest first:\n165 · 96 · 114 Mbps\n"
       + "Through the VPN, so this measures the tunnel.", "through a VPN");
+
+// Checks exist but none describes the link now: said, not shown as "none yet".
+equal(tip({basis: "auto", last_down: null, stale: "age", stale_ts: T1551,
+           max_age_s: 10800, vpn: false}, null),
+      "The last check here was at 15:51, over 3 h ago.\n"
+      + "Left out of the score until a new one runs.", "stale by age");
+equal(tip({basis: "auto", last_down: null, stale: "band", stale_ts: T1551,
+           band: "5 GHz", max_age_s: 10800, vpn: false}, null),
+      "The Wi-Fi moved to 5 GHz after the last check here.\n"
+      + "Left out of the score until a check on this band.", "stale by band");
 
 equal(tip({basis: "auto", last_down: null, pending: true, vpn: false}, null),
       "No speed check on this network yet.", "none yet");

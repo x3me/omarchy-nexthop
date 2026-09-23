@@ -42,6 +42,15 @@ Column {
     if (metered && metered.care)
       return "Hourly checks are paused on " + metered.label + ",\n"
         + "which is sharing its mobile data. Setup turns this off."
+    // Checks exist, but none describes the link now (speed_score's
+    // SPEED_CHECK_MAX_AGE_S and band rule), so the index stands without it.
+    if (ctx.stale === "band")
+      return "The Wi-Fi moved to " + ctx.band + " after the last check here.\n"
+        + "Left out of the score until a check on this band."
+    if (ctx.stale === "age")
+      return "The last check here was at " + hhmm(ctx.stale_ts) + ", over "
+        + Math.round(ctx.max_age_s / 3600) + " h ago.\n"
+        + "Left out of the score until a new one runs."
     if (ctx.last_down === null || ctx.last_down === undefined)
       return ctx.vpn ? "No speed check through this VPN yet."
         : "No speed check on this network yet."
@@ -57,7 +66,7 @@ Column {
       lines.push("Median of the last " + checks.length + " checks here, newest first:\n"
         + checks.map(function (v) { return Math.round(v) }).join(" · ") + " Mbps")
     else
-      lines.push("One check on this network so far: "
+      lines.push("One recent check on this network: "
         + Math.round(ctx.last_down) + " Mbps")
     if (ctx.vpn) lines.push("Through the VPN, so this measures the tunnel.")
     if (ctx.scored === false) {
@@ -272,6 +281,10 @@ Column {
         var m = tab.live ? tab.live.metered : null
         var ctx = tab.live ? tab.live.speed_ctx : null
         var held = m && m.care
+        if (ctx && !held && ctx.stale === "band")
+          return "moved to " + ctx.band
+        if (ctx && !held && ctx.stale === "age")
+          return "no check in " + Math.round(ctx.max_age_s / 3600) + " h"
         if (!ctx || ctx.last_down === null || ctx.last_down === undefined)
           return held ? "checks paused on " + m.label
             : (ctx && ctx.vpn ? "no check via VPN yet" : "no content check yet")

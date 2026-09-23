@@ -254,6 +254,18 @@ CONTENT_RETRY_S = 300.0
 # public address — before the prompt check runs. Long enough that a roam or a
 # reconnection in progress is not sampled as the line's capability.
 CONTENT_SETTLE_AFTER_CHANGE_S = 90.0
+# Speed is the median of the checks that describe the link NOW: none older
+# than this, and none from before the last Wi-Fi band change on the network.
+# With none left the figure is withheld, not carried: an evening's check does
+# not describe the morning, and a 2.4 GHz check does not describe 5 GHz.
+# Replayed over 14 days here: withheld in 5.9% of minutes where the old rule
+# scored, and where both score it never lowered Speed (mean +0.14, max
+# +6.9): the checks it drops were the ones pulling the median down. The
+# 30-day baseline behind the degradation penalty is not cut.
+SPEED_CHECK_MAX_AGE_S = 3 * 3600.0
+# A band change on the same network schedules a check (after the change
+# settle), at most this often, so band steering cannot run one every minute.
+BAND_CHECK_MIN_GAP_S = 900.0
 
 
 class Config:
@@ -1692,6 +1704,21 @@ class Daemon:
             # same settle a network change gets.
             self._content_boost_at = now + CONTENT_SETTLE_AFTER_CHANGE_S
 
+    def _follow_band(self, now: float, network: str, wifi_band):
+        """A Wi-Fi band change on the same network retires Speed's checks
+        (speed_score) and schedules a fresh one after the change settle, at
+        most once per BAND_CHECK_MIN_GAP_S."""
+        prev = getattr(self, "_band_seen", None)
+        self._band_seen = (network, wifi_band) if wifi_band else prev
+        if not wifi_band or prev is None or prev[0] != network \
+                or prev[1] == wifi_band:
+            return
+        last = getattr(self, "_band_check_at", None)
+        if last is not None and now - last < BAND_CHECK_MIN_GAP_S:
+            return
+        self._band_check_at = now
+        self._content_boost_at = now + CONTENT_SETTLE_AFTER_CHANGE_S
+
     def _lose_sight_of_path_states(self, watched_until):
         """An unwatched gap ends every open span where watching stopped; the
         next pass opens them again if the state is still there."""
@@ -2189,6 +2216,7 @@ class Daemon:
         awake_s = round(now - self._watching_since, 1)
 
         network = self._network_name()
+        band_before = self.link.latest.get("band")
         tunnel_before = (self.vpn or {}).get("iface")
         self.content_running = True
 
@@ -2200,10 +2228,12 @@ class Daemon:
                                            up_hint_mbps=up_hint)
                 after = self.link.latest
                 if (after.get("ssid") or after.get("name") or "") != network \
+                        or after.get("band") != band_before \
                         or (self.vpn or {}).get("iface") != tunnel_before:
-                    # The network, or the tunnel, changed under the transfer,
-                    # so the sample belongs to neither side. The change has
-                    # already scheduled a fresh check of its own.
+                    # The network, the Wi-Fi band or the tunnel changed under
+                    # the transfer, so the sample belongs to neither side.
+                    # The change has already scheduled a fresh check of its
+                    # own.
                     return
                 if r["ok"]:
                     self.store.put_test(int(r["started"]), "content", r["engine"],
@@ -2211,7 +2241,7 @@ class Daemon:
                                         bytes=r["bytes"], ok=True, network=network,
                                         vpn=self.vpn_identity(),
                                         quiet_s=quiet_s, awake_s=awake_s,
-                                        asked=False)
+                                        asked=False, band=band_before)
                     # A fresh result should reprice the baseline promptly.
                     self._baseline_cache = None
                     self._content_retry_used = False
@@ -2341,6 +2371,27 @@ class Daemon:
             return None, {"basis": "auto", "baseline_down": None,
                           "last_down": None, "last_up": None,
                           "pending": True, "vpn": bool(vpn)}
+        # Only checks that describe the link now — see SPEED_CHECK_MAX_AGE_S.
+        # A row stored before bands were recorded (band NULL) is not cut on
+        # band; the age limit retires those within three hours.
+        link = getattr(self, "link", None)
+        wifi_band = (link.latest or {}).get("band") if link else None
+        now_checks = []
+        stale = "age"
+        for t in mine:
+            if now - t["ts"] > SPEED_CHECK_MAX_AGE_S:
+                break
+            if wifi_band and t.get("band") and t["band"] != wifi_band:
+                stale = "band"
+                break
+            now_checks.append(t)
+        if not now_checks:
+            return None, {"basis": "auto", "baseline_down": None,
+                          "last_down": None, "last_up": None,
+                          "stale": stale, "stale_ts": mine[0]["ts"],
+                          "band": wifi_band,
+                          "max_age_s": SPEED_CHECK_MAX_AGE_S, "vpn": bool(vpn)}
+        mine = now_checks
 
         # Median of the last few checks here, so one bad sample — a check
         # that ran mid-roam or during someone's upload — cannot pin the
@@ -2574,6 +2625,7 @@ class Daemon:
             self._content_boost_at = now + CONTENT_SETTLE_AFTER_CHANGE_S
         if network:
             self._content_network = network
+        self._follow_band(now, network, snap.get("band"))
         if snap.get("kind") == "wifi":
             self.link_watch.sample(now, snap,
                                    (self.rates[0] or 0) + (self.rates[1] or 0))

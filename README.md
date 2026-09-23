@@ -163,7 +163,9 @@ to use their address.
     a fast line, ~5 MB on a slow one, hourly by default), not from
     saturating speed tests. A check waits until this machine has left the
     line quiet for 30 s (and skips the hour after 30 min of waiting), and
-    never runs in the first two minutes after a wake. No configuration:
+    never runs in the first two minutes after a wake. Only checks from the
+    last 3 h, on the Wi-Fi band in use now, count; with none, Speed is left
+    out of the index rather than carried over. No configuration:
     the score answers "is it fast enough" on an experience-anchored curve
     (diminishing returns past ~100 Mbps), minus a penalty when the line
     drops well below **its own recent p90** — so shared-office variance
