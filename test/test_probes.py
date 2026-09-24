@@ -198,6 +198,35 @@ class PingAcrossAStop(unittest.TestCase):
         self.assertIsNone(p._stale_upto)
         self.assertEqual(len(s.all()), 3)
 
+    def test_the_sequence_wrapping_after_a_stop_is_not_the_stop(self):
+        # 2026-09-24, this laptop: gateway ping started 17:33, a 22 s suspend
+        # at 22:06 (seq ~32,760), and icmp_seq — 16 bits — wrapped at 02:40.
+        # The guard had kept "seq <= 32,761 is from before the stop" for
+        # ever, so every line after the wrap was dropped: the router leg
+        # blank from 02:42, `--` on both connectors over a working line.
+        lines = ["[1000.0] 64 bytes from 192.0.2.1: icmp_seq=32759 ttl=64 time=2.0 ms",
+                 "[1000.5] 64 bytes from 192.0.2.1: icmp_seq=32760 ttl=64 time=2.0 ms",
+                 # 22 s asleep
+                 "[1023.0] 64 bytes from 192.0.2.1: icmp_seq=32762 ttl=64 time=2.1 ms"]
+        t = 1023.0
+        for seq in list(range(32763, 65536)) + list(range(0, 40)):
+            t += 0.5
+            lines.append("[%.1f] 64 bytes from 192.0.2.1: icmp_seq=%d ttl=64 "
+                         "time=2.0 ms" % (t, seq))
+        s, _ = self.replay(lines)
+        after_wrap = [r for r in s.all() if r[0] > t - 20]
+        self.assertEqual(len(after_wrap), 40)
+
+    def test_a_stop_across_the_wrap_still_drops_only_its_own_packet(self):
+        s, _ = self.replay([
+            "[100.0] 64 bytes from 192.0.2.1: icmp_seq=65534 ttl=64 time=2.1 ms",
+            "[100.5] 64 bytes from 192.0.2.1: icmp_seq=65535 ttl=64 time=2.1 ms",
+            # frozen; seq 0 was in flight and printed on thaw
+            "[5980.9] 64 bytes from 192.0.2.1: icmp_seq=0 ttl=64 time=2.2 ms",
+            "[5981.4] 64 bytes from 192.0.2.1: icmp_seq=1 ttl=64 time=2.3 ms"])
+        # seq 0 was sent before the stop, however small its number; seq 1 not.
+        self.assertEqual([r[0] for r in s.all() if r[0] > 5000], [5981.4])
+
 
 class SynRetransmits(unittest.TestCase):
     """A handshake rescued by a retransmitted SYN is loss, not latency.

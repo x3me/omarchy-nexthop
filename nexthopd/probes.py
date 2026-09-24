@@ -142,6 +142,16 @@ class Series:
         }
 
 
+# `icmp_seq` is a 16-bit field: ping's sequence wraps to 0 after 65535.
+SEQ_MOD = 65536
+
+
+def seq_after(a: int, b: int) -> bool:
+    """Is sequence `a` later than `b`, allowing for the wrap? Serial-number
+    arithmetic (RFC 1982): later means less than half the space ahead."""
+    return 0 < (a - b) % SEQ_MOD < SEQ_MOD // 2
+
+
 class PingProbe(threading.Thread):
     """Runs one `ping` forever, restarting it if it dies, feeding a Series.
 
@@ -173,12 +183,13 @@ class PingProbe(threading.Thread):
         # can be believed to belong to that packet.
         self._charged = {}
         # Whether ping itself stopped running (a suspend freezes it with the
-        # daemon): the timestamp of the last line and the highest sequence
-        # seen, and — after such a stop — the highest sequence that was sent
-        # before it. See _before_a_stop.
+        # daemon): the timestamp of the last line and the newest sequence
+        # seen, and — after such a stop — the newest sequence that was sent
+        # before it, until when that can still be printed. See _before_a_stop.
         self._last_line_t = None
-        self._max_seq = 0
+        self._last_seq = None
         self._stale_upto = None
+        self._stale_until = None
 
     def _loaded(self) -> bool:
         try:
@@ -222,8 +233,9 @@ class PingProbe(threading.Thread):
         self._pending.clear()
         self._charged.clear()
         self._last_line_t = None
-        self._max_seq = 0
+        self._last_seq = None
         self._stale_upto = None
+        self._stale_until = None
 
     def _grace(self) -> float:
         return self.interval * 2.5 + 1.0
@@ -247,12 +259,27 @@ class PingProbe(threading.Thread):
         sent is announced only when the next is). Those are neither answered
         nor lost as far as the leg is concerned: nobody was watching when they
         were, and the gap is the daemon's to account for.
+
+        Two limits, both learned from one night (2026-09-24). The rule lives
+        one grace period after the thaw and no longer: a packet sent before
+        the stop is printed by then or never. And `icmp_seq` is 16 bits, so
+        sequences compare modulo 65536 — at 0.5 s it wraps every 9.1 h, and a
+        rule kept for ever as "seq <= N" dropped every line after the wrap,
+        blanking the router leg over a working line from 02:42 until morning.
         """
-        if self._last_line_t is not None and t - self._last_line_t > self._grace():
-            self._stale_upto = self._max_seq + 1
+        if self._last_line_t is not None and t - self._last_line_t > self._grace() \
+                and self._last_seq is not None:
+            self._stale_upto = (self._last_seq + 1) % SEQ_MOD
+            self._stale_until = t + self._grace()
         self._last_line_t = t
-        self._max_seq = max(self._max_seq, seq)
-        return self._stale_upto is not None and seq <= self._stale_upto
+        if self._last_seq is None or seq_after(seq, self._last_seq):
+            self._last_seq = seq
+        if self._stale_upto is None:
+            return False
+        if t > self._stale_until:
+            self._stale_upto = self._stale_until = None
+            return False
+        return not seq_after(seq, self._stale_upto)
 
     def _expire(self, now: float):
         """A packet still unanswered after the grace period is a lost packet.
