@@ -253,7 +253,7 @@ the daemon holds a lock, so the shell service simply attaches.
 
 The internet leg is measured by a small pool of instruments: ICMP and a
 TCP handshake to the anchor you configure (`1.1.1.1` by default), plus TCP
-handshakes to `speed.cloudflare.com` and `dns.google` — one probe target
+handshakes to `1.0.0.1` and `dns.google` — one probe target
 outside Cloudflare, so a Cloudflare incident cannot silence the whole
 pool. The **two best** instruments — fewest losses, steadiest tails,
 re-ranked every five minutes with flap damping — feed the score; the rest

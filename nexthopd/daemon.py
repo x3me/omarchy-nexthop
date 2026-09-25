@@ -211,11 +211,21 @@ MIN_PLAUSIBLE_INFLATION = 0.95
 # whenever it holds a seat (instruments.py).
 TCP_PROBE_INTERVAL_S = 1.0
 TCP_PROBE_PORT = 443
-# The rest of the instrument pool (see instruments.py). Cloudflare edge
-# is a host the daemon already fetches from; dns.google is the one
-# probe target outside Cloudflare, so a Cloudflare incident cannot
-# silence the whole pool. TCP handshakes only — no payload.
-CF_EDGE_HOST = "speed.cloudflare.com"
+# The rest of the instrument pool (see instruments.py). dns.google is the one
+# probe target outside Cloudflare, so a Cloudflare incident cannot silence the
+# whole pool. TCP handshakes only — no payload.
+#
+# The Cloudflare instrument is 1.0.0.1, the resolver's second address: an
+# address meant to be probed, on the same edge. It was speed.cloudflare.com
+# until 0.2.71, the content check's own host, whose __down answers 429 on a
+# quota held per source address. With the check off for an hour (2026-09-25,
+# tcpdump on this laptop) that host still saw 749 handshakes from us, the
+# instrument at standby cadence; behind CGNAT a household shares that quota,
+# and the hourly check is what fails when it runs out (HopSense probe-pool-v1).
+CF_EDGE_HOST = "1.0.0.1"
+# If the user's own anchor IS that address, the pool would hold one instrument
+# twice; the resolver's first address takes its place.
+CF_EDGE_FALLBACK = "1.1.1.1"
 DIVERSITY_HOST = "dns.google"
 # A benched instrument idles at a tenth of its seated cadence: enough
 # to stay rankable, cheap enough to keep around.
@@ -1539,9 +1549,10 @@ class Daemon:
 
     def _instrument_pool(self):
         anchor = self.config["internetAnchor"]
+        cf = CF_EDGE_FALLBACK if anchor == CF_EDGE_HOST else CF_EDGE_HOST
         return [("icmp-anchor", "icmp", anchor),
                 ("tcp-anchor", "tcp", "%s:443" % anchor),
-                ("tcp-cf", "tcp", CF_EDGE_HOST + ":443"),
+                ("tcp-cf", "tcp", cf + ":443"),
                 ("tcp-google", "tcp", DIVERSITY_HOST + ":443")]
 
     def _probe_targets(self) -> dict:

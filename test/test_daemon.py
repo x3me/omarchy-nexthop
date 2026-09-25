@@ -1930,19 +1930,26 @@ class TheLinkThreadNeverWaitsOnAResolver(unittest.TestCase):
         d = self.daemon("1.1.1.1", {
             "icmp-anchor": PingProbe("1.1.1.1", probes_Series()),
             "tcp-anchor": self.tcp("1.1.1.1", ["1.1.1.1"]),
-            "tcp-cf": self.tcp("speed.cloudflare.com", ["198.51.100.10", "198.51.100.11"]),
-            "tcp-google": self.tcp("dns.google", [])})     # never resolved
+            "tcp-cf": self.tcp("1.0.0.1", ["1.0.0.1"]),
+            "tcp-google": self.tcp("dns.google", ["198.51.100.10", "198.51.100.11"])})
         self.assertEqual(d._probe_targets(), {"icmp-anchor": "1.1.1.1",
                                               "tcp-anchor": "1.1.1.1",
-                                              "tcp-cf": "198.51.100.10"})
+                                              "tcp-cf": "1.0.0.1",
+                                              "tcp-google": "198.51.100.10"})
+        # A name its probe has not resolved yet is left out, not looked up.
+        d = self.daemon("1.1.1.1", {"tcp-google": self.tcp("dns.google", [])})
+        self.assertNotIn("tcp-google", d._probe_targets())
 
     def test_a_named_anchor_takes_the_address_its_tcp_probe_resolved(self):
         d = self.daemon("one.one.one.one", {
             "tcp-anchor": self.tcp("one.one.one.one", ["198.51.100.1"])})
         self.assertEqual(d._probe_targets(), {"icmp-anchor": "198.51.100.1",
-                                              "tcp-anchor": "198.51.100.1"})
-        # Before any probe has an address, a name is left out, not looked up.
-        self.assertEqual(self.daemon("one.one.one.one", {})._probe_targets(), {})
+                                              "tcp-anchor": "198.51.100.1",
+                                              "tcp-cf": "1.0.0.1"})
+        # Before any probe has an address, a name is left out, not looked up;
+        # only the literal Cloudflare address is known without one.
+        self.assertEqual(self.daemon("one.one.one.one", {})._probe_targets(),
+                         {"tcp-cf": "1.0.0.1"})
 
     def test_the_default_check_never_calls_the_resolver(self):
         import socket
@@ -2706,3 +2713,30 @@ class RoamDoesNotResetTheSeries(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstrumentPool(unittest.TestCase):
+    """What the latency pool probes (0.2.71, HopSense probe-pool-v1)."""
+
+    def pool(self, anchor="1.1.1.1"):
+        d = Daemon.__new__(Daemon)
+        d.config = {"internetAnchor": anchor}
+        return d._instrument_pool()
+
+    def test_the_content_checks_host_is_never_a_latency_instrument(self):
+        # speed.cloudflare.com rate-limits __down per source address; its
+        # handshakes at probe cadence spent a quota the hourly check needs.
+        for anchor in ("1.1.1.1", "1.0.0.1", "9.9.9.9"):
+            targets = [t for _, _, t in self.pool(anchor)]
+            self.assertFalse(any("speed.cloudflare.com" in t for t in targets))
+
+    def test_the_default_pool(self):
+        self.assertEqual([(k, t) for k, _, t in self.pool()],
+                         [("icmp-anchor", "1.1.1.1"), ("tcp-anchor", "1.1.1.1:443"),
+                          ("tcp-cf", "1.0.0.1:443"), ("tcp-google", "dns.google:443")])
+
+    def test_no_instrument_twice_when_the_anchor_is_the_cloudflare_address(self):
+        pool = self.pool("1.0.0.1")
+        tcp = [t for _, kind, t in pool if kind == "tcp"]
+        self.assertEqual(len(tcp), len(set(tcp)))
+        self.assertIn(("tcp-cf", "tcp", "1.1.1.1:443"), pool)
