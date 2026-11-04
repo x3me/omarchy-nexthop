@@ -262,7 +262,9 @@ def merged_stats(sample_lists) -> dict:
 
     Here each instrument's replies carry weight 1/n, percentiles are the
     weighted nearest rank over the pool, jitter is the mean of the
-    instruments' own IPDVs, and loss is the mean of their loss rates.
+    instruments' own IPDVs, and loss is the mean of their loss rates —
+    over the instruments that replied at all, so a seat with no answers
+    cannot pass its silence off as fractional loss.
     One instrument reduces to Series.stats exactly, so `lag_icmp` and the
     local leg are untouched.
     """
@@ -273,7 +275,15 @@ def merged_stats(sample_lists) -> dict:
         return Series.stats(lists[0])
     per = [Series.stats(lst) for lst in lists]
     count = sum(p["count"] for p in per)
-    loss = statistics.fmean(p["loss"] for p in per)
+    # A seat that answered nothing at all in the window is a broken probe
+    # path, not half the packets lost: averaging its 1.0 with a live seat's
+    # 0.0 reported 50 % loss on a line that lost nothing, and Lag charged
+    # 500 ms of retransmit for it. Seen on a box whose VPN drops ICMP while
+    # TCP to the same hosts answers, in the minutes before the bench
+    # reseats the dead instrument. When every seat is silent the mean is
+    # 1.0 as before, and the outage stands.
+    answered = [p for p in per if p["p50"] is not None]
+    loss = statistics.fmean(p["loss"] for p in (answered or per))
     replies = [[smp[1] for smp in lst if smp[1] is not None] for lst in lists]
     voiced = [r for r in replies if r]
     if not voiced:
