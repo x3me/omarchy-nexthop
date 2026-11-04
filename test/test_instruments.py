@@ -216,6 +216,22 @@ class EqualWeightMerge(unittest.TestCase):
         self.assertNotAlmostEqual(st["loss"], a_loss * len(a) / (len(a) + len(b)),
                                   places=3)
 
+    def test_a_seat_that_never_answered_is_not_fractional_loss(self):
+        """A probe path with no replies is dead, not 50 % packet loss. Seen
+        when a VPN drops ICMP while TCP to the same host answers."""
+        from nexthopd.instruments import merged_stats
+        now = time.time()
+        dead = self.stream(lambda i: None, 0.5, now=now)
+        live = self.stream(lambda i: 15.0, 1.0, offset=0.25, now=now)
+        st = merged_stats([dead.since(30), live.since(30)])
+        self.assertEqual(st["loss"], 0.0)
+        self.assertEqual(st["p50"], 15.0)
+        # Every seat silent is an outage and still reads as total loss.
+        both = merged_stats([dead.since(30),
+                             self.stream(lambda i: None, 1.0, now=now).since(30)])
+        self.assertEqual(both["loss"], 1.0)
+        self.assertIsNone(both["p50"])
+
     def test_one_instrument_is_series_stats_exactly(self):
         from nexthopd.instruments import merged_stats
         a = self.stream(lambda i: 5.0 + (i % 3), 0.5)
