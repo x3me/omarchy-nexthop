@@ -1,5 +1,60 @@
-#!/bin/bash
-# The Nexthop query CLI. History, events, tests, reports — all in JSON,
-# except `report`, which is the plain-text ISP-ticket summary.
-exec env PYTHONPATH="$(dirname "$(dirname "$(realpath "$0")")")" \
-  python3 -m nexthopd.cli "$@"
+#!/bin/sh
+# Runs the nexthop binary pinned by bin/nexthop.sha256. The first run after an
+# install or update fetches it from the release of the repository this
+# checkout came from, and keeps it only if the checksum matches.
+set -eu
+root=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+want=$(cut -d' ' -f1 "$root/bin/nexthop.sha256")
+# Outside the plugin folder: the shell reloads a plugin on any write inside it.
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/nexthop
+exe=$cache/$want/nexthop
+failed=$cache/$want.failed
+export NEXTHOP_PLUGIN_DIR="$root"
+
+fail() {
+  echo "nexthop: $*" >&2
+  exit 1
+}
+
+release_url() {
+  version=$(jq -er .version "$root/manifest.json") || fail "cannot read the version in $root/manifest.json"
+  origin=$(GIT_CEILING_DIRECTORIES=$(dirname "$root") git -C "$root" remote get-url origin) ||
+    fail "$root has no origin remote"
+  repo=$(printf '%s\n' "$origin" | sed -En 's#/$##; s#\.git$##; s#^(https://|ssh://git@|git@)github\.com[:/]([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)$#\2#p')
+  [ -n "$repo" ] || fail "origin $origin is not a GitHub repository"
+  echo "https://github.com/$repo/releases/download/v$version/nexthop-x86_64"
+}
+
+fetch() {
+  [ "$(uname -m)" = x86_64 ] || fail "only x86-64 is published; build from source with cargo"
+  if [ -n "$(find "$failed" -mmin -5 2>/dev/null)" ]; then
+    fail "the last download failed less than 5 minutes ago: $(cat "$failed")"
+  fi
+  url=$(release_url)
+  mkdir -p "$cache/$want"
+  tmp=$(mktemp "$cache/$want/.download.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 120 --max-filesize 67108864 -o "$tmp" "$url"; then
+    echo "cannot download $url" > "$failed"
+    fail "$(cat "$failed")"
+  fi
+  got=$(sha256sum "$tmp" | cut -d' ' -f1)
+  if [ "$got" != "$want" ]; then
+    echo "$url has sha256 $got, bin/nexthop.sha256 expects $want" > "$failed"
+    fail "$(cat "$failed")"
+  fi
+  chmod 755 "$tmp"
+  mv "$tmp" "$exe"
+  trap - EXIT
+  rm -f "$failed"
+  find "$cache" -mindepth 1 -maxdepth 1 ! -name "$want" -mtime +1 -exec rm -rf {} +
+}
+
+if [ ! -x "$exe" ]; then
+  mkdir -p -m 700 "$cache"
+  exec 9<"$cache"
+  flock 9
+  [ -x "$exe" ] || fetch
+  exec 9>&-
+fi
+exec "$exe" "$@"

@@ -67,11 +67,6 @@ Panel {
   }
 
   // ---- state files ---------------------------------------------------------
-  readonly property string stateDir: {
-    var base = Quickshell.env("XDG_STATE_HOME")
-    if (!base || base.length === 0) base = Quickshell.env("HOME") + "/.local/state"
-    return base + "/nexthop"
-  }
   // A URL, not a path: percent-encoded, so decode before it is used as a
   // filesystem path or a space in the way becomes %20 and cd fails — the
   // same form BarWidget and Service already use.
@@ -124,23 +119,12 @@ Panel {
       historyDays: setting("historyDays", 7),
       throughputWindowS: setting("throughputWindowS", 3),
     }
-    // Written atomically via mkstemp + rename — the same discipline the
-    // daemon's own writers use. A shell redirection here would be a
-    // truncating, symlink-following write at a predictable path: exactly
-    // the class the security review flagged on the lock file.
-    configWriter.command = ["python3", "-c",
-      "import os, sys, tempfile\n" +
-      "d = sys.argv[2]\n" +
-      "os.makedirs(d, mode=0o700, exist_ok=True)\n" +
-      "fd, tmp = tempfile.mkstemp(dir=d)\n" +
-      "try:\n" +
-      "    os.write(fd, sys.argv[1].encode())\n" +
-      "    os.close(fd)\n" +
-      "    os.replace(tmp, os.path.join(d, 'config.json'))\n" +
-      "except BaseException:\n" +
-      "    os.unlink(tmp)\n" +
-      "    raise\n",
-      JSON.stringify(cfg), stateDir]
+    // Written atomically (temp file + rename) by `nexthop save-config`: a
+    // shell redirection here would be a truncating, symlink-following write
+    // at a predictable path.
+    configWriter.command = ["sh", "-c",
+      'cd "$1" && exec ./bin/nexthop save-config "$2"',
+      "sh", pluginDir, JSON.stringify(cfg)]
     configWriter.running = true
   }
 
@@ -156,7 +140,7 @@ Panel {
     historyWindow = window
     historyLoading = true
     historyProc.command = ["sh", "-c",
-      "cd \"$1\" && exec python3 -m nexthopd.cli query --window \"$2\"",
+      "cd \"$1\" && exec ./bin/nexthop query --window \"$2\"",
       "sh", pluginDir, window]
     historyProc.running = true
   }
@@ -175,7 +159,7 @@ Panel {
   property var testsData: null
   function requestTests() {
     testsProc.command = ["sh", "-c",
-      "cd \"$1\" && exec python3 -m nexthopd.cli tests --limit 24",
+      "cd \"$1\" && exec ./bin/nexthop tests --limit 24",
       "sh", pluginDir]
     testsProc.running = true
   }
@@ -190,7 +174,7 @@ Panel {
   property var eventsData: null
   function requestEvents(window) {
     eventsProc.command = ["sh", "-c",
-      "cd \"$1\" && exec python3 -m nexthopd.cli events --window \"$2\"",
+      "cd \"$1\" && exec ./bin/nexthop events --window \"$2\"",
       "sh", pluginDir, window || "7d"]
     eventsProc.running = true
   }
@@ -230,14 +214,14 @@ Panel {
     peakArmed = false
     peakDisarm.stop()
     peakProc.command = ["sh", "-c",
-      "cd \"$1\" && exec python3 -m nexthopd.cli peak", "sh", pluginDir]
+      "cd \"$1\" && exec ./bin/nexthop peak", "sh", pluginDir]
     peakProc.running = true
   }
   Process { id: peakProc }
 
   function copyReport(window) {
     reportProc.command = ["sh", "-c",
-      "cd \"$1\" && python3 -m nexthopd.cli report --window \"$2\" | wl-copy",
+      "cd \"$1\" && ./bin/nexthop report --window \"$2\" | wl-copy",
       "sh", pluginDir, window || "24h"]
     reportProc.running = true
   }

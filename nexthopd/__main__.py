@@ -1,5 +1,6 @@
-"""`python3 -m nexthopd` runs the daemon; the CLI lives at nexthopd.cli."""
-import sys
-from .daemon import main
+# TODO: fc 17oct26 0.2.71 shells and systemd units run python3 -m nexthopd; remove once those installs have updated
+import os
+from pathlib import Path
 
-sys.exit(main())
+launcher = str(Path(__file__).resolve().parent.parent / "bin" / "nexthop")
+os.execv(launcher, [launcher, "daemon"])

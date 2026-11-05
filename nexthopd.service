@@ -27,7 +27,7 @@ Description=Nexthop internet quality monitor daemon
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 -m nexthopd
+ExecStart=@PLUGIN_DIR@/bin/nexthop daemon
 WorkingDirectory=@PLUGIN_DIR@
 Restart=always
 RestartPreventExitStatus=3
@@ -37,8 +37,8 @@ MemoryMax=256M
 
 # Containment, limited to what the daemon can live inside. Each line below
 # was exercised: a second daemon ran under this exact set against its own
-# state and runtime dirs and measured everything — both probe kinds, iw,
-# nmcli, ss with socket owners, the reachability curl.
+# state and runtime dirs and measured everything — both probe kinds,
+# nl80211, nmcli, sock_diag with socket owners, the reachability curl.
 NoNewPrivileges=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes

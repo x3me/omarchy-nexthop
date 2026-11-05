@@ -81,7 +81,7 @@ Item {
     id: versionStream
     running: true
     command: ["sh", "-c",
-              'cd "$1" && exec python3 -m nexthopd.cli stream manifest live --interval 2',
+              'cd "$1" && exec ./bin/nexthop stream manifest live --interval 2',
               "sh", root.pluginDir]
     stdout: SplitParser {
       splitMarker: "\n"
@@ -133,13 +133,11 @@ Item {
     if (pid === lastRetiredPid) return
     lastRetiredPid = pid
     // Authorizing the signal is `nexthop retire`'s job, not a shell
-    // one-liner's: it must belong to this user, its argv must be exactly a
-    // python interpreter running `-m nexthopd`, and its start time must
-    // match the one the daemon published — a recycled pid can share a
-    // number, never a start time. Doing it in Python makes those three
-    // checks testable, which the one-liner never was.
+    // one-liner's: it must belong to this user, its argv must be exactly
+    // `nexthop daemon`, and its start time must match the one the daemon
+    // published — a recycled pid can share a number, never a start time.
     retireProc.command = ["sh", "-c",
-      'cd "$1" && exec python3 -m nexthopd.cli retire --pid "$2" --start "$3"',
+      'cd "$1" && exec ./bin/nexthop retire --pid "$2" --start "$3"',
       "sh", root.pluginDir, String(pid), String(startTicks)]
     retireProc.running = true
     respawnTimer.restart()
@@ -160,7 +158,7 @@ Item {
 
   Process {
     id: daemon
-    command: ["sh", "-c", 'cd "$1" && exec python3 -m nexthopd',
+    command: ["sh", "-c", 'cd "$1" && exec ./bin/nexthop daemon',
               "sh", root.pluginDir]
     running: true
 

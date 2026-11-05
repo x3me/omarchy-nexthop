@@ -1,0 +1,17 @@
+#!/bin/sh
+# Builds dist/nexthop-x86_64 in a pinned image, so the same commit gives the same bytes on any host.
+set -eu
+IMAGE=docker.io/library/rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa
+cd "$(dirname "$0")/.."
+
+if [ "${1:-}" != --inside ]; then
+  exec docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/source" -w /source "$IMAGE" sh scripts/build-binary --inside
+fi
+
+export RUSTUP_TOOLCHAIN=1.99.0 CARGO_HOME=/tmp/cargo-home CARGO_TARGET_DIR=/tmp/target CARGO_INCREMENTAL=0 SOURCE_DATE_EPOCH=0
+export RUSTFLAGS="--remap-path-prefix=/tmp/cargo-home=/cargo --remap-path-prefix=/source=/source"
+export CFLAGS="-ffile-prefix-map=/tmp/cargo-home=/cargo"
+cargo build --release --locked
+mkdir -p dist
+install -m 755 /tmp/target/release/nexthop dist/nexthop-x86_64
+cd dist && sha256sum nexthop-x86_64

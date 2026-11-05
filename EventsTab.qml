@@ -17,11 +17,11 @@ Column {
   Component.onCompleted: {
     panel.requestEvents("24h")
     ribbonProc.command = ["sh", "-c",
-      "cd \"$1\" && exec python3 -m nexthopd.cli query --window 24h --resolution minute",
+      "cd \"$1\" && exec ./bin/nexthop query --window 24h --resolution minute",
       "sh", panel.pluginDir]
     ribbonProc.running = true
     weekProc.command = ["sh", "-c",
-      "cd \"$1\" && exec python3 -m nexthopd.cli query --window 7d",
+      "cd \"$1\" && exec ./bin/nexthop query --window 7d",
       "sh", panel.pluginDir]
     weekProc.running = true
   }

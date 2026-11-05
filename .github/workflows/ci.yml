@@ -3,20 +3,24 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install
       - name: Unit tests
+        run: cargo test --locked
+      - name: Lints
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Front-end tests (QML helpers run in node)
         run: python3 -m unittest discover -s test -v
       - name: Manifest is valid JSON
-        run: python3 -c "import json; json.load(open('manifest.json'))"
-      - name: Daemon imports on stdlib alone
-        run: python3 -c "import nexthopd.daemon, nexthopd.cli, nexthopd.speedtest"
+        run: jq empty manifest.json
       # The shell's own manifest rules, the same script `omarchy plugin
       # validate` runs. bash and jq are all it needs. Pinned to a commit so
       # a run is reproducible; bump the SHA when upstream changes the rules:
@@ -26,3 +30,59 @@ jobs:
           curl -fsSL --proto '=https' -o /tmp/omarchy-plugin-validate \
             https://raw.githubusercontent.com/omacom/omarchy/f8835df6449c5349ad96fd75e338b2280bb8e0f8/bin/omarchy-plugin-validate
           bash /tmp/omarchy-plugin-validate .
+
+  # bin/nexthop downloads the release binary only if it matches bin/nexthop.sha256; this proves the source builds to it.
+  binary:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build in the pinned image
+        run: scripts/build-binary
+      - name: The build matches bin/nexthop.sha256
+        run: cd dist && sha256sum -c ../bin/nexthop.sha256
+      - name: Keep the build, and its checksum for when the check above fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nexthop-x86_64
+          path: dist/nexthop-x86_64
+
+  # omarchy plugin update follows the default branch, so it must only pin a binary that is already published.
+  published:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The release of this version exists and matches bin/nexthop.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$(jq -r .version manifest.json)" -p nexthop-x86_64 -D dist
+          cd dist && sha256sum -c ../bin/nexthop.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, binary]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag is the manifest version
+        run: test "${GITHUB_REF_NAME}" = "v$(jq -r .version manifest.json)"
+      - name: Build in the pinned image
+        run: scripts/build-binary
+      - name: The build matches bin/nexthop.sha256
+        run: cd dist && sha256sum -c ../bin/nexthop.sha256
+      # A tag moved to a rebuilt commit replaces the asset of its existing release.
+      - name: Publish the binary on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/nexthop-x86_64 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/nexthop-x86_64 --verify-tag \
+              --title "$GITHUB_REF_NAME (Rust daemon)" \
+              --notes "Nexthop with its daemon rewritten in Rust. bin/nexthop downloads nexthop-x86_64 and runs it only if it matches bin/nexthop.sha256 at this tag."
+          fi

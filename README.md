@@ -31,8 +31,9 @@ the router owns the problem.
 
 - **No root, ever.** No sudo, no capabilities, no packet capture. It runs
   as your user and reads what any process may read.
-- **You won't feel it.** About 3 % of one CPU core and ~30 MB of memory —
-  no fan, no stutter, nothing competing with your work.
+- **You won't feel it.** About 1.5 % of one CPU core and ~7 MB of memory,
+  daemon and the shell's readers together — no fan, no stutter, nothing
+  competing with your work.
 - **It doesn't clog your line.** The probes are pings and payload-free
   handshakes and add up to a few MB an hour; the hourly speed check is
   up to about 40 MB on a fast line and a fraction of that on a slower one,
@@ -40,11 +41,12 @@ the router owns the problem.
   unless you press the button.
 - **Private by construction.** Everything it measures stays on your machine
   — no account, no cloud, no telemetry. Even your own IP is shown masked, so
-  a screenshot of the panel is safe to post. The one thing it asks the
-  outside world is whether a newer version exists: once a day it asks the
-  repository you installed from, sends nothing about you, and shows a small
-  marker if so. Turn that off in the panel's Setup tab (the cog) and it
-  asks nothing.
+  a screenshot of the panel is safe to post. It talks to the repository
+  you installed from for two things only, and sends nothing about you: once
+  per installed version it downloads its own binary from that repository's
+  release, and once a day it asks whether a newer version exists, showing a
+  small marker if so. Turn the daily check off in the panel's Setup tab
+  (the cog).
 
 ## Made for Omarchy
 
@@ -61,10 +63,16 @@ launch.
 omarchy plugin add https://github.com/x3me/omarchy-nexthop.git --enable
 ```
 
-Requirements: `python3`, `ping`, `curl`, `ss`, `ip` and `git` (all present on
-a stock Omarchy; `git` only serves the daily update check), `iw` for Wi-Fi
-detail, `wl-copy` for Copy report, optionally `nmcli` for the metered flag
-and `speedtest` (Ookla) for peak tests.
+The daemon is a single x86-64 binary with SQLite built in, published on
+each release rather than kept in git, so a clone stays small. On its first
+start after an install or update, `bin/nexthop` downloads the binary for
+this version from the release of the repository you installed from, and
+keeps it in `~/.cache/nexthop` only if it matches the SHA-256 in
+`bin/nexthop.sha256`; CI rebuilds it from the source in a pinned image and
+fails unless that checksum matches (`scripts/build-binary`). Requirements:
+`curl`, `git` and `jq` (all present on a stock Omarchy), `wl-copy` for Copy
+report, optionally `nmcli` for the metered flag and `speedtest` (Ookla) for
+peak tests.
 
 | Latency, by leg | Speed |
 |---|---|
@@ -188,9 +196,10 @@ to use their address.
   end up on forums. Asked of `speed.cloudflare.com`, a host the daemon
   already talks to; shown live, never written to history.
 - **Per-application traffic** — top apps by TCP connection counters
-  (`ss -tinp`, no root, no packet capture), each with a one-minute history
-  strip and session totals. What Linux won't attribute without privileges
-  (QUIC/UDP, overhead) is shown as its own bucket rather than hidden.
+  (the kernel's sock_diag, which `ss -tinp` reads too; no root, no packet
+  capture), each with a one-minute history strip and session totals. What
+  Linux won't attribute without privileges (QUIC/UDP, overhead) is shown as
+  its own bucket rather than hidden.
 - **Outage detection** with a notification once an outage has lasted a few
   seconds and one when it clears — naming the leg that failed. Brief
   self-healed interruptions are logged, never notified. A wan outage needs the
@@ -225,9 +234,10 @@ to use their address.
 ## How it works
 
 The QML plugin is a thin reader. All measurement lives in **nexthopd**, a
-Python 3 daemon (standard library only, no pip), spawned and supervised by
-the plugin's shell service. Five files are the whole contract — four the
-daemon writes, one the panel writes for it:
+Rust daemon (`nexthop daemon`) that reads routes, Wi-Fi state, link events
+and sockets from the kernel over netlink instead of spawning `ip`, `iw` and
+`ss`, spawned and supervised by the plugin's shell service. Five files are
+the whole contract — four the daemon writes, one the panel writes for it:
 
 | file | cadence | consumer |
 |---|---|---|
@@ -247,7 +257,10 @@ theme change.
 To keep monitoring while the shell is down, install the optional
 systemd unit (see the comments in [`nexthopd.service`](nexthopd.service),
 which also confines the daemon with the systemd sandboxing it can live inside);
-the daemon holds a lock, so the shell service simply attaches.
+the daemon holds a lock, so the shell service simply attaches. A unit
+installed before 0.2.72 still starts the Python daemon, which no longer
+exists: run the `sed` from the unit's comments again, then
+`systemctl --user daemon-reload && systemctl --user restart nexthopd`.
 
 ### What it talks to, and what that costs
 
@@ -283,7 +296,8 @@ bar widget, or via IPC.
 
 **Privileges: none.** No sudo, no capabilities, no packet capture. The
 daemon runs as your user; everything it reads is world-readable (`/sys`
-counters and link types, `ping`, `iw`, `ss`, `ip route`).
+counters and link types, unprivileged ping sockets, nl80211, sock_diag and
+rtnetlink, the same sources `ping`, `iw`, `ss` and `ip route` read).
 
 ## Remove
 
@@ -299,9 +313,22 @@ remove `~/.config/systemd/user/nexthopd.service`.
 ## Development
 
 ```bash
-python3 -m unittest discover -s test    # fixtures recorded from real hardware
-python3 -m nexthopd                     # run the daemon in the foreground
+cargo test                              # fixtures recorded from real hardware
+cargo run --release -- daemon           # run the daemon in the foreground
+cargo test --release -- --ignored       # live checks on this machine
+scripts/build-binary                    # dist/nexthop-x86_64 and its sha256 (needs docker)
+python3 -m unittest discover -s test    # the QML helpers and the launcher
 ```
+
+A release changes the binary, so it bumps the version in `manifest.json`
+and `Cargo.toml` (a test holds them equal) and pins the new checksum in
+`bin/nexthop.sha256`: CI prints the checksum it built when it does not
+match, and keeps that binary as an artifact. Push the release commit on a
+branch and tag it `v<version>`; CI publishes the binary on that release.
+Only then fast-forward the default branch, which `omarchy plugin update`
+follows; CI fails on a default branch that pins an unpublished binary. To
+run a local build through the plugin, put it at
+`~/.cache/nexthop/<sha256 in bin/nexthop.sha256>/nexthop`.
 
 Design mockups live in `design/` as the source artboards of the project's
 design canvas.
