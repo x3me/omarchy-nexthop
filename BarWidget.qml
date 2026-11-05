@@ -145,28 +145,29 @@ BarWidget {
   // panel header through barstate.js, so the two cannot drift apart again.
   readonly property string glyph: BarState.stateGlyph(netState, index)
 
-  readonly property string barText: {
-    if (netState === "no-daemon") return glyph
-    if (netState === "captive") return glyph
+  // INFO: fc 05nov26 BarIconButton shrinks its text to one glyph's box since Omarchy 4.5, so the detail goes in labelText
+  readonly property string barLabel: {
+    if (netState === "no-daemon") return ""
+    if (netState === "captive") return ""
     if (netState === "local-down" || netState === "wan-down"
         || netState === "tunnel-down") {
       var since = live && live.down_since ? live.down_since : 0
-      if (!since) return glyph
+      if (!since) return ""
       var s = Math.max(0, Math.round(Date.now() / 1000 - since))
       var m = Math.floor(s / 60)
-      return glyph + " " + (m > 0 ? m + "m" + (s % 60) + "s" : s + "s")
+      return m > 0 ? m + "m" + (s % 60) + "s" : s + "s"
     }
     if (netState === "dns-failing") {
       var began = live && live.lookups ? live.lookups.since : 0
-      if (!began) return glyph
+      if (!began) return ""
       var d = Math.max(0, Math.round(Date.now() / 1000 - began))
       var dm = Math.floor(d / 60)
-      return glyph + " " + (dm > 0 ? dm + "m" + (d % 60) + "s" : d + "s")
+      return dm > 0 ? dm + "m" + (d % 60) + "s" : d + "s"
     }
-    if (displayMode === "Icon only") return glyph
+    if (displayMode === "Icon only") return ""
     if (displayMode === "Lag")
-      return glyph + " " + (lagNow !== null ? Math.round(lagNow) + "ms" : "--")
-    return glyph + " " + (index !== null ? index : "--")
+      return lagNow !== null ? Math.round(lagNow) + "ms" : "--"
+    return index !== null ? String(index) : "--"
   }
 
   // ---- panel wiring (same shape contract as weather / vitals) --------------
@@ -228,30 +229,31 @@ BarWidget {
   // Why the width is measured here rather than left to the control:
   // BarIconButton is an *icon* button — it pins `fixedWidth` to a
   // single-glyph slot (27 px by default), so its implicitWidth is that slot
-  // no matter what text it holds. Our text is variable ("󰓅 92", "󰓅 1024ms",
-  // "󱚵 1m3s"), so the bar reserved one icon's worth of space and the text
+  // no matter what label it holds. Our label is variable ("92", "1024ms",
+  // "1m3s"), so the bar reserved one icon's worth of space and the label
   // painted straight over the neighbouring widget. Longest during an
   // outage, which is when it was noticed.
   //
-  // TextMetrics measures the string against the same font without
+  // TextMetrics measures the label against the same font without
   // rendering it, so the width can drive the slot with no binding loop
-  // back through the glyph that is being laid out.
+  // back through the label that is being laid out.
   TextMetrics {
-    id: textWidth
+    id: labelWidth
     font.family: button.fontFamily
     font.pixelSize: button.fontSize
-    text: root.barText
+    text: root.barLabel
   }
 
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barText
-    // Never narrower than a normal icon slot, so an icon-only display mode
-    // still lines up with its neighbours.
-    slotSize: Math.max(Style.bar.iconSlot,
-                       Math.ceil(textWidth.advanceWidth) + Style.space(10))
+    text: root.glyph
+    labelText: root.barLabel
+    // An icon slot, plus the label and the gap the button puts before the
+    // icon, so an icon-only display mode still lines up with its neighbours.
+    slotSize: Style.bar.iconSlot
+      + (root.barLabel !== "" ? Math.ceil(labelWidth.advanceWidth) + Style.space(4) : 0)
     foreground: root.stateColor
     useActiveColor: false
     tooltipText: {
