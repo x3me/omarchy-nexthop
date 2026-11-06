@@ -247,7 +247,12 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barText
+    // Only the glyph goes in the icon slot: OpticalGlyph scales whatever text
+    // it holds down to icon size, so "󰓅 46" rendered tiny. The figure rides
+    // in labelText at normal font size instead.
+    text: root.glyph
+    labelText: root.barText.length > root.glyph.length
+      ? root.barText.slice(root.glyph.length).trim() : ""
     // Never narrower than a normal icon slot, so an icon-only display mode
     // still lines up with its neighbours.
     slotSize: Math.max(Style.bar.iconSlot,
