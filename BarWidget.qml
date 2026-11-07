@@ -169,6 +169,10 @@ BarWidget {
     return glyph + " " + (index !== null ? index : "--")
   }
 
+  // Keep the state/timer formatting above, but paint only the glyph through
+  // OpticalGlyph: fitting the entire string into iconSize shrinks the icon.
+  readonly property string barLabel: barText.slice(glyph.length).trim()
+
   // ---- panel wiring (same shape contract as weather / vitals) --------------
   function injectPanel() {
     var target = panelLoader.item
@@ -225,33 +229,23 @@ BarWidget {
               "sh", root.pluginDir]
   }
 
-  // Why the width is measured here rather than left to the control:
-  // BarIconButton is an *icon* button — it pins `fixedWidth` to a
-  // single-glyph slot (27 px by default), so its implicitWidth is that slot
-  // no matter what text it holds. Our text is variable ("󰓅 92", "󰓅 1024ms",
-  // "󱚵 1m3s"), so the bar reserved one icon's worth of space and the text
-  // painted straight over the neighbouring widget. Longest during an
-  // outage, which is when it was noticed.
-  //
-  // TextMetrics measures the string against the same font without
-  // rendering it, so the width can drive the slot with no binding loop
-  // back through the glyph that is being laid out.
-  TextMetrics {
-    id: textWidth
-    font.family: button.fontFamily
-    font.pixelSize: button.fontSize
-    text: root.barText
-  }
-
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barText
+    // The visible row below owns the glyph and detail independently. A
+    // transparent icon keeps the button's visual-content contract intact.
+    iconComponent: Component {
+      Rectangle {
+        width: button.iconSize
+        height: button.iconSize
+        color: "transparent"
+      }
+    }
     // Never narrower than a normal icon slot, so an icon-only display mode
     // still lines up with its neighbours.
     slotSize: Math.max(Style.bar.iconSlot,
-                       Math.ceil(textWidth.advanceWidth) + Style.space(10))
+                       Math.ceil(barContent.implicitWidth) + Style.space(10))
     foreground: root.stateColor
     useActiveColor: false
     tooltipText: {
@@ -267,6 +261,34 @@ BarWidget {
                    + (l.vpn ? "tunnel " : "wan ") + l.wan.p50 + " ms")
       if (l.vpn) parts.push("via VPN " + l.vpn.iface)
       return parts.filter(function(p) { return p && p.length }).join("\n")
+    }
+
+    Row {
+      id: barContent
+      anchors.centerIn: parent
+      spacing: Style.space(4)
+      scale: button.pressScale
+
+      OpticalGlyph {
+        width: Style.bar.iconCanvas
+        height: Style.bar.iconCanvas
+        text: root.glyph
+        fontFamily: button.fontFamily
+        fontSize: button.fontSize
+        paintedSize: Style.bar.iconSize
+        color: button.foreground
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: text !== ""
+        textFormat: Text.PlainText
+        text: root.barLabel
+        font.family: button.fontFamily
+        font.pixelSize: button.fontSize
+        color: button.foreground
+        renderType: Text.NativeRendering
+      }
     }
 
     onPressed: function(b) {
